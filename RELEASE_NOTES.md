@@ -1,0 +1,306 @@
+# Release notes
+
+## 1.4.0 — 2026-08-27
+
+Shado 1.4 adds per-module draw ownership for variant supermeshes, so a model
+that ships every equipment variant as a submesh can draw only the variants its
+actors actually wear.
+
+- Added `splitMeshesIntoModules`, which regroups a variant supermesh into one
+  merged mesh per group. It carries arbitrary custom vertex streams across the
+  merge through `preserveAttributes` (Babylon's `MergeMeshes` rebuilds vertex
+  data through `VertexData.ExtractFromMesh` and silently drops anything that is
+  not one of its own vertex kinds), and repairs the winding of a reflected
+  single-mesh group. Returning a constant group key collapses the split back to
+  the original supermesh, which makes the migration landable in two steps.
+- Added `repairSingleSourceMergeWinding` for callers that merge by hand.
+  `MergeMeshes` reverses a reflected source's winding for its root mesh only
+  inside the branch that resizes the index buffer for the meshes being
+  appended, so a group of exactly one mesh keeps the wrong winding. It is
+  invisible while a whole model merges as one supermesh and appears the moment
+  a split produces a single-submesh module, reading as inside-out and unlit.
+- Added `ShadoModuleDrawSet`, which gives each module its own compact actor
+  list over one shared arena. It preserves the culler's ordering, suppresses
+  the GPU upload for buckets that came out element-wise unchanged, switches
+  empty modules off so they also leave the GPU picking pass, fans thin
+  instances across every module so counts stay aligned with the arena, and
+  reports `submittedVertices` / `baselineVertices` / `vertexWorkReduction`.
+  Materials stay the application's: a module needs its own material because its
+  index list is a per-draw binding that lives in the material's WebGPU draw
+  context.
+- Fixed `getVarArrayCount` under-reporting the length of every var-array whose
+  float stride is even. The stride was read as `floatStride | 1`, which looks
+  like a "default to 1" guard but is a bitwise OR: a `vec4` array reported 4/5
+  of its real element count. The consequence is silent data loss rather than a
+  wrong number, because `writeVarArrayRange` compares the write against that
+  count, concludes the array is too short, and calls `resizeVarArray` - which
+  shrinks `lenF` and zero-fills everything above it. Writing past 80% of a
+  `vec4` array therefore wiped its tail. It reads as correct data for the first
+  four fifths of the actors and zeros for the rest, so on an appearance array
+  it shows up as a fraction of the crowd rendering untextured or black, with
+  no error anywhere. Anyone using `arrayOf: 'vec4'` (or any other even stride)
+  past 80% occupancy was affected.
+- Fixed `DataTexBacking` orphaning material bindings. `bindMaterial` seeded a
+  material with the buffer texture current at that moment, but growing the
+  arena disposes and recreates that texture, leaving every material seeded
+  earlier holding a disposed one. Babylon's `Material.isReady()` rejects a
+  material whose textures are not ready, so those materials never became ready
+  and never drew, with no shader error to point at. Seeded materials are now
+  tracked and rebound after the texture is replaced. This affected WebGL2
+  data-texture consumers only; the WebGPU storage backing has no such texture.
+- Typed the module API structurally through `ShadoModuleMesh` rather than
+  naming Babylon's `Mesh`. A consumer resolves `@babylonjs/core` from its own
+  node_modules and TypeScript compares those class types nominally, so a
+  published signature naming `Mesh` rejects the caller's own meshes whenever the
+  two installs are distinct copies.
+- Added `SUPERMESH_MODULE_MIGRATION.md`, a step-by-step migration guide written
+  for coding agents, and `src/showcase/ShadoSupermeshModuleDemo.ts`, a runnable
+  end-to-end slice that builds a wardrobe, migrates it, and reports the work
+  reduction.
+- Added the sandbox `/hum-wardrobe` page, which runs the pattern on a real
+  43-submesh Ryzom-derived humanoid rather than a synthetic wardrobe: two
+  bodies, per-piece variant and dye selection, per-actor clips and phases, and
+  crowds up to 10,000. Its overlay reports actors, draw calls, populated
+  modules and submitted-vs-baseline vertices together, so the claim that draw
+  count is independent of instance count is checked on screen rather than
+  asserted - 256 actors and 10,000 actors both draw 17 times.
+
+Reference migration: a humanoid wardrobe of 43 submeshes and 17 variants across
+7 body pieces went from 9,406 vertices skinned per drawn actor to 3,762, a
+2.50x reduction in submitted vertex work with no change to the actor arena,
+visibility pass, appearance array, or skeleton.
+
+## 1.2.0 — 2026-07-30
+
+Shado 1.2 focuses on instance-scale bandwidth, bounded residency, and measured
+WebGPU execution while preserving the 1.x actor and renderer contracts.
+
+- Added renderer-neutral actor projection streams with split transform and
+  appearance storage, optional 16-byte quantized transforms, packed color,
+  dirty-index synchronization, shape-aware upload plans, and adaptive direct,
+  compute-scatter, or full-buffer publication.
+- Added production WebGPU compute scatter to the full Babylon.js and Babylon
+  Lite pipelines. Scatter batches follow changed struct spans instead of
+  copying whole instance rows, share one WGSL ABI across renderers, and expose
+  timestamp-query pipeline timing for benchmark validation.
+- Improved high-count CPU behavior with bulk instance reservation/addition,
+  structure-of-arrays visibility sidecars, compact visible-index publication,
+  and worker/WASM culling paths that avoid recurring main-thread actor walks.
+  Reserved sidecars now refresh after actor-arena WASM growth, preventing
+  detached dirty/visibility views and partial batches near one million actors.
+  WebGL2 retains the established data-texture/direct-upload fallback after the
+  WebGPU optimization decision.
+- Added `@knervous/shado/render-data` and `@knervous/shado/storage` package
+  entry points. `DeferredStorageSlabStore` provides fixed-stride, bounded OPFS
+  working-set slabs, explicit leases, predictive prefetch, sparse dirty-page
+  snapshots, batched writeback, one durability sync, and direct
+  `SharedArrayBuffer` mapping when cross-origin isolated.
+- Added one-million live and five-million cold-backed integration gates that
+  combine packed GPU transforms, cell-first WASM visibility, compact IDs, and
+  a real half-float dual-quaternion VAT draw. The promoted 5M/1M-hot/8k-visible
+  run sustained 60.03 FPS with 11.47 ms frame-work p95, 9.67 ms VAT GPU p95,
+  and zero OPFS operations during measured frames.
+- Added the OPFS cold-tier option to both sandbox renderer paths. Its 20k hot
+  cap routes population overflow to quantized cold rows, reports
+  visible/hot/cold/total and logical/mapped bytes independently, and provides
+  an interactive five-million-actor action without allocating five million JS
+  actor objects.
+- Made the shared showcase controls mobile responsive with a closable bottom
+  drawer, Crowd/Selected tabs, touch-sized controls, iOS-safe form fields,
+  responsive renderer navigation, and mobile layouts for the world editor and
+  lean-pass controls.
+- Preserved the published 1.x `ShadoActor` field layout, legacy showcase
+  aliases, renderer-neutral Lite boundary, no-argument include registration,
+  and protected child-index behavior.
+- Validated 1.2.0 with 175 Jest behavior tests and 18 Chromium integration
+  scenarios, including real OPFS persistence, full/Lite shaped scatter,
+  sparse projected publication, VAT compilation, 100k worker visibility, 1M
+  live rendering, 5M cold backing, and mobile control behavior.
+
+No migration is required for existing 1.x consumers. WebGPU applications can
+adopt projected/scatter pipelines incrementally; WebGL2 behavior is unchanged.
+OPFS remains a deferred cold tier and requires application-owned spatial
+indexing and promotion policy before cold rows enter simulation or rendering.
+
+## 1.1.0 — 2026-07-29
+
+- Added a renderer-neutral core and adapter boundary with explicit
+  `@knervous/shado/core`, `@knervous/shado/renderer`, and
+  `@knervous/shado/lite` entry points. The typed renderer gate dynamically
+  selects Babylon Lite or full Babylon.js without eagerly loading both
+  renderer graphs.
+- Added the native Babylon Lite WebGPU path, including packed storage buffers,
+  shader registration, thin-instance containers, and VAT materials built only
+  on public Lite APIs.
+- Moved per-instance visibility, compact visible indices, dirty state, and
+  culling data into structure-of-arrays sidecars. Storage-buffer and
+  data-texture uploads now scale with dirty pages and visible instances without
+  replacing `Mesh.render` or invoking private draw methods.
+- Added the world packaging and runtime APIs: spatial compilation, compressed
+  artifacts, collision acceleration data, authored regions and portals,
+  lighting plans, validation, visibility reducers, worker culling, and the
+  `shado pack world` CLI workflow.
+- Added world authoring and runtime examples to the sandbox, including the
+  region editor, streamed render chunks, object rendering, collision queries,
+  lighting plans, and 10k/20k/100k visibility scenarios.
+- Hardened WebGPU uploads and shaders for padded layouts, packed float values,
+  visibility indirection, VAT sampling, and MSDF nameplates. Native
+  thin-instance accessors now preserve decorated fields and synchronize hosted
+  visibility state.
+- Improved compressed runtime fetch validation and model/world preprocessing,
+  including clear failures for HTML fallbacks or invalid gzip payloads.
+- Preserved the 1.0 public surface while widening renderer support. Legacy
+  showcase UI aliases, the protected struct index map, no-argument shader
+  include registration, and the published `ShadoActor` packed layout remain
+  available.
+- Validated the release with 138 Jest tests, nine Chromium browser scenarios,
+  declaration/API comparison against published 1.0.5, package and sandbox
+  production builds, clean installs, and packed-package checks.
+
+## 1.0.4 — 2026-07-20
+
+- Replaced showcase shader source rewriting with typed, named
+  `ShadoInstanceGLSLHooks`. Armor, weapon filtering, and custom actor material
+  behavior now compose through dedicated shader strategies. The five-module
+  Playground demonstrates decorated packed actor classes, published controls,
+  container specialization, shader extension, application wiring, and UI. Its
+  schema registrations use the decorators' callable form so Babylon
+  Playground can parse them without experimental decorator support.
+- Reworked the online Babylon Playground into a commented developer
+  integration example with explicit scene, asset, worker, nameplate, controller,
+  UI, public-command, and disposal setup. Added product-neutral
+  `createShadoVatShowcase*` API aliases and kept the local sandbox on that same
+  public path.
+- Bridged the npm and global Babylon shader stores before showcase
+  initialization. Dynamically generated actor and MSDF shaders now compile in
+  Babylon Playground instead of producing repeated `src/Shaders/*.fx` 404s.
+- Made instance picking follow the transformed bounds of the displayed mesh
+  instead of a fixed sphere at the actor root. Canonical Babylon assets such as
+  Dude and HVGirl remain targetable after large native-unit normalization.
+- Fixed WebGPU validation when rendering armor-enabled VAT pools. Shado now
+  activates Babylon's `DrawWrapper` instead of a raw effect and compacts atlas
+  page, weapon variant, and four armor layers into one vertex metadata stream,
+  keeping both four- and eight-weight rigs within WebGPU's eight-buffer floor.
+- Reworked the shared sandbox/Playground overlay into two full-height panels:
+  a compact Shado-first roster and a dedicated selected-instance editor. The
+  editor now uses names, named animations, playback speed, position, facing,
+  scale, and published controls instead of exposing packed quaternion, VAT,
+  glyph, and visibility internals. Selected actors receive a pulsing 3D ring.
+- Split showcase catalogs, actor/container classes, and public controller types
+  out of the runtime orchestration module so the local sandbox and online
+  Playground continue to consume one maintainable implementation.
+- Added `@shadoPublish` metadata and the `instance.published` facade for safe,
+  described public controls over packed internal fields. Friendly enum values
+  can now drive numeric GPU state, including complete EQ armor families and
+  right-hand socket weapon selection in the showcase.
+- Replaced procedural EQ armor tints with the four material families used by
+  Requiem: armorless, leather, chain, and plate. Playable-race texture arrays
+  are selected per instance while preserving a single VAT-backed draw pool.
+- Centered nameplates from their visible glyph bounds and assigned stable
+  `ModelName N` labels to canonical Babylon Playground models.
+- Corrected VAT baking for GLBs with non-identity coordinate roots: merged
+  vertices are transformed once and bone palettes are converted into the same
+  merged world-space basis in both browser and headless-worker bake paths.
+- Added solid `baseColorFactor` material support to the atlas path so dropped
+  GLBs without embedded color textures retain their authored colors.
+- Restored dual-quaternion spatial blending and kept Babylon's finalized,
+  matrix-indexed skinning palette. This prevents hierarchical limb distortion
+  on compact rigs while retaining support for GLB coordinate-root bones.
+- Multi-skin GLBs now bake the skeleton actually bound to the visible body mesh
+  instead of assuming the first skeleton in the file owns every mesh.
+- Made headless VAT baking preserve uniform animated bone scale. The worker now
+  detects required scale (including HOM's 1.6016 palette scale), emits the
+  scale texel, and rejects anisotropic rigs that rigid DQ cannot represent.
+- Scale validation now uses a relative anisotropy tolerance and also runs for
+  dropped GLBs. Large uniformly-scaled Blender rigs such as HVGirl (~100x) no
+  longer lose scale or fail because of sub-0.01% floating-point axis drift.
+
+- Added a shared animated-GLB drop zone to the sandbox and Babylon Playground
+  overlay. Dropped files are validated, auto-scaled, animation-filtered,
+  headlessly VAT-baked, and registered as normal roster pools with culling,
+  shuffling, random instances, and MSDF nameplates.
+- Renamed the published package and all consumer imports to the scoped npm
+  package `@knervous/shado`. The `shado` CLI name is unchanged.
+- Added responsive runtime VAT baking with an inline Web Worker and bundled
+  scalar, SIMD128, and relaxed-SIMD AssemblyScript/WASM
+  matrix-to-dual-quaternion packing kernels. Runtime validation automatically
+  falls back through the compatible tiers.
+- Added a fully headless Babylon `NullEngine` bake worker so GLB loading,
+  skeleton sampling, and atlas packing can run concurrently without rendering
+  intermediate frames or submitting commands to the visible WebGPU scene.
+- Added separately-authored head geometry to the roster bake input and kept
+  fantasy nameplates stable while animation clips are shuffled.
+- Added a rigid-rig fast path that skips the scale-detection sampling pass and
+  reduced per-frame Babylon allocations during skeleton capture.
+- Added a shared Shado roster showcase for the local Vite sandbox and Babylon
+  Playground, including 26 playable-race variants, four NPCs, deterministic
+  fantasy names, armor tint permutations, textured terrain, and a panoramic
+  procedural sky.
+- Added numerical parity coverage between the WASM kernel and Babylon matrix
+  decomposition for translated and compound-rotated transforms.
+- Fixed padded struct-array strides in generated AssemblyScript. The showcase
+  actor is 192 bytes in both the TypeScript arena and SIMD culling kernel, so
+  large crowds no longer corrupt transforms/animation vectors or report a
+  `NaN` visible count after baking and shuffling.
+- Updated the showcase shuffle to randomize crowd position and facing as well
+  as motion, lowered the plane by one world unit, and replaced the tiled path
+  pattern with lower-contrast procedural moss, soil, and stone terrain.
+- Corrected runtime VAT sampling to preserve Babylon's finalized skinning
+  palette, the validated DQ blend, and the animation evaluation order.
+  Ambient crowds now select anatomically safe
+  standing/locomotion clips while retaining the broader baked action library,
+  and held EQ weapon geometry is normalized to a consistent display length.
+
+## 1.0.0 — 2026-07-18
+
+Shado reaches its first stable major release. Version 1.0 formalizes
+the packed schema/arena API and includes the Babylon rendering and asset
+preprocessing work that had accumulated during the 0.x prototypes.
+
+### Highlights
+
+- Packed GPU structs shared by TypeScript, shader layouts, and optional
+  AssemblyScript reducers.
+- Data-texture and storage backing support for Babylon.js.
+- DQ/VAT actor instancing with pre-baked float16 and float32 animation data.
+- Lean dynamic-entity rendering with batched updates, motion, culling, sorting,
+  expiration, picking, and texture atlases.
+- Browser-safe loading of compressed model, VAT, shader, and WASM artifacts.
+- MSDF nameplate data and rendering helpers.
+- A preprocessing CLI for models, wrappers, manifests, shaders, and reducers.
+- Babylon.js 9 peer support with WebGL and WebGPU sandbox coverage.
+- Node 24 and Apple Silicon installs no longer pull in the unused native
+  `headless-gl`/ANGLE toolchain; GPU validation runs in the Babylon browser
+  sandbox where the production WebGL/WebGPU paths are available.
+
+### Breaking changes from 0.7.x
+
+- The canonical npm package and import specifier is `@knervous/shado`.
+- Consumers should import optional features from explicit subpaths such as
+  `@knervous/shado/render`, `@knervous/shado/msdf`, and
+  `@knervous/shado/preprocess/runtime`.
+- Treat exported binary layouts, manifest version 1, and public entry points as
+  the 1.x compatibility baseline. Internal source paths remain unsupported.
+
+The CLI executable remains `shado` for concise command lines and existing
+automation compatibility.
+
+### Sandbox audit
+
+The sandbox covers the current feature set: Babylon.js 9, WebGL/WebGPU backend
+selection, packed model loading, float16/float32 DQ VAT, optional precompiled
+WASM, frustum culling, asynchronous picking, MSDF nameplates, and lean entity
+rendering. Its local dependency now uses the canonical package name and
+preserves the package symlink so the app and source share one Babylon instance.
+
+### Release checklist
+
+1. Use a supported Node LTS release.
+2. Run `npm ci`, `npm run typecheck`, `npm test`, and `npm run build`.
+3. Run `npm ci && npm run build` in `sandbox/`.
+4. Run `npm run pack:check` and inspect the archive before publishing.
+5. Publish with `npm publish` from this directory.
+
+Declaration generation is pinned to TypeScript 5.7 because the declaration
+plugin bundled by the current `tsup` release is not yet compatible with
+TypeScript 7. This pin also keeps release builds working on Node 24.

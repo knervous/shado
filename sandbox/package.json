@@ -1,0 +1,51 @@
+{
+  "name": "sandbox",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "prebuild": "npm --prefix .. run build && npm --prefix .. run build:vat-bake-worker",
+    "build": "tsc -b && vite build",
+    "start": "vite",
+    "lint": "oxlint src --tsconfig tsconfig.app.json --react-plugin --import-plugin --deny-warnings --report-unused-disable-directives",
+    "sync:supermesh": "node scripts/sync-supermesh-assets.mjs",
+    "build:supermesh-svat": "npm --prefix .. run build && node scripts/build-supermesh-svat.mjs",
+    "benchmark:supermesh-residency": "node --expose-gc scripts/benchmark-supermesh-residency.mjs",
+    "benchmark:hybrid-structure": "node scripts/benchmark-hybrid-structure.mjs",
+    "report:hybrid-preskin": "node scripts/report-hybrid-preskin.mjs",
+    "preview": "vite preview",
+    "sync:ryzom": "node scripts/sync-ryzom-assets.mjs"
+  },
+  "dependencies": {
+    "@babylonjs/addons": "9.16.1",
+    "@babylonjs/core": "9.16.1",
+    "@babylonjs/gui": "9.16.1",
+    "@babylonjs/gui-editor": "9.16.1",
+    "@babylonjs/inspector": "9.16.1",
+    "@babylonjs/lite": "1.14.0",
+    "@babylonjs/loaders": "9.16.1",
+    "@babylonjs/materials": "9.16.1",
+    "@babylonjs/serializers": "9.16.1",
+    "@fluentui-contrib/react-resize-handle": "^0.8.4",
+    "@fluentui-contrib/react-virtualizer": "^1.0.0",
+    "@fluentui/react-components": "^9.73.8",
+    "@fluentui/react-icons": "^2.0.325",
+    "@knervous/shado": "file:..",
+    "fantasy-name-generator": "^2.0.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "usehooks-ts": "^3.1.1"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "oxlint": "^1.75.0",
+    "typescript": "^7.0.2",
+    "vite": "^8.1.5"
+  }
+}

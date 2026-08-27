@@ -1,0 +1,105 @@
+# Node modules
+node_modules/
+
+# Build outputs
+dist/
+build/
+out/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+*.lcov
+test-results/
+playwright-report/
+
+# nyc test coverage
+.nyc_output
+
+# Dependency directories
+jspm_packages/
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Microbundle cache
+.rpt2_cache/
+.rts2_cache_cjs/
+.rts2_cache_es/
+.rts2_cache_umd/
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# dotenv environment variables file
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# parcel-bundler cache (https://parceljs.org/)
+.cache
+.parcel-cache
+
+# Next.js build output
+.next
+
+# Nuxt.js build / generate output
+.nuxt
+
+# Gatsby files
+.cache/
+public
+!sandbox/public/
+!sandbox/public/shado/
+!sandbox/public/shado/preprocessed/
+!sandbox/public/shado/preprocessed/**
+
+#
+
+# ---------------------------------------------------------------------------
+# Demo assets that are NOT redistributable from this repository.
+#
+# The sandbox loads its demo content from sandbox/public/shado/. Two corpora
+# there cannot be published: EverQuest-derived geometry (Daybreak's art) and a
+# 125 MB Ryzom source corpus that is too large to be worth carrying. Both are
+# generated locally by the private content pipeline, so they are absent from a
+# fresh clone rather than missing from it.
+#
+# Routes that need them therefore do not run from a public clone:
+#   /            and /msdf          -> shado/eq-demo
+#   /world       and /world-editor  -> shado/worlds
+#   /test                           -> shado/preprocessed
+#   /ryzom, /ryzom-actors           -> shado/ryzom (already dev-only)
+#
+# What IS published: shado/hum, shado/huf and shado/supermesh, all derived from
+# Ryzom's CC-BY-SA assets - see NOTICE.md. Those drive /hum-wardrobe and
+# /supermesh-scale, which are the routes the library is actually demonstrated by.
+sandbox/public/shado/eq-demo/
+sandbox/public/shado/worlds/
+sandbox/public/shado/preprocessed/
+sandbox/public/shado/ryzom/
+
+# Local benchmark captures
+sandbox/benchmark-results/

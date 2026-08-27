@@ -1,0 +1,263 @@
+{
+  "name": "@knervous/shado",
+  "version": "1.4.0",
+  "description": "Packed GPU struct schemas + Babylon include emitters with optional AssemblyScript kernels",
+  "license": "MIT",
+  "author": "knervous",
+  "private": false,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/knervous/shado.git"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "homepage": "https://github.com/knervous/shado#readme",
+  "bugs": "https://github.com/knervous/shado/issues",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "msdf",
+    "!**/.DS_Store",
+    "README.md",
+    "BABYLON_RENDERER_STRATEGY.md",
+    "SHADO_RENDER_DATA_SCALING.md",
+    "OPFS_DEFERRED_STORAGE_SLABS.md",
+    "RELEASE_NOTES.md",
+    "NOTICE.md",
+    "SUPERMESH_MODULE_MIGRATION.md",
+    "LICENSE"
+  ],
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs",
+      "default": "./dist/index.js"
+    },
+    "./babylon": {
+      "source": "./src/babylon/index.ts",
+      "types": "./dist/babylon/index.d.ts",
+      "import": "./dist/babylon/index.js",
+      "require": "./dist/babylon/index.cjs",
+      "default": "./dist/babylon/index.js"
+    },
+    "./core": {
+      "source": "./src/core/index.ts",
+      "types": "./dist/core/index.d.ts",
+      "import": "./dist/core/index.js",
+      "require": "./dist/core/index.cjs",
+      "default": "./dist/core/index.js"
+    },
+    "./lite": {
+      "source": "./src/lite/index.ts",
+      "types": "./dist/lite/index.d.ts",
+      "import": "./dist/lite/index.js"
+    },
+    "./renderer": {
+      "source": "./src/renderer/index.ts",
+      "types": "./dist/renderer/index.d.ts",
+      "import": "./dist/renderer/index.js",
+      "require": "./dist/renderer/index.cjs",
+      "default": "./dist/renderer/index.js"
+    },
+    "./render-data": {
+      "source": "./src/render-data/index.ts",
+      "types": "./dist/render-data/index.d.ts",
+      "import": "./dist/render-data/index.js",
+      "require": "./dist/render-data/index.cjs",
+      "default": "./dist/render-data/index.js"
+    },
+    "./storage": {
+      "source": "./src/storage/index.ts",
+      "types": "./dist/storage/index.d.ts",
+      "import": "./dist/storage/index.js",
+      "require": "./dist/storage/index.cjs",
+      "default": "./dist/storage/index.js"
+    },
+    "./showcase": {
+      "source": "./src/showcase/index.ts",
+      "types": "./dist/showcase/index.d.ts",
+      "import": "./dist/showcase/index.js",
+      "require": "./dist/showcase/index.cjs",
+      "default": "./dist/showcase/index.js"
+    },
+    "./asc": {
+      "source": "./src/asc/index.ts",
+      "types": "./dist/asc/index.d.ts",
+      "import": "./dist/asc/index.js",
+      "require": "./dist/asc/index.cjs",
+      "default": "./dist/asc/index.js"
+    },
+    "./msdf": {
+      "source": "./src/msdf/index.ts",
+      "types": "./dist/msdf/index.d.ts",
+      "import": "./dist/msdf/index.js",
+      "require": "./dist/msdf/index.cjs",
+      "default": "./dist/msdf/index.js"
+    },
+    "./render": {
+      "source": "./src/render/index.ts",
+      "types": "./dist/render/index.d.ts",
+      "import": "./dist/render/index.js",
+      "require": "./dist/render/index.cjs",
+      "default": "./dist/render/index.js"
+    },
+    "./svat": {
+      "source": "./src/svat/index.ts",
+      "types": "./dist/svat/index.d.ts",
+      "import": "./dist/svat/index.js",
+      "require": "./dist/svat/index.cjs",
+      "default": "./dist/svat/index.js"
+    },
+    "./svat/node": {
+      "source": "./src/svat/node.ts",
+      "types": "./dist/svat/node.d.ts",
+      "import": "./dist/svat/node.js",
+      "require": "./dist/svat/node.cjs",
+      "default": "./dist/svat/node.js"
+    },
+    "./preprocess": {
+      "source": "./src/preprocess/index.ts",
+      "types": "./dist/preprocess/index.d.ts",
+      "import": "./dist/preprocess/index.js",
+      "require": "./dist/preprocess/index.cjs",
+      "default": "./dist/preprocess/index.js"
+    },
+    "./preprocess/world-core": {
+      "source": "./src/preprocess/world-core.ts",
+      "types": "./dist/preprocess/world-core.d.ts",
+      "import": "./dist/preprocess/world-core.js",
+      "require": "./dist/preprocess/world-core.cjs",
+      "default": "./dist/preprocess/world-core.js"
+    },
+    "./preprocess/runtime": {
+      "source": "./src/preprocess/runtime.ts",
+      "types": "./dist/preprocess/runtime.d.ts",
+      "import": "./dist/preprocess/runtime.js",
+      "require": "./dist/preprocess/runtime.cjs",
+      "default": "./dist/preprocess/runtime.js"
+    },
+    "./world": {
+      "source": "./src/world/index.ts",
+      "types": "./dist/world/index.d.ts",
+      "import": "./dist/world/index.js",
+      "require": "./dist/world/index.cjs",
+      "default": "./dist/world/index.js"
+    }
+  },
+  "bin": {
+    "shado": "./dist/cli.js",
+    "shado-pack-model": "./dist/cli.js",
+    "shado-pack-world": "./dist/cli.js",
+    "shado-preprocess-asc": "./dist/cli.js",
+    "shado-preprocess-gpu": "./dist/cli.js",
+    "shado-preprocess-wrappers": "./dist/cli.js"
+  },
+  "peerDependencies": {
+    "@babylonjs/core": "^9.5.0",
+    "@babylonjs/lite": "^1.14.0",
+    "@babylonjs/loaders": "^9.5.0",
+    "@babylonjs/serializers": "^9.5.0",
+    "assemblyscript": "^0.28.8",
+    "binaryen": "^124.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@babylonjs/lite": {
+      "optional": true
+    },
+    "@babylonjs/loaders": {
+      "optional": true
+    },
+    "@babylonjs/serializers": {
+      "optional": true
+    },
+    "assemblyscript": {
+      "optional": true
+    },
+    "binaryen": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@babylonjs/core": "9.16.1",
+    "@babylonjs/lite": "^1.14.0",
+    "@babylonjs/loaders": "9.16.1",
+    "@jest/globals": "^30.2.0",
+    "@jridgewell/sourcemap-codec": "^1.5.0",
+    "@playwright/test": "^1.61.1",
+    "@swc/core": "^1.15.46",
+    "@swc/jest": "^0.2.39",
+    "@types/jest": "^30.0.0",
+    "@types/node": "^22.0.0",
+    "@webgpu/types": "^0.1.66",
+    "assemblyscript": "^0.28.8",
+    "binaryen": "^124.0.0",
+    "cross-env": "^10.1.0",
+    "jest": "^30.2.0",
+    "oxlint": "^1.75.0",
+    "prettier": "^3.6.2",
+    "process": "^0.11.10",
+    "rimraf": "^6.0.0",
+    "terser": "^5.44.0",
+    "tsup": "^8.5.1",
+    "typescript": "5.7.3"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "clean": "rimraf dist",
+    "typecheck": "tsc -p tsconfig.build.json --noEmit",
+    "typecheck:playground": "tsc -p playground/tsconfig.json",
+    "lint": "oxlint src --tsconfig tsconfig.json --deny-warnings --report-unused-disable-directives",
+    "lint:fix": "oxlint src --tsconfig tsconfig.json --fix",
+    "format": "prettier --write src/**/*.ts",
+    "format:check": "prettier --check src/**/*.ts",
+    "build": "tsup",
+    "build:vat-kernel": "node scripts/build-vat-kernel.mjs",
+    "build:vat-bake-worker": "npm run build:vat-kernel && node scripts/build-vat-bake-worker.mjs",
+    "build:showcase-culling": "npm run build && node scripts/build-showcase-culling-wasm.mjs",
+    "build:world-reducer": "node dist/cli.js asc build --config world/shado.config.mjs",
+    "benchmark:vat-kernel": "npm run build:vat-kernel && node scripts/benchmark-vat-kernel.mjs",
+    "benchmark:actor-projection": "npm run build && node bench/actor-projection-bench.mjs",
+    "benchmark:instance-addition": "npm run build && node bench/instance-addition-bench.mjs",
+    "benchmark:world-light-field": "npm run build && node bench/world-light-field-bench.mjs",
+    "benchmark:world-light-field-webgpu": "node bench/world-light-field-webgpu-bench.mjs",
+    "benchmark:webgpu-upload": "node bench/webgpu-upload-bench.mjs",
+    "benchmark:webgpu-scatter": "npm run build && node bench/webgpu-scatter-pipeline-bench.mjs",
+    "benchmark:lite-scatter": "npm run build && node bench/webgpu-lite-scatter-bench.mjs",
+    "benchmark:million-integration": "node bench/million-actor-integration-bench.mjs",
+    "benchmark:opfs-slabs": "npm run build && node bench/opfs-deferred-slab-bench.mjs",
+    "benchmark:five-million-opfs": "node bench/five-million-opfs-integration-bench.mjs",
+    "postbuild": "chmod +x dist/cli.js",
+    "dev": "cross-env DEV=true tsup --watch",
+    "prepublishOnly": "npm run release:check",
+    "asbuild:debug": "asb --target debug",
+    "asbuild:release": "asb --target release",
+    "asbuild": "npm run asbuild:debug && npm run asbuild:release",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js",
+    "test:browser": "npm run build && playwright test",
+    "pack:check": "npm pack --dry-run --ignore-scripts",
+    "release:check": "npm run typecheck && npm test -- --runInBand && npm run build && npm run pack:check",
+    "test:dq": "node --experimental-vm-modules node_modules/jest/bin/jest.js dq-transform",
+    "test:barbarian": "node --experimental-vm-modules node_modules/jest/bin/jest.js barbarian-integration",
+    "test:dq-shader": "node --experimental-vm-modules node_modules/jest/bin/jest.js barbarian-dq-shader",
+    "test:dq-atlas": "node --experimental-vm-modules node_modules/jest/bin/jest.js dq-atlas-debug",
+    "start": "npx serve .",
+    "preprocess:sandbox:wrappers": "npm run build && node dist/cli.js wrappers build --config sandbox/shado.config.mjs",
+    "preprocess:sandbox:manifest": "node dist/cli.js manifest models --config sandbox/shado.config.mjs",
+    "preprocess:sandbox:models": "npm run build && node dist/cli.js pack models --config sandbox/shado.config.mjs",
+    "preprocess:qey2hh1:world": "npm run build && npm run build:world-reducer && node dist/cli.js pack worlds --config world/qey2hh1.shado.config.mjs",
+    "migrate:zones": "npm run build && npm run build:world-reducer && node dist/cli.js migrate worlds"
+  },
+  "dependencies": {
+    "fantasy-name-generator": "^2.0.0",
+    "maxrects-packer": "^2.7.3"
+  }
+}

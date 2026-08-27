@@ -1,0 +1,1383 @@
+{
+  "schemaVersion": 1,
+  "model": "huf",
+  "provenance": {
+    "source": "client/public/eqrequiem/babylon/huf.babylon.gz",
+    "map": "buildWardrobe() in client/scripts/install-ryzom-humanoid.mjs",
+    "note": "Ryzom garment meshes mapped to EQ (piece, variation): civil01->00, armor00->01, armor01->02, caster01->03. Applied when the .babylon is written; the raw rig does not carry it."
+  },
+  "runtimeScale": 3.611471622400854,
+  "runtimeYawCorrection": 4.71238898038469,
+  "boundingBox": {
+    "min": [
+      -0.5426431606519347,
+      0.005112227564547378,
+      -1.7321299791446876
+    ],
+    "max": [
+      0.6880009782353017,
+      6.005112278375577,
+      1.7321298715144453
+    ],
+    "center": [
+      0.07267890879168348,
+      3.0051122529700622,
+      -5.3815121137112953e-8
+    ],
+    "yOffset": 0
+  },
+  "submeshCount": 37,
+  "submeshes": [
+    {
+      "name": "FY_HOF_armor00_pantabottes_primitive0",
+      "piece": "lg",
+      "variation": "01",
+      "texNum": "00",
+      "atlasIndex": 0
+    },
+    {
+      "name": "FY_HOF_armor00_pantabottes_primitive1",
+      "piece": "lg",
+      "variation": "01",
+      "texNum": "01",
+      "atlasIndex": 1
+    },
+    {
+      "name": "FY_HOF_armor00_gilet_primitive0",
+      "piece": "ch",
+      "variation": "01",
+      "texNum": "00",
+      "atlasIndex": 2
+    },
+    {
+      "name": "FY_HOF_armor00_gilet_primitive1",
+      "piece": "ch",
+      "variation": "01",
+      "texNum": "01",
+      "atlasIndex": 3
+    },
+    {
+      "name": "FY_HOF_armor00_bottes_primitive0",
+      "piece": "ft",
+      "variation": "01",
+      "texNum": "00",
+      "atlasIndex": 4
+    },
+    {
+      "name": "FY_HOF_armor00_bottes_primitive1",
+      "piece": "ft",
+      "variation": "01",
+      "texNum": "01",
+      "atlasIndex": 5
+    },
+    {
+      "name": "FY_HOF_armor00_bottes_primitive2",
+      "piece": "ft",
+      "variation": "01",
+      "texNum": "02",
+      "atlasIndex": 6
+    },
+    {
+      "name": "FY_HOF_armor00_armpad_primitive0",
+      "piece": "ua",
+      "variation": "01",
+      "texNum": "00",
+      "atlasIndex": 7
+    },
+    {
+      "name": "FY_HOF_armor00_armpad_primitive1",
+      "piece": "ua",
+      "variation": "01",
+      "texNum": "01",
+      "atlasIndex": 8
+    },
+    {
+      "name": "FY_HOF_armor00_hand_primitive0",
+      "piece": "hn",
+      "variation": "00",
+      "texNum": "00",
+      "atlasIndex": 9
+    },
+    {
+      "name": "FY_HOF_armor00_hand_primitive1",
+      "piece": "hn",
+      "variation": "00",
+      "texNum": "01",
+      "atlasIndex": 10
+    },
+    {
+      "name": "FY_HOF_armor01_pantabottes_primitive0",
+      "piece": "lg",
+      "variation": "02",
+      "texNum": "00",
+      "atlasIndex": 11
+    },
+    {
+      "name": "FY_HOF_armor01_pantabottes_primitive1",
+      "piece": "lg",
+      "variation": "02",
+      "texNum": "01",
+      "atlasIndex": 12
+    },
+    {
+      "name": "FY_HOF_armor01_pantabottes_primitive2",
+      "piece": "lg",
+      "variation": "02",
+      "texNum": "02",
+      "atlasIndex": 13
+    },
+    {
+      "name": "FY_HOF_armor01_bottes_primitive0",
+      "piece": "ft",
+      "variation": "02",
+      "texNum": "00",
+      "atlasIndex": 14
+    },
+    {
+      "name": "FY_HOF_armor01_bottes_primitive1",
+      "piece": "ft",
+      "variation": "02",
+      "texNum": "01",
+      "atlasIndex": 15
+    },
+    {
+      "name": "FY_HOF_armor01_gilet_primitive0",
+      "piece": "ch",
+      "variation": "02",
+      "texNum": "00",
+      "atlasIndex": 16
+    },
+    {
+      "name": "FY_HOF_armor01_gilet_primitive1",
+      "piece": "ch",
+      "variation": "02",
+      "texNum": "01",
+      "atlasIndex": 17
+    },
+    {
+      "name": "FY_HOF_armor01_gilet_primitive2",
+      "piece": "ch",
+      "variation": "02",
+      "texNum": "02",
+      "atlasIndex": 18
+    },
+    {
+      "name": "FY_HOF_armor01_armpad_primitive0",
+      "piece": "ua",
+      "variation": "02",
+      "texNum": "00",
+      "atlasIndex": 19
+    },
+    {
+      "name": "FY_HOF_armor01_armpad_primitive1",
+      "piece": "ua",
+      "variation": "02",
+      "texNum": "01",
+      "atlasIndex": 20
+    },
+    {
+      "name": "FY_HOF_armor01_hand_primitive0",
+      "piece": "hn",
+      "variation": "02",
+      "texNum": "00",
+      "atlasIndex": 21
+    },
+    {
+      "name": "FY_HOF_armor01_hand_primitive1",
+      "piece": "hn",
+      "variation": "02",
+      "texNum": "01",
+      "atlasIndex": 22
+    },
+    {
+      "name": "FY_HOF_caster01_pantabottes_primitive0",
+      "piece": "lg",
+      "variation": "03",
+      "texNum": "00",
+      "atlasIndex": 23
+    },
+    {
+      "name": "FY_HOF_caster01_pantabottes_primitive1",
+      "piece": "lg",
+      "variation": "03",
+      "texNum": "01",
+      "atlasIndex": 24
+    },
+    {
+      "name": "FY_HOF_civil01_bottes_primitive0",
+      "piece": "ft",
+      "variation": "00",
+      "texNum": "00",
+      "atlasIndex": 25
+    },
+    {
+      "name": "FY_HOF_civil01_bottes_primitive1",
+      "piece": "ft",
+      "variation": "00",
+      "texNum": "01",
+      "atlasIndex": 26
+    },
+    {
+      "name": "FY_HOF_civil01_pantabottes_primitive0",
+      "piece": "lg",
+      "variation": "00",
+      "texNum": "00",
+      "atlasIndex": 27
+    },
+    {
+      "name": "FY_HOF_civil01_pantabottes_primitive1",
+      "piece": "lg",
+      "variation": "00",
+      "texNum": "01",
+      "atlasIndex": 28
+    },
+    {
+      "name": "FY_HOF_civil01_armpad_primitive0",
+      "piece": "ua",
+      "variation": "00",
+      "texNum": "00",
+      "atlasIndex": 29
+    },
+    {
+      "name": "FY_HOF_civil01_armpad_primitive1",
+      "piece": "ua",
+      "variation": "00",
+      "texNum": "01",
+      "atlasIndex": 30
+    },
+    {
+      "name": "FY_HOF_civil01_gilet_primitive0",
+      "piece": "ch",
+      "variation": "00",
+      "texNum": "00",
+      "atlasIndex": 31
+    },
+    {
+      "name": "FY_HOF_civil01_gilet_primitive1",
+      "piece": "ch",
+      "variation": "00",
+      "texNum": "01",
+      "atlasIndex": 32
+    },
+    {
+      "name": "FY_HOF_cheveux_short01",
+      "piece": "hr",
+      "variation": "00",
+      "texNum": "00",
+      "atlasIndex": 33
+    },
+    {
+      "name": "FY_HOF_visage_primitive0",
+      "piece": "he",
+      "variation": "00",
+      "texNum": "00",
+      "atlasIndex": 34
+    },
+    {
+      "name": "FY_HOF_visage_primitive1",
+      "piece": "he",
+      "variation": "00",
+      "texNum": "01",
+      "atlasIndex": 35
+    },
+    {
+      "name": "FY_HOF_visage_primitive2",
+      "piece": "he",
+      "variation": "00",
+      "texNum": "02",
+      "atlasIndex": 36
+    }
+  ],
+  "pieces": [
+    {
+      "piece": "lg",
+      "variations": [
+        {
+          "variation": "00",
+          "submeshOrdinals": [
+            27,
+            28
+          ]
+        },
+        {
+          "variation": "01",
+          "submeshOrdinals": [
+            0,
+            1
+          ]
+        },
+        {
+          "variation": "02",
+          "submeshOrdinals": [
+            11,
+            12,
+            13
+          ]
+        },
+        {
+          "variation": "03",
+          "submeshOrdinals": [
+            23,
+            24
+          ]
+        }
+      ]
+    },
+    {
+      "piece": "ch",
+      "variations": [
+        {
+          "variation": "00",
+          "submeshOrdinals": [
+            31,
+            32
+          ]
+        },
+        {
+          "variation": "01",
+          "submeshOrdinals": [
+            2,
+            3
+          ]
+        },
+        {
+          "variation": "02",
+          "submeshOrdinals": [
+            16,
+            17,
+            18
+          ]
+        }
+      ]
+    },
+    {
+      "piece": "ft",
+      "variations": [
+        {
+          "variation": "00",
+          "submeshOrdinals": [
+            25,
+            26
+          ]
+        },
+        {
+          "variation": "01",
+          "submeshOrdinals": [
+            4,
+            5,
+            6
+          ]
+        },
+        {
+          "variation": "02",
+          "submeshOrdinals": [
+            14,
+            15
+          ]
+        }
+      ]
+    },
+    {
+      "piece": "ua",
+      "variations": [
+        {
+          "variation": "00",
+          "submeshOrdinals": [
+            29,
+            30
+          ]
+        },
+        {
+          "variation": "01",
+          "submeshOrdinals": [
+            7,
+            8
+          ]
+        },
+        {
+          "variation": "02",
+          "submeshOrdinals": [
+            19,
+            20
+          ]
+        }
+      ]
+    },
+    {
+      "piece": "hn",
+      "variations": [
+        {
+          "variation": "00",
+          "submeshOrdinals": [
+            9,
+            10
+          ]
+        },
+        {
+          "variation": "02",
+          "submeshOrdinals": [
+            21,
+            22
+          ]
+        }
+      ]
+    },
+    {
+      "piece": "hr",
+      "variations": [
+        {
+          "variation": "00",
+          "submeshOrdinals": [
+            33
+          ]
+        }
+      ]
+    },
+    {
+      "piece": "he",
+      "variations": [
+        {
+          "variation": "00",
+          "submeshOrdinals": [
+            34,
+            35,
+            36
+          ]
+        }
+      ]
+    }
+  ],
+  "atlas": {
+    "file": "huf.atlas.png",
+    "layout": "grid",
+    "side": 256,
+    "columns": 8,
+    "rows": 5,
+    "layers": [
+      "huflg0100",
+      "huflg0101",
+      "hufch0100",
+      "hufch0101",
+      "hufft0100",
+      "hufft0101",
+      "hufft0102",
+      "hufua0100",
+      "hufua0101",
+      "hufhn0000",
+      "hufhn0001",
+      "huflg0200",
+      "huflg0201",
+      "huflg0202",
+      "hufft0200",
+      "hufft0201",
+      "hufch0200",
+      "hufch0201",
+      "hufch0202",
+      "hufua0200",
+      "hufua0201",
+      "hufhn0200",
+      "hufhn0201",
+      "huflg0300",
+      "huflg0301",
+      "hufft0000",
+      "hufft0001",
+      "huflg0000",
+      "huflg0001",
+      "hufua0000",
+      "hufua0001",
+      "hufch0000",
+      "hufch0001",
+      "hufhr0000",
+      "hufhe0000",
+      "hufhe0001",
+      "hufhe0002"
+    ]
+  },
+  "vat": {
+    "bin": "huf.vat.bin.gz",
+    "encoding": "matrix-half-float",
+    "fps": 30,
+    "animations": [
+      {
+        "name": "c01",
+        "from": 0,
+        "to": 92,
+        "fps": 30
+      },
+      {
+        "name": "c02",
+        "from": 93,
+        "to": 129,
+        "fps": 30
+      },
+      {
+        "name": "c03",
+        "from": 130,
+        "to": 158,
+        "fps": 30
+      },
+      {
+        "name": "c04",
+        "from": 159,
+        "to": 187,
+        "fps": 30
+      },
+      {
+        "name": "c06",
+        "from": 188,
+        "to": 233,
+        "fps": 30
+      },
+      {
+        "name": "c07",
+        "from": 234,
+        "to": 275,
+        "fps": 30
+      },
+      {
+        "name": "c08",
+        "from": 276,
+        "to": 312,
+        "fps": 30
+      },
+      {
+        "name": "c09",
+        "from": 313,
+        "to": 328,
+        "fps": 30
+      },
+      {
+        "name": "c10",
+        "from": 329,
+        "to": 359,
+        "fps": 30
+      },
+      {
+        "name": "c11",
+        "from": 360,
+        "to": 463,
+        "fps": 30
+      },
+      {
+        "name": "d01",
+        "from": 464,
+        "to": 504,
+        "fps": 30
+      },
+      {
+        "name": "d02",
+        "from": 505,
+        "to": 545,
+        "fps": 30
+      },
+      {
+        "name": "d05",
+        "from": 546,
+        "to": 611,
+        "fps": 30
+      },
+      {
+        "name": "l01",
+        "from": 612,
+        "to": 642,
+        "fps": 30
+      },
+      {
+        "name": "l02",
+        "from": 643,
+        "to": 661,
+        "fps": 30
+      },
+      {
+        "name": "o01",
+        "from": 662,
+        "to": 742,
+        "fps": 30
+      },
+      {
+        "name": "p01",
+        "from": 743,
+        "to": 823,
+        "fps": 30
+      },
+      {
+        "name": "p02",
+        "from": 824,
+        "to": 884,
+        "fps": 30
+      },
+      {
+        "name": "p06",
+        "from": 885,
+        "to": 945,
+        "fps": 30
+      },
+      {
+        "name": "s01",
+        "from": 946,
+        "to": 1018,
+        "fps": 30
+      },
+      {
+        "name": "s03",
+        "from": 1019,
+        "to": 1118,
+        "fps": 30
+      },
+      {
+        "name": "s06",
+        "from": 1119,
+        "to": 1168,
+        "fps": 30
+      },
+      {
+        "name": "s09",
+        "from": 1169,
+        "to": 1249,
+        "fps": 30
+      },
+      {
+        "name": "s16",
+        "from": 1250,
+        "to": 1566,
+        "fps": 30
+      },
+      {
+        "name": "s21",
+        "from": 1567,
+        "to": 1697,
+        "fps": 30
+      },
+      {
+        "name": "s25",
+        "from": 1698,
+        "to": 1773,
+        "fps": 30
+      },
+      {
+        "name": "s28",
+        "from": 1774,
+        "to": 1843,
+        "fps": 30
+      },
+      {
+        "name": "c05",
+        "from": 276,
+        "to": 312,
+        "fps": 30
+      },
+      {
+        "name": "d04",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "l03",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "l04",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "l05",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "l06",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "l07",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "l08",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "l09",
+        "from": 885,
+        "to": 945,
+        "fps": 30
+      },
+      {
+        "name": "o02",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "o03",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "p03",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "p04",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "p05",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "p07",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "p08",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "pos",
+        "from": 743,
+        "to": 743,
+        "fps": 30
+      },
+      {
+        "name": "s02",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s04",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s05",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s07",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s08",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s10",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s11",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s12",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s13",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s14",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s15",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s17",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s18",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s19",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s20",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s22",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s23",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s24",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s26",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "s27",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "t02",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "t03",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "t04",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "t05",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "t06",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "t07",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "t08",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      },
+      {
+        "name": "t09",
+        "from": 743,
+        "to": 752,
+        "fps": 30
+      }
+    ]
+  },
+  "svat": {
+    "file": "huf.svat",
+    "encoding": "shado.dq-vat",
+    "codec": "gzip",
+    "fps": 30,
+    "alignment": {
+      "scale": 3.611471622400854,
+      "yaw": 4.71238898038469
+    },
+    "bones": 88,
+    "animations": [
+      {
+        "name": "c01",
+        "from": 0,
+        "to": 185,
+        "fps": 60
+      },
+      {
+        "name": "c02",
+        "from": 186,
+        "to": 258,
+        "fps": 60
+      },
+      {
+        "name": "c03",
+        "from": 259,
+        "to": 315,
+        "fps": 60
+      },
+      {
+        "name": "c04",
+        "from": 316,
+        "to": 372,
+        "fps": 60
+      },
+      {
+        "name": "c06",
+        "from": 373,
+        "to": 463,
+        "fps": 60
+      },
+      {
+        "name": "c07",
+        "from": 464,
+        "to": 547,
+        "fps": 60
+      },
+      {
+        "name": "c08",
+        "from": 548,
+        "to": 620,
+        "fps": 60
+      },
+      {
+        "name": "c09",
+        "from": 621,
+        "to": 651,
+        "fps": 60
+      },
+      {
+        "name": "c10",
+        "from": 652,
+        "to": 712,
+        "fps": 60
+      },
+      {
+        "name": "c11",
+        "from": 713,
+        "to": 919,
+        "fps": 60
+      },
+      {
+        "name": "d01",
+        "from": 920,
+        "to": 1000,
+        "fps": 60
+      },
+      {
+        "name": "d02",
+        "from": 1001,
+        "to": 1081,
+        "fps": 60
+      },
+      {
+        "name": "d05",
+        "from": 1082,
+        "to": 1212,
+        "fps": 60
+      },
+      {
+        "name": "l01",
+        "from": 1213,
+        "to": 1273,
+        "fps": 60
+      },
+      {
+        "name": "l02",
+        "from": 1274,
+        "to": 1310,
+        "fps": 60
+      },
+      {
+        "name": "o01",
+        "from": 1311,
+        "to": 1471,
+        "fps": 60
+      },
+      {
+        "name": "p01",
+        "from": 1472,
+        "to": 1632,
+        "fps": 60
+      },
+      {
+        "name": "p02",
+        "from": 1633,
+        "to": 1753,
+        "fps": 60
+      },
+      {
+        "name": "p06",
+        "from": 1754,
+        "to": 1874,
+        "fps": 60
+      },
+      {
+        "name": "s01",
+        "from": 1875,
+        "to": 2019,
+        "fps": 60
+      },
+      {
+        "name": "s03",
+        "from": 2020,
+        "to": 2219,
+        "fps": 60
+      },
+      {
+        "name": "s06",
+        "from": 2220,
+        "to": 2319,
+        "fps": 60
+      },
+      {
+        "name": "s09",
+        "from": 2320,
+        "to": 2480,
+        "fps": 60
+      },
+      {
+        "name": "s16",
+        "from": 2481,
+        "to": 3113,
+        "fps": 60
+      },
+      {
+        "name": "s21",
+        "from": 3114,
+        "to": 3374,
+        "fps": 60
+      },
+      {
+        "name": "s25",
+        "from": 3375,
+        "to": 3525,
+        "fps": 60
+      },
+      {
+        "name": "s28",
+        "from": 3526,
+        "to": 3665,
+        "fps": 60
+      },
+      {
+        "name": "c05",
+        "from": 548,
+        "to": 620,
+        "fps": 30
+      },
+      {
+        "name": "d04",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "l03",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "l04",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "l05",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "l06",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "l07",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "l08",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "l09",
+        "from": 1754,
+        "to": 1874,
+        "fps": 30
+      },
+      {
+        "name": "o02",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "o03",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "p03",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "p04",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "p05",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "p07",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "p08",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "pos",
+        "from": 1472,
+        "to": 1472,
+        "fps": 30
+      },
+      {
+        "name": "s02",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s04",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s05",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s07",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s08",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s10",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s11",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s12",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s13",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s14",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s15",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s17",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s18",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s19",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s20",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s22",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s23",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s24",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s26",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "s27",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "t02",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "t03",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "t04",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "t05",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "t06",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "t07",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "t08",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      },
+      {
+        "name": "t09",
+        "from": 1472,
+        "to": 1481,
+        "fps": 30
+      }
+    ]
+  },
+  "geometry": {
+    "file": "huf.babylon.gz"
+  }
+}

@@ -1,0 +1,45 @@
+export * from './types';
+export * from './decorators';
+export * from './publish';
+export * from './arena/FloatArena';
+export * from './arena/DirtyPageTracker';
+export * from './arena/ByteArena';
+export * from './schema/ShadoSchemaBuilder';
+export * from './schema/ShadoStructSchema';
+export * from './schema/AoSLayout';
+export * from './net/PackedAoSCodec';
+export * from './net/NetLayout';
+export * from './net/NetSoA';
+export * from './core/ShadoInstanceSoA';
+export * from './net/emitNetStructModule';
+export * from './includes/register';
+export * from './backings/DataTexBacking';
+export * from './backings/StorageBacking';
+export * from './core/Shado';
+export { Shado as ShaderObject } from './core/Shado';
+export * from './utils/type-helpers';
+export * from './utils/embedded-proxy';
+export * from './utils/binding-alloc';
+export * from './utils/glsl-wgsl';
+export * from './renderer';
+export * from './render-data';
+export * from './storage';
+
+// Binary VAT container (.svat). Node-only encoding lives at `@knervous/shado/svat/node`.
+export * from './svat';
+
+// Extensions
+export * from './extensions';
+
+// Materials
+export * from './materials/ShadoMaterial';
+export * from './materials/ShadoWorldLightBuffer';
+
+export * from './babylon';
+export * from './render';
+export * from './showcase/EqShowcase';
+export * from './showcase/ShadoSupermeshModuleDemo';
+export * from './showcase/ShadoVatShowcaseUi';
+export * from './showcase/ShadoShowcaseEnvironment';
+
+export const VERSION = '1.4.0';

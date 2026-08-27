@@ -1,0 +1,372 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+import { runInThisContext } from 'node:vm';
+import { gunzip, gzip } from 'node:zlib';
+import { promisify } from 'node:util';
+import {
+  importLegacyZoneMetadata,
+  mergeLegacyZoneMetadata,
+  upgradeShadoWorldAuthoring,
+  type ShadoWorldCompileOptions,
+} from '../world';
+import {
+  compileWorldPackage,
+  configureWorldImporter,
+  validateGlb,
+  type WorldObjectAssetLoader,
+} from './world-core';
+import { installNodeXMLHttpRequest } from './models';
+
+export * from './world-core';
+
+const gunzipAsync = promisify(gunzip);
+const gzipAsync = promisify(gzip);
+
+// Babylon's glTF loader expects a browser: it fetches through XMLHttpRequest
+// and pulls its Draco wrapper off a CDN. Teach the shared importer how to
+// satisfy both from this process before it ever touches Babylon.
+configureWorldImporter({
+  prepare: async () => {
+    installNodeXMLHttpRequest();
+    await installNodeDracoDecoder();
+  },
+});
+
+export type ShadoWorldPackConfig = Omit<ShadoWorldCompileOptions, 'source'> & {
+  input: string;
+  outFile: string;
+  /** Handedness used by the headless GLB importer. Defaults to Babylon's left. */
+  inputHandedness?: 'left' | 'right';
+  /**
+   * Transform applied while importing geometry. Defaults to `sourceTransform`.
+   * Set this to identity when repacking an already-canonical runtime scene but
+   * retaining its migration-origin sourceTransform metadata.
+   */
+  inputTransform?: ShadoWorldCompileOptions['sourceTransform'];
+  runtimeSource?: string;
+  copyInputTo?: string;
+  /** Defaults to the spatial package's sibling `<zone>.collision.bin.gz`. */
+  collisionOutFile?: string;
+  /** Defaults to the spatial package's sibling `<zone>.lighting-plan.json.gz`. */
+  lightingPlanOutFile?: string;
+  /** Editable region sidecar compiled into the runtime spatial package. */
+  authoringInput?: string;
+  /** Original Requiem zone JSON promoted into authoring when no authored document exists. */
+  metadataInput?: string;
+  objectSourcePrefix?: string;
+  /** Filesystem root corresponding to runtime object URLs such as `/eqrequiem/...`. */
+  objectAssetRoot?: string;
+};
+
+export type ShadoWorldPackResult = {
+  name: string;
+  input: string;
+  outFile: string;
+  collisionOutFile: string;
+  lightingPlanOutFile: string;
+  lightingStatus: 'ready-for-bake' | 'blocked-missing-uv2';
+  lightingUv2ReadyChunkCount: number;
+  primitiveCount: number;
+  triangleCount: number;
+  clusterCount: number;
+  renderChunkCount: number;
+  cellCount: number;
+  portalCount: number;
+  regionCount: number;
+  objectPrototypeCount: number;
+  objectStampCount: number;
+  grassCellCount: number;
+  grassPlacementCount: number;
+  tileCount: number;
+  collisionVertexCount: number;
+  collisionTriangleCount: number;
+  collisionSourceTriangleCount: number;
+  collisionChunkCount: number;
+};
+
+/** Imports a static GLB/GLB.GZ and emits reducer-friendly world spatial data. */
+export async function packShadoWorld(config: ShadoWorldPackConfig): Promise<ShadoWorldPackResult> {
+  if (!config.input) throw new Error(`World '${config.name}' requires input`);
+  if (!config.outFile) throw new Error(`World '${config.name}' requires outFile`);
+  const input = path.resolve(process.cwd(), config.input);
+  const compressed = await fs.readFile(input);
+  const glb = input.toLowerCase().endsWith('.gz') ? await gunzipAsync(compressed) : compressed;
+  validateGlb(glb, input);
+  // This importer is product-neutral and defaults to identity. Requiem's
+  // migration caller explicitly supplies mirror-x because canonical gameplay
+  // space reflects source zone geometry while leaving metadata placements
+  // unchanged.
+  const sourceTransform = config.sourceTransform ?? 'identity';
+  const authoringPath = config.authoringInput
+    ? path.resolve(process.cwd(), config.authoringInput)
+    : undefined;
+  const metadataPath = config.metadataInput
+    ? path.resolve(process.cwd(), config.metadataInput)
+    : undefined;
+  const authoringSource = authoringPath
+    ? JSON.parse(await fs.readFile(authoringPath, 'utf8'))
+    : undefined;
+  let authoring = authoringPath
+    ? upgradeShadoWorldAuthoring(authoringSource, config.name)
+    : config.metadataInput
+      ? importLegacyZoneMetadata(
+          JSON.parse(await fs.readFile(metadataPath!, 'utf8')),
+          config.name,
+          { objectSourcePrefix: config.objectSourcePrefix }
+        )
+      : config.authoring;
+  if (authoringPath && authoring) {
+    const before = JSON.stringify(authoringSource);
+    if (metadataPath) {
+      authoring = mergeLegacyZoneMetadata(
+        authoring,
+        JSON.parse(await fs.readFile(metadataPath, 'utf8')),
+        config.name,
+        { objectSourcePrefix: config.objectSourcePrefix }
+      );
+    }
+    if (JSON.stringify(authoring) !== before) {
+      authoring.revision++;
+      await fs.writeFile(authoringPath, `${JSON.stringify(authoring, null, 2)}\n`);
+    }
+  }
+  const outFile = path.resolve(process.cwd(), config.outFile);
+  const collisionOutFile = path.resolve(
+    process.cwd(),
+    config.collisionOutFile ?? collisionPathForSpatial(config.outFile)
+  );
+  const lightingPlanOutFile = path.resolve(
+    process.cwd(),
+    config.lightingPlanOutFile ?? lightingPlanPathForSpatial(config.outFile)
+  );
+  const objectAssetRoot = config.objectAssetRoot
+    ? path.resolve(process.cwd(), config.objectAssetRoot)
+    : undefined;
+  const packed = await compileWorldPackage({
+    ...config,
+    glb,
+    source: config.runtimeSource ?? input,
+    sourceTransform,
+    authoring,
+    collisionSource: path.basename(collisionOutFile),
+    ...(objectAssetRoot ? { loadObjectAsset: nodeObjectAssetLoader(objectAssetRoot) } : {}),
+  });
+  const { world, collision, lighting } = packed;
+
+  await fs.mkdir(path.dirname(outFile), { recursive: true });
+  const payload = Buffer.from(`${JSON.stringify(world)}\n`);
+  await fs.writeFile(
+    outFile,
+    outFile.endsWith('.gz') ? await gzipAsync(payload, { level: 9 }) : payload
+  );
+  await fs.mkdir(path.dirname(collisionOutFile), { recursive: true });
+  await fs.writeFile(
+    collisionOutFile,
+    collisionOutFile.endsWith('.gz')
+      ? await gzipAsync(collision.bytes, { level: 9 })
+      : collision.bytes
+  );
+  const lightingPayload = Buffer.from(`${JSON.stringify(lighting)}\n`);
+  await fs.mkdir(path.dirname(lightingPlanOutFile), { recursive: true });
+  await fs.writeFile(
+    lightingPlanOutFile,
+    lightingPlanOutFile.endsWith('.gz')
+      ? await gzipAsync(lightingPayload, { level: 9 })
+      : lightingPayload
+  );
+  if (config.copyInputTo) {
+    const copyInputTo = path.resolve(process.cwd(), config.copyInputTo);
+    await fs.mkdir(path.dirname(copyInputTo), { recursive: true });
+    await fs.copyFile(input, copyInputTo);
+  }
+  return {
+    name: config.name,
+    input,
+    outFile,
+    collisionOutFile,
+    lightingPlanOutFile,
+    lightingStatus: lighting.status,
+    lightingUv2ReadyChunkCount: lighting.chunks.filter(chunk => chunk.uv2.present).length,
+    primitiveCount: packed.primitiveCount,
+    triangleCount: world.triangleCount,
+    clusterCount: world.clusters.radius.length,
+    renderChunkCount: world.renderChunks.primitive.length,
+    cellCount: world.cells.kind.length,
+    portalCount: world.portals.fromCell.length,
+    regionCount: world.regions.id.length,
+    objectPrototypeCount: world.objects?.prototypes.id.length ?? 0,
+    objectStampCount: world.objects?.stamps.id.length ?? 0,
+    grassCellCount: world.grass?.cells.x.length ?? 0,
+    grassPlacementCount: world.grass?.placements.positionX.length ?? 0,
+    tileCount: world.tiles.x.length,
+    collisionVertexCount: world.collision.vertexCount,
+    collisionTriangleCount: world.collision.triangleCount,
+    collisionSourceTriangleCount: world.collision.sourceTriangleCount,
+    collisionChunkCount: world.collision.chunkCount,
+  };
+}
+
+/**
+ * Reads a runtime object URL from a directory on disk, refusing anything that
+ * escapes the configured asset root.
+ */
+function nodeObjectAssetLoader(root: string): WorldObjectAssetLoader {
+  return async pathname => {
+    const sourceFile = path.resolve(root, `.${pathname}`);
+    const relative = path.relative(root, sourceFile);
+    if (
+      !relative ||
+      relative === '..' ||
+      relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative)
+    ) {
+      throw new Error(`Object asset '${pathname}' resolves outside the object asset root`);
+    }
+    const compressed = await fs.readFile(sourceFile);
+    return sourceFile.toLowerCase().endsWith('.gz') ? await gunzipAsync(compressed) : compressed;
+  };
+}
+
+
+let nodeDracoDecoderInstallation: Promise<void> | undefined;
+
+/**
+ * Babylon defaults to downloading its Draco wrapper from the CDN. That path
+ * uses the browser script loader and cannot run in the Node migration CLI.
+ * Load the decoder and WASM already distributed with @babylonjs/core instead.
+ */
+export async function installNodeDracoDecoder(): Promise<void> {
+  nodeDracoDecoderInstallation ??= (async () => {
+    const require = createRequire(import.meta.url);
+    const decoderModulePath = require.resolve('@babylonjs/core/Meshes/Compression/dracoDecoder.js');
+    const dracoAssetDir = path.resolve(path.dirname(decoderModulePath), '../../assets/Draco');
+    const wrapperPath = path.join(dracoAssetDir, 'draco_wasm_wrapper_gltf.js');
+    const wasmPath = path.join(dracoAssetDir, 'draco_decoder_gltf.wasm');
+    const [wrapperSource, wasmBytes] = await Promise.all([
+      fs.readFile(wrapperPath, 'utf8'),
+      fs.readFile(wasmPath),
+    ]);
+
+    const commonJsModule = { exports: {} as unknown };
+    const evaluate = runInThisContext(
+      `(function (exports, require, module, __filename, __dirname) {\n${wrapperSource}\n})`,
+      { filename: wrapperPath }
+    ) as (
+      exports: unknown,
+      require: NodeJS.Require,
+      module: { exports: unknown },
+      filename: string,
+      dirname: string
+    ) => void;
+    evaluate(
+      commonJsModule.exports,
+      createRequire(wrapperPath),
+      commonJsModule,
+      wrapperPath,
+      dracoAssetDir
+    );
+    if (typeof commonJsModule.exports !== 'function') {
+      throw new Error(`Unable to initialize bundled Draco decoder at ${wrapperPath}`);
+    }
+
+    const { DracoDecoder } = await import('@babylonjs/core/Meshes/Compression/dracoDecoder.js');
+    const wasmBinary = wasmBytes.buffer.slice(
+      wasmBytes.byteOffset,
+      wasmBytes.byteOffset + wasmBytes.byteLength
+    );
+    DracoDecoder.ResetDefault();
+    DracoDecoder.DefaultConfiguration = {
+      // Babylon requires these keys to select its WASM path. jsModule and
+      // wasmBinary keep both resources local, so the URLs are never fetched.
+      wasmUrl: wrapperPath,
+      wasmBinaryUrl: wasmPath,
+      wasmBinary,
+      jsModule: commonJsModule.exports,
+      numWorkers: 0,
+    };
+    await DracoDecoder.Default.whenReadyAsync();
+  })();
+  await nodeDracoDecoderInstallation;
+}
+
+function collisionPathForSpatial(spatialPath: string): string {
+  if (!/\.spatial\.json(?:\.gz)?$/i.test(spatialPath)) {
+    throw new Error(
+      `World spatial output '${spatialPath}' must end in .spatial.json or .spatial.json.gz`
+    );
+  }
+  return spatialPath.replace(/\.spatial\.json(\.gz)?$/i, '.collision.bin$1');
+}
+
+function lightingPlanPathForSpatial(spatialPath: string): string {
+  if (!/\.spatial\.json(?:\.gz)?$/i.test(spatialPath)) {
+    throw new Error(
+      `World spatial output '${spatialPath}' must end in .spatial.json or .spatial.json.gz`
+    );
+  }
+  return spatialPath.replace(/\.spatial\.json(\.gz)?$/i, '.lighting-plan.json$1');
+}
+
+
+const GLB_JSON_CHUNK = 0x4e4f534a;
+
+/**
+ * Removes render-only texture payload references while retaining geometry,
+ * material indices, and material names. Other GLB chunks are copied verbatim.
+ */
+export function sanitizeWorldGlbForGeometry(bytes: Uint8Array): Uint8Array {
+  validateGlb(bytes, '<memory>');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const chunks: Uint8Array[] = [];
+  let offset = 12;
+  let foundJson = false;
+  while (offset + 8 <= bytes.byteLength) {
+    const length = view.getUint32(offset, true);
+    const type = view.getUint32(offset + 4, true);
+    const end = offset + 8 + length;
+    if (end > bytes.byteLength) throw new Error('World GLB has a truncated chunk');
+    if (type === GLB_JSON_CHUNK && !foundJson) {
+      const source = Buffer.from(bytes.subarray(offset + 8, end))
+        .toString('utf8')
+        .trimEnd();
+      const gltf = JSON.parse(source) as {
+        materials?: Array<Record<string, unknown>>;
+        images?: unknown[];
+        textures?: unknown[];
+        samplers?: unknown[];
+      };
+      if (gltf.materials) {
+        gltf.materials = gltf.materials.map(material =>
+          typeof material.name === 'string' ? { name: material.name } : {}
+        );
+      }
+      delete gltf.images;
+      delete gltf.textures;
+      delete gltf.samplers;
+      const json = Buffer.from(JSON.stringify(gltf));
+      const paddedLength = (json.byteLength + 3) & ~3;
+      const chunk = Buffer.alloc(8 + paddedLength, 0x20);
+      chunk.writeUInt32LE(paddedLength, 0);
+      chunk.writeUInt32LE(GLB_JSON_CHUNK, 4);
+      json.copy(chunk, 8);
+      chunks.push(chunk);
+      foundJson = true;
+    } else {
+      chunks.push(bytes.slice(offset, end));
+    }
+    offset = end;
+  }
+  if (!foundJson) throw new Error('World GLB is missing its JSON chunk');
+  if (offset !== bytes.byteLength) throw new Error('World GLB has trailing partial chunk data');
+  const totalLength = 12 + chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  const output = Buffer.alloc(totalLength);
+  Buffer.from(bytes.subarray(0, 12)).copy(output);
+  output.writeUInt32LE(totalLength, 8);
+  let writeOffset = 12;
+  for (const chunk of chunks) {
+    Buffer.from(chunk).copy(output, writeOffset);
+    writeOffset += chunk.byteLength;
+  }
+  return output;
+}
