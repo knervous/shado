@@ -1,5 +1,29 @@
 # Release notes
 
+## 1.5.0 — 2026-08-27
+
+Shado moved to its own public repository at
+[knervous/shado](https://github.com/knervous/shado). It was developed inside a
+private monorepo; nothing in `src/` or the sandbox ever imported from that
+repo, so the move needed no source change — only package metadata, which now
+points at the new home for `repository`, `homepage` and `bugs`.
+
+- No API change. 1.5.0 is the first release published since 1.3.0 and carries
+  everything described under 1.4.0 below, which was built but never published.
+  Upgrading from 1.3.0 means reading both entries.
+- Added `NOTICE.md`, shipped in the package. Shado's code stays MIT; the demo
+  assets bundled for the sandbox do not fall under that grant. The humanoid
+  wardrobe and supermesh sets are Ryzom derivatives under CC-BY-SA 3.0, and the
+  share-alike term carries to them. Nothing about consuming the library changes
+  — this matters only if you redistribute those files.
+- Some sandbox demo content is not redistributable and is absent from the
+  public repository: `/`, `/msdf`, `/world`, `/world-editor` and `/test` need
+  asset directories that are not published. `/hum-wardrobe` and
+  `/supermesh-scale` run from a clean clone, and they are the routes that
+  demonstrate what the library does. The Babylon Playground example under
+  `playground/` reads the same unpublished assets, so its `RAW_ROOT` must be
+  repointed at a host of your own.
+
 ## 1.4.0 — 2026-08-27
 
 Shado 1.4 adds per-module draw ownership for variant supermeshes, so a model

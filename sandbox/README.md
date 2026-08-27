@@ -70,7 +70,7 @@ move as one organism. That is per-instance state in the arena, not per-instance
 draws.
 
 **Assets** live in `public/shado/<model>/` and are vendored by
-`client/scripts/vendor-hum-wardrobe-demo.mjs` in the Eltania client repo:
+`client/scripts/vendor-hum-wardrobe-demo.mjs` in the private Eltania repo:
 
 ```bash
 node client/scripts/vendor-hum-wardrobe-demo.mjs --model hum --side 256
@@ -168,12 +168,12 @@ often frames are issued.
 Vercel reads `vercel.json` from the project's Root Directory and ignores any
 other copy, so which file is live depends on how the project is configured:
 
-- Root Directory `shader-object/sandbox` — this directory's `vercel.json`
-  applies. Keep **Include source files outside of the Root Directory** enabled
-  so the linked parent `@knervous/shado` package is available during install.
-- Root Directory `shader-object` — `../vercel.json` applies instead. It carries
-  only the rewrites and headers; the build command and output directory come
-  from the project settings (`sandbox/dist`).
+- Root Directory `sandbox` — this directory's `vercel.json` applies. Keep
+  **Include source files outside of the Root Directory** enabled so the linked
+  parent `@knervous/shado` package is available during install.
+- Root Directory `.` (the repository root) — `../vercel.json` applies instead.
+  It carries only the rewrites and headers; the build command and output
+  directory come from the project settings (`sandbox/dist`).
 
 Either way the config restores SPA deep links (`/world`, `/world-editor`,
 `/supermesh-scale` are client routes with no file on disk, so without the

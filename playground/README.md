@@ -23,6 +23,11 @@ The five Playground modules each have one job:
    injection, controller API, and lifecycle.
 5. `playground-ui.ts` — the small adapter around the reusable overlay.
 
+> **The assets this example loads are not published.** `sandbox/public/shado/eq-demo`
+> is gitignored in this repository (see [NOTICE.md](../NOTICE.md)), so the model
+> URLs in `showcase-app.ts` 404 against a clean clone. Repoint `RAW_ROOT` at a
+> host of your own to run it; everything else in the example works unchanged.
+
 The Shado showcase vendors the original compressed source GLBs under
 `sandbox/public/shado/eq-demo/models`. It includes male and female models for
 the 13 complete playable race pairs available in the decoded archive (Human

@@ -4,9 +4,15 @@ import { createMsdfNameplateLayer } from '@knervous/shado/msdf';
 import { PlaygroundShowcaseActor, PlaygroundShowcaseContainer } from './showcase-actor';
 import { createPlaygroundShowcaseUi } from './playground-ui';
 
+// The one place to repoint this example at assets you can serve.
+//
+// It used to read from the private monorepo Shado was developed in, which no
+// longer resolves. The public repo below does resolve, but does NOT carry the
+// `eq-demo` models this showcase loads - they are not redistributable, see
+// NOTICE.md. So the URLs are correct and `bakeWorker` fetches, while the three
+// model directories 404 until you point RAW_ROOT at a host of your own.
 const RAW_ROOT =
-  'https://raw.githubusercontent.com/knervous/eqrequiem/main/' +
-  'shader-object/sandbox/public/shado/';
+  'https://raw.githubusercontent.com/knervous/shado/main/sandbox/public/shado/';
 
 const ASSETS = {
   models: `${RAW_ROOT}eq-demo/models/`,
