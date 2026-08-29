@@ -5,10 +5,21 @@ import * as BABYLON from '@babylonjs/core';
  * submesh, a per-instance appearance slice with tint, and a compact per-module
  * draw list.
  *
- * This is deliberately the *thin* version of a real game's actor shader - no
- * material response, no cloak/helm atlases, no picking or selection glow, no
- * world light field. What survives is exactly what the module-draw pattern
- * needs, so the file reads as the contract rather than as one game's renderer.
+ * Still the *thin* version of a real game's actor shader - no cloak/helm
+ * atlases, no picking or selection glow, no world light field - but it does now
+ * carry the **material response**, because without it the wardrobe demo could
+ * only show meshes. A dye was a flat multiply over the whole garment, so it
+ * repainted the face and hands too and there was no way to show a faction that
+ * differs only in colour, which is most of them.
+ *
+ * The response is one mask sampled per texel alongside the albedo: `r` is skin,
+ * `g` is the heraldic charge, `b` is what a dye may touch. Three channels turn
+ * one atlas layer into an outfit, a complexion and a banner.
+ *
+ * The appearance var-array is therefore `submeshCount + 2` wide, not
+ * `submeshCount`: the two extra rows are per-entity rather than per-submesh -
+ * complexion first, heraldry second - which is the same stride the game uses,
+ * for the same reason. A complexion belongs to a person, not to their sleeve.
  *
  * `uShadoVisibleIndices` is the seam that matters. The arena binds its global
  * visible list there; a module's own compact list replaces it per draw, which
@@ -28,6 +39,9 @@ flat varying int vSlice;
 varying vec2 vUV;
 varying vec3 vTint;
 varying vec3 vWorldNormal;
+varying float vNeutralize;
+varying vec3 vSkin;
+varying vec4 vDevice;
 
 uniform mat4 worldViewProjection;
 uniform int uSubmeshCount;
@@ -90,9 +104,18 @@ void main() {
 
   vUV = uv;
   int submeshIndex = int(submeshData.y + 0.5);
-  vec4 appearance = HumWardrobeContainer_appearance_get(submeshIndex + sourceIndex * uSubmeshCount);
+  // Stride is submeshCount + 2. The two rows past the submeshes are the
+  // entity's own: complexion, then heraldry.
+  int stride = uSubmeshCount + 2;
+  int base = sourceIndex * stride;
+  vec4 appearance = HumWardrobeContainer_appearance_get(submeshIndex + base);
+  vec4 complexion = HumWardrobeContainer_appearance_get(uSubmeshCount + base);
+  vec4 heraldry = HumWardrobeContainer_appearance_get(uSubmeshCount + 1 + base);
   vSlice = int(appearance.x);
   vTint = appearance.yzw;
+  vNeutralize = complexion.x;
+  vSkin = complexion.yzw;
+  vDevice = heraldry;
 
   if (vSlice < 0) {
     // The variant this actor is not wearing. Retained so an unmigrated path
@@ -115,16 +138,48 @@ flat varying int vSlice;
 varying vec2 vUV;
 varying vec3 vTint;
 varying vec3 vWorldNormal;
+varying float vNeutralize;
+varying vec3 vSkin;
+varying vec4 vDevice;
 
 uniform highp sampler2DArray uAtlasArray;
+uniform highp sampler2DArray uResponseArray;
 uniform vec3 uLightDirection;
+uniform float uHasResponse;
 
 void main() {
   float slice = clamp(float(vSlice), 0.0, float(textureSize(uAtlasArray, 0).z - 1));
   vec4 base = texture(uAtlasArray, vec3(vUV, slice));
+
+  // No mask means wholly dyeable and no skin, which is the safe reading: it
+  // recolours and nothing is protected.
+  vec3 response = mix(
+    vec3(0.0, 0.0, 1.0),
+    texture(uResponseArray, vec3(vUV, slice)).rgb,
+    uHasResponse
+  );
+  float skinMask = response.r;
+  float deviceMask = response.g;
+  float tintMask = response.b;
+
+  // A dye can only darken and shift, so a palette that wants its own hue has to
+  // start from a neutral sheet rather than the donor's. Collapsing to luminance
+  // is that neutral, and it happens only where the mask says dyeable.
+  float outfitLuminance = dot(base.rgb, vec3(0.2126, 0.7152, 0.0722));
+  vec3 outfitBase = mix(base.rgb, vec3(outfitLuminance), clamp(vNeutralize * tintMask, 0.0, 1.0));
+  vec3 surfaceTint = mix(vec3(1.0), vTint, tintMask);
+  vec3 skinTone = mix(vec3(1.0), vSkin, skinMask);
+
+  // The charge keeps some of the cloth's own shading so a banner reads as
+  // painted onto fabric rather than pasted over it.
+  float device = smoothstep(0.05, 0.95, deviceMask) * vDevice.x;
+  float chargeShade = mix(0.95, clamp(outfitLuminance * 1.6 + 0.25, 0.0, 1.6), 0.35);
+  vec3 charge = vDevice.yzw * chargeShade;
+
+  vec3 diffuse = mix(outfitBase * surfaceTint, charge, clamp(device, 0.0, 1.0)) * skinTone;
   vec3 n = normalize(vWorldNormal);
   float lambert = max(dot(n, uLightDirection), 0.0) * 0.75 + 0.35;
-  gl_FragColor = vec4(base.rgb * vTint * lambert, 1.0);
+  gl_FragColor = vec4(diffuse * lambert, 1.0);
 }
 `;
 
@@ -138,6 +193,9 @@ flat varying vSlice: i32;
 varying vUV: vec2f;
 varying vTint: vec3f;
 varying vWorldNormal: vec3f;
+varying vNeutralize: f32;
+varying vSkin: vec3f;
+varying vDevice: vec4f;
 
 uniform worldViewProjection: mat4x4f;
 uniform uSubmeshCount: i32;
@@ -191,11 +249,16 @@ fn main(input: VertexInputs) -> FragmentInputs {
 
   vertexOutputs.vUV = vertexInputs.uv;
   let submeshIndex = i32(vertexInputs.submeshData.y + 0.5);
-  let appearance = HumWardrobeContainer_appearance_get(
-    submeshIndex + sourceIndex * uniforms.uSubmeshCount
-  );
+  let stride = uniforms.uSubmeshCount + 2;
+  let arrayBase = sourceIndex * stride;
+  let appearance = HumWardrobeContainer_appearance_get(submeshIndex + arrayBase);
+  let complexion = HumWardrobeContainer_appearance_get(uniforms.uSubmeshCount + arrayBase);
+  let heraldry = HumWardrobeContainer_appearance_get(uniforms.uSubmeshCount + 1 + arrayBase);
   vertexOutputs.vSlice = i32(appearance.x);
   vertexOutputs.vTint = appearance.yzw;
+  vertexOutputs.vNeutralize = complexion.x;
+  vertexOutputs.vSkin = complexion.yzw;
+  vertexOutputs.vDevice = heraldry;
 
   if (vertexOutputs.vSlice < 0) {
     vertexOutputs.position = vec4f(0.0);
@@ -214,19 +277,42 @@ flat varying vSlice: i32;
 varying vUV: vec2f;
 varying vTint: vec3f;
 varying vWorldNormal: vec3f;
+varying vNeutralize: f32;
+varying vSkin: vec3f;
+varying vDevice: vec4f;
 
 var uAtlasArraySampler: sampler;
 var uAtlasArray: texture_2d_array<f32>;
+var uResponseArraySampler: sampler;
+var uResponseArray: texture_2d_array<f32>;
 uniform uLightDirection: vec3f;
+uniform uHasResponse: f32;
 
 @fragment
 fn main(input: FragmentInputs) -> FragmentOutputs {
   let layers = i32(textureNumLayers(uAtlasArray));
   let slice = clamp(fragmentInputs.vSlice, 0, layers - 1);
   let base = textureSample(uAtlasArray, uAtlasArraySampler, fragmentInputs.vUV, slice);
+
+  let sampled = textureSample(uResponseArray, uResponseArraySampler, fragmentInputs.vUV, slice).rgb;
+  let response = mix(vec3f(0.0, 0.0, 1.0), sampled, uniforms.uHasResponse);
+  let skinMask = response.r;
+  let deviceMask = response.g;
+  let tintMask = response.b;
+
+  let outfitLuminance = dot(base.rgb, vec3f(0.2126, 0.7152, 0.0722));
+  let outfitBase = mix(base.rgb, vec3f(outfitLuminance), clamp(fragmentInputs.vNeutralize * tintMask, 0.0, 1.0));
+  let surfaceTint = mix(vec3f(1.0), fragmentInputs.vTint, vec3f(tintMask));
+  let skinTone = mix(vec3f(1.0), fragmentInputs.vSkin, vec3f(skinMask));
+
+  let device = smoothstep(0.05, 0.95, deviceMask) * fragmentInputs.vDevice.x;
+  let chargeShade = mix(0.95, clamp(outfitLuminance * 1.6 + 0.25, 0.0, 1.6), 0.35);
+  let charge = fragmentInputs.vDevice.yzw * chargeShade;
+
+  let diffuse = mix(outfitBase * surfaceTint, charge, vec3f(clamp(device, 0.0, 1.0))) * skinTone;
   let n = normalize(fragmentInputs.vWorldNormal);
   let lambert = max(dot(n, uniforms.uLightDirection), 0.0) * 0.75 + 0.35;
-  fragmentOutputs.color = vec4f(base.rgb * fragmentInputs.vTint * lambert, 1.0);
+  fragmentOutputs.color = vec4f(diffuse * lambert, 1.0);
 }
 `;
 
@@ -238,6 +324,8 @@ BABYLON.ShaderStore.ShadersStoreWGSL['humWardrobeFragmentShader'] = FRAGMENT_WGS
 export type HumWardrobeMaterialDeps = {
   container: any;
   atlas: BABYLON.BaseTexture;
+  /** The material-response mask array; null falls back to "wholly dyeable". */
+  response: BABYLON.BaseTexture | null;
   vatTexture: BABYLON.BaseTexture;
   submeshCount: number;
   /** Seconds, advanced by the playground. */
@@ -276,12 +364,14 @@ export function createHumWardrobeMaterial(
         'uSubmeshCount',
         'uShadoVisibleCount',
         'uLightDirection',
+        'uHasResponse',
         'bakedVertexAnimationTextureSizeInverted',
         'bakedVertexAnimationTime',
         ...(useStorage ? [] : ['uShadoVisibleIndexTexWidth', ...shaderIO.uniforms]),
       ],
       samplers: [
         'uAtlasArray',
+        'uResponseArray',
         'bakedVertexAnimationTexture',
         ...(useStorage ? [] : ['uShadoVisibleIndices', ...shaderIO.samplers]),
       ],
@@ -307,6 +397,11 @@ export function createHumWardrobeMaterial(
     effect.setInt('uShadoVisibleCount', drawn);
     effect.setInt('uSubmeshCount', deps.submeshCount);
     effect.setTexture('uAtlasArray', deps.atlas);
+    // The sampler must be bound even when there is no mask: an unbound array
+    // sampler is a validation error on WebGPU, so the albedo stands in and
+    // `uHasResponse` discards what it read.
+    effect.setTexture('uResponseArray', deps.response ?? deps.atlas);
+    effect.setFloat('uHasResponse', deps.response ? 1 : 0);
     effect.setTexture('bakedVertexAnimationTexture', deps.vatTexture);
     effect.setVector2(
       'bakedVertexAnimationTextureSizeInverted',

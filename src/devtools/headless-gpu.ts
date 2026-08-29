@@ -1,0 +1,339 @@
+/**
+ * A real WebGPU device in Node, via Google Dawn.
+ *
+ * Babylon's WebGPU engine expects a browser, but it needs less of one than it
+ * looks: `navigator.gpu`, a canvas that can hand back a WebGPU context, and a
+ * couple of globals. Dawn supplies the adapter and this supplies the rest, so
+ * the dev tools can drive the real engine — real materials, real shaders — with
+ * no browser process.
+ *
+ * Pin `@kmamal/gpu` to 0.1.6. On 0.2.1 every `texture.createView()` fails
+ * validation ("swizzle used without the FeatureName::TextureComponentSwizzle
+ * feature enabled"), which makes all rendering impossible. Compute is
+ * unaffected, so the breakage stays invisible until something tries to draw.
+ */
+
+export const TEXTURE_USAGE = {
+  COPY_SRC: 0x01,
+  COPY_DST: 0x02,
+  TEXTURE_BINDING: 0x04,
+  STORAGE_BINDING: 0x08,
+  RENDER_ATTACHMENT: 0x10,
+} as const;
+
+export const BUFFER_USAGE = {
+  MAP_READ: 0x0001,
+  COPY_SRC: 0x0004,
+  COPY_DST: 0x0008,
+  INDEX: 0x0010,
+  VERTEX: 0x0020,
+  UNIFORM: 0x0040,
+  STORAGE: 0x0080,
+} as const;
+
+/** Minimal GPUCanvasContext backed by a plain texture. */
+class HeadlessCanvasContext {
+  private device: any;
+  private format = 'bgra8unorm';
+  private usage: number = TEXTURE_USAGE.RENDER_ATTACHMENT;
+  public texture: any = null;
+
+  constructor(private readonly canvas: { width: number; height: number }) {}
+
+  configure(config: any): void {
+    this.device = config.device;
+    this.format = config.format ?? 'bgra8unorm';
+    this.usage = config.usage ?? TEXTURE_USAGE.RENDER_ATTACHMENT;
+    this.texture = this.device.createTexture({
+      size: [this.canvas.width, this.canvas.height],
+      format: this.format,
+      usage: this.usage | TEXTURE_USAGE.RENDER_ATTACHMENT | TEXTURE_USAGE.COPY_SRC,
+    });
+  }
+  unconfigure(): void { this.texture?.destroy?.(); this.texture = null; }
+  getCurrentTexture(): any { return this.texture; }
+  getConfiguration(): any { return { device: this.device, format: this.format, usage: this.usage }; }
+}
+
+/**
+ * Dawn hands back `features` as a bare iterable and rejects the DOM
+ * `addEventListener` signature; Babylon calls `.forEach` on the former and
+ * registers `uncapturederror` on the latter. Note the listener call THROWS
+ * rather than being absent, so optional-chaining is not sufficient.
+ */
+/** IEEE-754 half precision, for textures Dawn expects in float formats. */
+function toHalf(value: number): number {
+  const buffer = new Float32Array(1);
+  const bits = new Uint32Array(buffer.buffer);
+  buffer[0] = value;
+  const x = bits[0]!;
+  const sign = (x >>> 16) & 0x8000;
+  let exponent = ((x >>> 23) & 0xff) - 112;
+  let mantissa = x & 0x7fffff;
+  if (exponent <= 0) return sign;
+  if (exponent >= 0x1f) return sign | 0x7c00;
+  mantissa >>= 13;
+  return sign | (exponent << 10) | mantissa;
+}
+
+const BYTES_PER_PIXEL: Record<string, number> = {
+  rgba8unorm: 4, 'rgba8unorm-srgb': 4, bgra8unorm: 4, 'bgra8unorm-srgb': 4,
+  rgba16float: 8, rgba32float: 16,
+};
+
+/**
+ * Converts 8-bit RGBA to a wider float format.
+ *
+ * A browser never needs this: Babylon uploads an ImageBitmap through
+ * `copyExternalImageToTexture`, and the GPU converts on the way in. Dawn
+ * rejects synthetic image sources, so uploads go through `writeTexture`
+ * instead — which demands the data already be in the destination format.
+ * Babylon's PBR BRDF lookup is the case that bites: an embedded 8-bit PNG
+ * bound for an rgba16float texture, which fails as
+ * "Required size for texture data layout (524288) exceeds the linear data
+ * size (262144)".
+ */
+function widenRgba8(source: Uint8Array, pixels: number, format: string): ArrayBufferView {
+  if (format === 'rgba16float') {
+    const out = new Uint16Array(pixels * 4);
+    for (let i = 0; i < pixels * 4; i++) out[i] = toHalf(source[i]! / 255);
+    return out;
+  }
+  if (format === 'rgba32float') {
+    const out = new Float32Array(pixels * 4);
+    for (let i = 0; i < pixels * 4; i++) out[i] = source[i]! / 255;
+    return out;
+  }
+  return source;
+}
+
+function adaptQueue(queue: any): any {
+  return new Proxy(queue, {
+    get(object, key) {
+      const value = object[key];
+      if (typeof value !== 'function') return value;
+      if (key !== 'writeTexture') return value.bind(object);
+      return (destination: any, data: any, layout: any, size: any) => {
+        const format: string | undefined = destination?.texture?.format;
+        const needed = format ? BYTES_PER_PIXEL[format] : undefined;
+        const width = size?.width ?? size?.[0] ?? 0;
+        const height = size?.height ?? size?.[1] ?? 1;
+        const view = ArrayBuffer.isView(data)
+          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+          : new Uint8Array(data);
+        const supplied = width && height ? view.byteLength / (width * height) : 0;
+        if (needed && needed !== 4 && Math.round(supplied) === 4) {
+          const widened = widenRgba8(view, width * height, format!);
+          return value.call(object, destination, widened, { ...layout, bytesPerRow: width * needed, rowsPerImage: height }, size);
+        }
+        return value.call(object, destination, data, layout, size);
+      };
+    },
+  });
+}
+
+function adaptDawnObject(target: any): any {
+  return new Proxy(target, {
+    get(object, key) {
+      if (key === 'features') return new Set([...object.features]);
+      if (key === 'queue') return adaptQueue(object.queue);
+      if (key === 'addEventListener' || key === 'removeEventListener') return () => {};
+      const value = object[key];
+      if (typeof value !== 'function') return value;
+      if (key === 'requestDevice') {
+        return async (...args: unknown[]) => adaptDawnObject(await value.apply(object, args));
+      }
+      return value.bind(object);
+    },
+  });
+}
+
+export interface HeadlessCanvas {
+  width: number;
+  height: number;
+  _context: HeadlessCanvasContext;
+  getContext(kind: string): unknown;
+}
+
+export function createHeadlessCanvas(width: number, height: number): HeadlessCanvas {
+  const canvas: any = {
+    width, height, clientWidth: width, clientHeight: height, style: {},
+    getContext(kind: string) { return kind === 'webgpu' ? this._context : null; },
+    addEventListener() {}, removeEventListener() {},
+    getBoundingClientRect: () => ({ width, height, left: 0, top: 0, right: width, bottom: height }),
+    setAttribute() {}, removeAttribute() {}, focus() {},
+  };
+  canvas._context = new HeadlessCanvasContext(canvas);
+  return canvas as HeadlessCanvas;
+}
+
+export interface HeadlessGpu {
+  gpu: any;
+  /** Must run before the process exits — an undestroyed Dawn instance hangs Node. */
+  dispose(): void;
+}
+
+export interface DecodedImage {
+  width: number;
+  height: number;
+  /** Tightly packed RGBA8. */
+  data: Uint8Array;
+}
+
+/** Decodes PNG/JPEG/WebP bytes to RGBA. `sharp` satisfies this. */
+export type ImageDecoder = (bytes: Uint8Array, mimeType: string) => Promise<DecodedImage>;
+
+/**
+ * Lets Babylon's real texture pipeline run in Node.
+ *
+ * Babylon decodes images through `createImageBitmap`, then uploads whatever it
+ * gets back. Its WebGPU upload branches on one thing:
+ *
+ *     if (imageBitmap.byteLength !== undefined) -> queue.writeTexture(...)
+ *     else                                     -> queue.copyExternalImageToTexture(...)
+ *
+ * Dawn rejects synthetic sources for `copyExternalImageToTexture` but accepts
+ * `writeTexture` with raw bytes. So this returns a Uint8Array of RGBA with the
+ * dimensions attached: it has a byteLength, so Babylon takes the raw-data path
+ * on its own, and no part of the engine or the device needs patching.
+ */
+export function installImageDecoder(decode: ImageDecoder): void {
+  if (typeof (globalThis as any).createImageBitmap === 'function') return;
+  (globalThis as any).createImageBitmap = async (source: any): Promise<unknown> => {
+    let bytes: Uint8Array;
+    let mimeType = 'image/png';
+    if (source instanceof Uint8Array) bytes = source;
+    else if (typeof Blob !== 'undefined' && source instanceof Blob) {
+      bytes = new Uint8Array(await source.arrayBuffer());
+      mimeType = source.type || mimeType;
+    } else if (source instanceof ArrayBuffer) bytes = new Uint8Array(source);
+    else if (ArrayBuffer.isView(source)) bytes = new Uint8Array(source.buffer, source.byteOffset, source.byteLength);
+    else throw new Error(`createImageBitmap shim cannot read a ${Object.prototype.toString.call(source)}`);
+    const image = await decode(bytes, mimeType);
+    const view = new Uint8Array(image.data) as Uint8Array & { width: number; height: number; close(): void };
+    view.width = image.width;
+    view.height = image.height;
+    view.close = () => {};
+    return view;
+  };
+}
+
+/**
+ * Babylon's scene loader reaches for XMLHttpRequest on some paths even when it
+ * was handed bytes, so Node needs one to exist. `preprocess/models` installs a
+ * fuller version for the bake pipeline; this is the small equivalent, kept
+ * local so the dev tools do not drag the model pipeline in behind them.
+ */
+function installXmlHttpRequestShim(): void {
+  if (typeof (globalThis as any).XMLHttpRequest !== 'undefined') return;
+  class FetchXhr {
+    // Babylon reads XMLHttpRequest.DONE off the constructor and waits on
+    // 'readystatechange' / 'loadend' listeners, not on onload.
+    static readonly UNSENT = 0;
+    static readonly OPENED = 1;
+    static readonly HEADERS_RECEIVED = 2;
+    static readonly LOADING = 3;
+    static readonly DONE = 4;
+    public readyState = 0;
+    public status = 0;
+    public statusText = '';
+    public response: unknown = null;
+    public responseText = '';
+    public responseType = '';
+    public responseURL = '';
+    public onreadystatechange: (() => void) | null = null;
+    public onload: (() => void) | null = null;
+    public onerror: ((error?: unknown) => void) | null = null;
+    private listeners = new Map<string, Array<(event?: unknown) => void>>();
+    private method = 'GET';
+    private url = '';
+    private contentType: string | null = null;
+
+    open(method: string, url: string): void { this.method = method; this.url = url; this.readyState = 1; }
+    setRequestHeader(): void {}
+    getAllResponseHeaders(): string { return this.contentType ? `content-type: ${this.contentType}` : ''; }
+    getResponseHeader(name: string): string | null {
+      return name.toLowerCase() === 'content-type' ? this.contentType : null;
+    }
+    abort(): void {}
+    addEventListener(type: string, handler: (event?: unknown) => void): void {
+      this.listeners.set(type, [...(this.listeners.get(type) ?? []), handler]);
+    }
+    removeEventListener(): void {}
+    private dispatch(type: string): void {
+      for (const handler of this.listeners.get(type) ?? []) handler({ target: this });
+    }
+    /**
+     * Settles the request the way Babylon's RequestFile expects: it attaches
+     * 'readystatechange' and 'loadend' listeners and inspects readyState and
+     * status from there. Firing only onload leaves it waiting forever.
+     */
+    private finish(kind: 'load' | 'error'): void {
+      this.readyState = 4;
+      this.onreadystatechange?.();
+      this.dispatch('readystatechange');
+      this.dispatch(kind);
+      if (kind === 'load') this.onload?.(); else this.onerror?.();
+      this.dispatch('loadend');
+    }
+    send(): void {
+      void (async () => {
+        try {
+          // Babylon wraps embedded images in a Blob and hands the loader a
+          // blob: URL. Node's fetch cannot resolve those — resolveObjectURL is
+          // the only way back to the bytes, and without this the loader waits
+          // forever on an image that never arrives.
+          let buffer: ArrayBuffer;
+          if (this.url.startsWith('blob:')) {
+            const { resolveObjectURL } = await import('node:buffer');
+            const blob = resolveObjectURL(this.url);
+            if (!blob) throw new Error(`Unresolvable object URL ${this.url}`);
+            buffer = await blob.arrayBuffer();
+            this.contentType = blob.type || null;
+            this.status = 200;
+            this.statusText = 'OK';
+          } else {
+            const response = await fetch(this.url, { method: this.method });
+            buffer = await response.arrayBuffer();
+            this.status = response.status;
+            this.statusText = response.statusText;
+            this.contentType = response.headers.get('content-type');
+          }
+          this.responseURL = this.url;
+          this.response = this.responseType === 'text' ? new TextDecoder().decode(buffer) : buffer;
+          if (this.responseType === '' || this.responseType === 'text') this.responseText = new TextDecoder().decode(buffer);
+          this.finish('load');
+        } catch {
+          this.status = 0;
+          this.finish('error');
+        }
+      })();
+    }
+  }
+  (globalThis as any).XMLHttpRequest = FetchXhr;
+}
+
+/** Installs `navigator.gpu` and the globals Babylon's WebGPU engine reads. */
+export async function installHeadlessWebGpu(dawnModule = '@kmamal/gpu'): Promise<HeadlessGpu> {
+  const loaded: any = await import(/* @vite-ignore */ dawnModule);
+  const dawn = loaded.default ?? loaded;
+  const instance = dawn.create([]);
+  const gpu = {
+    requestAdapter: async (options?: unknown) => {
+      const adapter = await instance.requestAdapter(options);
+      return adapter ? adaptDawnObject(adapter) : adapter;
+    },
+    getPreferredCanvasFormat: () => 'bgra8unorm',
+    wgslLanguageFeatures: new Set<string>(),
+  };
+  // Node 24 exposes `navigator` as a getter-only global, so redefine it.
+  Object.defineProperty(globalThis, 'navigator', {
+    configurable: true,
+    value: { ...(globalThis.navigator ?? {}), gpu, userAgent: 'node', language: 'en', onLine: true },
+  });
+  installXmlHttpRequestShim();
+  (globalThis as any).self ??= globalThis;
+  (globalThis as any).requestAnimationFrame ??= (callback: (t: number) => void) => setTimeout(() => callback(Date.now()), 0);
+  (globalThis as any).cancelAnimationFrame ??= (id: any) => clearTimeout(id);
+  return { gpu, dispose: () => dawn.destroy?.(instance) };
+}

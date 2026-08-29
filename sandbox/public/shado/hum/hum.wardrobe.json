@@ -6,27 +6,27 @@
     "map": "buildWardrobe() in client/scripts/install-ryzom-humanoid.mjs",
     "note": "Ryzom garment meshes mapped to EQ (piece, variation): civil01->00, armor00->01, armor01->02, caster01->03. Applied when the .babylon is written; the raw rig does not carry it."
   },
-  "runtimeScale": 3.4060134046034283,
+  "runtimeScale": 3.2586623636477654,
   "runtimeYawCorrection": 4.71238898038469,
   "boundingBox": {
     "min": [
-      -0.6816515723540991,
-      -0.006539921230246826,
-      -1.8276174841789727
+      -0.7147486522309062,
+      -0.03250322577865683,
+      -1.748551058489497
     ],
     "max": [
-      0.7377311050407801,
-      5.993460227035939,
-      1.8276168751363004
+      0.705815366599634,
+      5.967496955743798,
+      1.7485504757952415
     ],
     "center": [
-      0.02803976634334049,
-      2.993460152902846,
-      -3.0452133614744525e-7
+      -0.004466642815636135,
+      2.9674968649825706,
+      -2.9134712775658045e-7
     ],
     "yOffset": 0
   },
-  "submeshCount": 43,
+  "submeshCount": 74,
   "submeshes": [
     {
       "name": "FY_HOM_armor00_hand_primitive0",
@@ -288,46 +288,263 @@
       "atlasIndex": 36
     },
     {
+      "name": "FY_HOM_cheveux_basic01",
+      "piece": "hr",
+      "variation": "22",
+      "texNum": "00",
+      "atlasIndex": 37
+    },
+    {
+      "name": "FY_HOM_cheveux_long01",
+      "piece": "hr",
+      "variation": "21",
+      "texNum": "00",
+      "atlasIndex": 38
+    },
+    {
+      "name": "FY_HOM_cheveux_medium01",
+      "piece": "hr",
+      "variation": "20",
+      "texNum": "00",
+      "atlasIndex": 39
+    },
+    {
+      "name": "FY_HOM_cheveux_shave01",
+      "piece": "hr",
+      "variation": "24",
+      "texNum": "00",
+      "atlasIndex": 40
+    },
+    {
       "name": "FY_HOM_cheveux_short01",
       "piece": "hr",
       "variation": "00",
       "texNum": "00",
-      "atlasIndex": 37
+      "atlasIndex": 41
+    },
+    {
+      "name": "FY_HOM_cheveux_short02",
+      "piece": "hr",
+      "variation": "25",
+      "texNum": "00",
+      "atlasIndex": 42
+    },
+    {
+      "name": "FY_HOM_cheveux_style01",
+      "piece": "hr",
+      "variation": "23",
+      "texNum": "00",
+      "atlasIndex": 43
     },
     {
       "name": "FY_HOM_visage_primitive0",
       "piece": "he",
       "variation": "00",
       "texNum": "00",
-      "atlasIndex": 38
+      "atlasIndex": 44
     },
     {
       "name": "FY_HOM_visage_primitive1",
       "piece": "he",
       "variation": "00",
       "texNum": "01",
-      "atlasIndex": 39
+      "atlasIndex": 45
     },
     {
       "name": "FY_HOM_visage_primitive2",
       "piece": "he",
       "variation": "00",
       "texNum": "02",
-      "atlasIndex": 40
+      "atlasIndex": 46
     },
     {
       "name": "FY_HOM_visage_primitive3",
       "piece": "he",
       "variation": "00",
       "texNum": "03",
-      "atlasIndex": 41
+      "atlasIndex": 47
     },
     {
       "name": "FY_HOM_visage_primitive4",
       "piece": "he",
       "variation": "00",
       "texNum": "04",
-      "atlasIndex": 42
+      "atlasIndex": 48
+    },
+    {
+      "name": "MA_HOM_civil01_gilet_primitive0",
+      "piece": "ch",
+      "variation": "20",
+      "texNum": "00",
+      "atlasIndex": 49
+    },
+    {
+      "name": "MA_HOM_civil01_gilet_primitive1",
+      "piece": "ch",
+      "variation": "20",
+      "texNum": "01",
+      "atlasIndex": 50
+    },
+    {
+      "name": "MA_HOM_civil01_armpad_primitive0",
+      "piece": "ua",
+      "variation": "20",
+      "texNum": "00",
+      "atlasIndex": 51
+    },
+    {
+      "name": "MA_HOM_civil01_armpad_primitive1",
+      "piece": "ua",
+      "variation": "20",
+      "texNum": "01",
+      "atlasIndex": 52
+    },
+    {
+      "name": "MA_HOM_civil01_pantabottes_primitive0",
+      "piece": "lg",
+      "variation": "20",
+      "texNum": "00",
+      "atlasIndex": 53
+    },
+    {
+      "name": "MA_HOM_civil01_pantabottes_primitive1",
+      "piece": "lg",
+      "variation": "20",
+      "texNum": "01",
+      "atlasIndex": 54
+    },
+    {
+      "name": "MA_HOM_civil01_bottes_primitive0",
+      "piece": "ft",
+      "variation": "20",
+      "texNum": "00",
+      "atlasIndex": 55
+    },
+    {
+      "name": "MA_HOM_civil01_bottes_primitive1",
+      "piece": "ft",
+      "variation": "20",
+      "texNum": "01",
+      "atlasIndex": 56
+    },
+    {
+      "name": "TR_HOM_Civil01_gilet_primitive0",
+      "piece": "ch",
+      "variation": "21",
+      "texNum": "00",
+      "atlasIndex": 57
+    },
+    {
+      "name": "TR_HOM_Civil01_gilet_primitive1",
+      "piece": "ch",
+      "variation": "21",
+      "texNum": "01",
+      "atlasIndex": 58
+    },
+    {
+      "name": "TR_HOM_Civil01_armpad_primitive0",
+      "piece": "ua",
+      "variation": "21",
+      "texNum": "00",
+      "atlasIndex": 59
+    },
+    {
+      "name": "TR_HOM_Civil01_armpad_primitive1",
+      "piece": "ua",
+      "variation": "21",
+      "texNum": "01",
+      "atlasIndex": 60
+    },
+    {
+      "name": "TR_HOM_Civil01_bottes_primitive0",
+      "piece": "ft",
+      "variation": "21",
+      "texNum": "00",
+      "atlasIndex": 61
+    },
+    {
+      "name": "TR_HOM_Civil01_bottes_primitive1",
+      "piece": "ft",
+      "variation": "21",
+      "texNum": "01",
+      "atlasIndex": 62
+    },
+    {
+      "name": "TR_HOM_Civil01_pantabottes_primitive0",
+      "piece": "lg",
+      "variation": "21",
+      "texNum": "00",
+      "atlasIndex": 63
+    },
+    {
+      "name": "TR_HOM_Civil01_pantabottes_primitive1",
+      "piece": "lg",
+      "variation": "21",
+      "texNum": "01",
+      "atlasIndex": 64
+    },
+    {
+      "name": "ZO_HOM_civil01_gilet_primitive0",
+      "piece": "ch",
+      "variation": "22",
+      "texNum": "00",
+      "atlasIndex": 65
+    },
+    {
+      "name": "ZO_HOM_civil01_gilet_primitive1",
+      "piece": "ch",
+      "variation": "22",
+      "texNum": "01",
+      "atlasIndex": 66
+    },
+    {
+      "name": "ZO_HOM_civil01_pantabottes_primitive0",
+      "piece": "lg",
+      "variation": "22",
+      "texNum": "00",
+      "atlasIndex": 67
+    },
+    {
+      "name": "ZO_HOM_civil01_pantabottes_primitive1",
+      "piece": "lg",
+      "variation": "22",
+      "texNum": "01",
+      "atlasIndex": 68
+    },
+    {
+      "name": "ZO_HOM_civil01_bottes_primitive0",
+      "piece": "ft",
+      "variation": "22",
+      "texNum": "00",
+      "atlasIndex": 69
+    },
+    {
+      "name": "ZO_HOM_civil01_bottes_primitive1",
+      "piece": "ft",
+      "variation": "22",
+      "texNum": "01",
+      "atlasIndex": 70
+    },
+    {
+      "name": "ZO_HOM_civil01_armpad_primitive0",
+      "piece": "ua",
+      "variation": "22",
+      "texNum": "00",
+      "atlasIndex": 71
+    },
+    {
+      "name": "ZO_HOM_civil01_armpad_primitive1",
+      "piece": "ua",
+      "variation": "22",
+      "texNum": "01",
+      "atlasIndex": 72
+    },
+    {
+      "name": "ZO_HOM_civil01_armpad_primitive2",
+      "piece": "ua",
+      "variation": "22",
+      "texNum": "02",
+      "atlasIndex": 73
     }
   ],
   "pieces": [
@@ -375,6 +592,27 @@
             18,
             19
           ]
+        },
+        {
+          "variation": "20",
+          "submeshOrdinals": [
+            49,
+            50
+          ]
+        },
+        {
+          "variation": "21",
+          "submeshOrdinals": [
+            57,
+            58
+          ]
+        },
+        {
+          "variation": "22",
+          "submeshOrdinals": [
+            65,
+            66
+          ]
         }
       ]
     },
@@ -402,6 +640,27 @@
           "submeshOrdinals": [
             12,
             13
+          ]
+        },
+        {
+          "variation": "20",
+          "submeshOrdinals": [
+            55,
+            56
+          ]
+        },
+        {
+          "variation": "21",
+          "submeshOrdinals": [
+            61,
+            62
+          ]
+        },
+        {
+          "variation": "22",
+          "submeshOrdinals": [
+            69,
+            70
           ]
         }
       ]
@@ -437,6 +696,27 @@
             22,
             23
           ]
+        },
+        {
+          "variation": "20",
+          "submeshOrdinals": [
+            53,
+            54
+          ]
+        },
+        {
+          "variation": "21",
+          "submeshOrdinals": [
+            63,
+            64
+          ]
+        },
+        {
+          "variation": "22",
+          "submeshOrdinals": [
+            67,
+            68
+          ]
         }
       ]
     },
@@ -465,6 +745,28 @@
             14,
             15
           ]
+        },
+        {
+          "variation": "20",
+          "submeshOrdinals": [
+            51,
+            52
+          ]
+        },
+        {
+          "variation": "21",
+          "submeshOrdinals": [
+            59,
+            60
+          ]
+        },
+        {
+          "variation": "22",
+          "submeshOrdinals": [
+            71,
+            72,
+            73
+          ]
         }
       ]
     },
@@ -474,7 +776,43 @@
         {
           "variation": "00",
           "submeshOrdinals": [
+            41
+          ]
+        },
+        {
+          "variation": "20",
+          "submeshOrdinals": [
+            39
+          ]
+        },
+        {
+          "variation": "21",
+          "submeshOrdinals": [
+            38
+          ]
+        },
+        {
+          "variation": "22",
+          "submeshOrdinals": [
             37
+          ]
+        },
+        {
+          "variation": "23",
+          "submeshOrdinals": [
+            43
+          ]
+        },
+        {
+          "variation": "24",
+          "submeshOrdinals": [
+            40
+          ]
+        },
+        {
+          "variation": "25",
+          "submeshOrdinals": [
+            42
           ]
         }
       ]
@@ -485,22 +823,22 @@
         {
           "variation": "00",
           "submeshOrdinals": [
-            38,
-            39,
-            40,
-            41,
-            42
+            44,
+            45,
+            46,
+            47,
+            48
           ]
         }
       ]
     }
   ],
   "atlas": {
-    "file": "hum.atlas.png",
+    "file": "hum.atlas.jpg",
     "layout": "grid",
     "side": 256,
     "columns": 8,
-    "rows": 6,
+    "rows": 13,
     "layers": [
       "humhn0000",
       "humhn0001",
@@ -539,12 +877,73 @@
       "humch0001",
       "humch0002",
       "humch0003",
+      "humhr2200",
+      "humhr2100",
+      "humhr2000",
+      "humhr2400",
       "humhr0000",
+      "humhr2500",
+      "humhr2300",
       "humhe0000",
       "humhe0001",
       "humhe0002",
       "humhe0003",
-      "humhe0004"
+      "humhe0004",
+      "humch2000",
+      "humch2001",
+      "humua2000",
+      "humua2001",
+      "humlg2000",
+      "humlg2001",
+      "humft2000",
+      "humft2001",
+      "humch2100",
+      "humch2101",
+      "humua2100",
+      "humua2101",
+      "humft2100",
+      "humft2101",
+      "humlg2100",
+      "humlg2101",
+      "humch2200",
+      "humch2201",
+      "humlg2200",
+      "humlg2201",
+      "humft2200",
+      "humft2201",
+      "humua2200",
+      "humua2201",
+      "humua2202",
+      "humch0400",
+      "humch0401",
+      "humch0500",
+      "humch0501",
+      "humft0400",
+      "humft0401",
+      "humft0500",
+      "humft0501",
+      "humft0502",
+      "humhn0400",
+      "humhn0401",
+      "humhn0500",
+      "humhn0501",
+      "humlg0400",
+      "humlg0401",
+      "humlg0500",
+      "humlg0501",
+      "humua0400",
+      "humua0401",
+      "humua0500",
+      "humua0501",
+      "humua0502",
+      "humhe2004",
+      "humhe2104",
+      "humhe2204",
+      "humhe2304",
+      "humhe2404",
+      "humhe2504",
+      "humhe2604",
+      "humhe2704"
     ]
   },
   "vat": {
@@ -663,325 +1062,325 @@
       {
         "name": "o01",
         "from": 869,
-        "to": 949,
-        "fps": 30
-      },
-      {
-        "name": "p01",
-        "from": 950,
-        "to": 1030,
-        "fps": 30
-      },
-      {
-        "name": "p02",
-        "from": 1031,
-        "to": 1121,
-        "fps": 30
-      },
-      {
-        "name": "p06",
-        "from": 1122,
-        "to": 1182,
-        "fps": 30
-      },
-      {
-        "name": "s01",
-        "from": 1183,
-        "to": 1273,
-        "fps": 30
-      },
-      {
-        "name": "s03",
-        "from": 1274,
-        "to": 1373,
-        "fps": 30
-      },
-      {
-        "name": "s06",
-        "from": 1374,
-        "to": 1423,
-        "fps": 30
-      },
-      {
-        "name": "s09",
-        "from": 1424,
-        "to": 1544,
-        "fps": 30
-      },
-      {
-        "name": "s16",
-        "from": 1545,
-        "to": 1635,
-        "fps": 30
-      },
-      {
-        "name": "s21",
-        "from": 1636,
-        "to": 1766,
-        "fps": 30
-      },
-      {
-        "name": "s25",
-        "from": 1767,
-        "to": 1851,
-        "fps": 30
-      },
-      {
-        "name": "s28",
-        "from": 1852,
-        "to": 1921,
-        "fps": 30
-      },
-      {
-        "name": "l03",
-        "from": 950,
-        "to": 959,
-        "fps": 30
-      },
-      {
-        "name": "l04",
-        "from": 950,
-        "to": 959,
-        "fps": 30
-      },
-      {
-        "name": "l05",
-        "from": 950,
-        "to": 959,
-        "fps": 30
-      },
-      {
-        "name": "l06",
-        "from": 950,
-        "to": 959,
-        "fps": 30
-      },
-      {
-        "name": "l07",
-        "from": 950,
-        "to": 959,
-        "fps": 30
-      },
-      {
-        "name": "l08",
-        "from": 950,
-        "to": 959,
+        "to": 929,
         "fps": 30
       },
       {
         "name": "o02",
-        "from": 950,
-        "to": 959,
+        "from": 930,
+        "to": 990,
         "fps": 30
       },
       {
         "name": "o03",
-        "from": 950,
-        "to": 959,
+        "from": 991,
+        "to": 1051,
+        "fps": 30
+      },
+      {
+        "name": "p01",
+        "from": 1052,
+        "to": 1132,
+        "fps": 30
+      },
+      {
+        "name": "p02",
+        "from": 1133,
+        "to": 1223,
         "fps": 30
       },
       {
         "name": "p03",
-        "from": 950,
-        "to": 959,
+        "from": 1224,
+        "to": 1298,
         "fps": 30
       },
       {
         "name": "p04",
-        "from": 950,
-        "to": 959,
+        "from": 1299,
+        "to": 1368,
         "fps": 30
       },
       {
         "name": "p05",
-        "from": 950,
-        "to": 959,
+        "from": 1369,
+        "to": 1460,
+        "fps": 30
+      },
+      {
+        "name": "p06",
+        "from": 1461,
+        "to": 1521,
         "fps": 30
       },
       {
         "name": "p07",
-        "from": 950,
-        "to": 959,
+        "from": 1522,
+        "to": 1610,
         "fps": 30
       },
       {
         "name": "p08",
-        "from": 950,
-        "to": 959,
+        "from": 1611,
+        "to": 1651,
         "fps": 30
       },
       {
-        "name": "pos",
-        "from": 950,
-        "to": 950,
+        "name": "s01",
+        "from": 1652,
+        "to": 1742,
         "fps": 30
       },
       {
         "name": "s02",
-        "from": 950,
-        "to": 959,
+        "from": 1743,
+        "to": 1807,
+        "fps": 30
+      },
+      {
+        "name": "s03",
+        "from": 1808,
+        "to": 1907,
         "fps": 30
       },
       {
         "name": "s04",
-        "from": 950,
-        "to": 959,
+        "from": 1908,
+        "to": 1968,
         "fps": 30
       },
       {
-        "name": "s05",
-        "from": 950,
-        "to": 959,
+        "name": "s06",
+        "from": 1969,
+        "to": 2018,
         "fps": 30
       },
       {
         "name": "s07",
-        "from": 950,
-        "to": 959,
+        "from": 2019,
+        "to": 2144,
         "fps": 30
       },
       {
-        "name": "s08",
-        "from": 950,
-        "to": 959,
+        "name": "s09",
+        "from": 2145,
+        "to": 2265,
         "fps": 30
       },
       {
         "name": "s10",
-        "from": 950,
-        "to": 959,
+        "from": 2266,
+        "to": 2361,
         "fps": 30
       },
       {
         "name": "s11",
-        "from": 950,
-        "to": 959,
+        "from": 2362,
+        "to": 2422,
         "fps": 30
       },
       {
         "name": "s12",
-        "from": 950,
-        "to": 959,
+        "from": 2423,
+        "to": 2492,
         "fps": 30
       },
       {
         "name": "s13",
-        "from": 950,
-        "to": 959,
+        "from": 2493,
+        "to": 2558,
         "fps": 30
       },
       {
         "name": "s14",
-        "from": 950,
-        "to": 959,
+        "from": 2559,
+        "to": 2786,
         "fps": 30
       },
       {
         "name": "s15",
-        "from": 950,
-        "to": 959,
+        "from": 2787,
+        "to": 2986,
         "fps": 30
       },
       {
-        "name": "s17",
-        "from": 950,
-        "to": 959,
+        "name": "s16",
+        "from": 2987,
+        "to": 3077,
         "fps": 30
       },
       {
         "name": "s18",
-        "from": 950,
-        "to": 959,
+        "from": 3078,
+        "to": 3208,
         "fps": 30
       },
       {
         "name": "s19",
-        "from": 950,
-        "to": 959,
+        "from": 3209,
+        "to": 3274,
         "fps": 30
       },
       {
         "name": "s20",
-        "from": 950,
-        "to": 959,
+        "from": 3275,
+        "to": 3347,
+        "fps": 30
+      },
+      {
+        "name": "s21",
+        "from": 3348,
+        "to": 3478,
         "fps": 30
       },
       {
         "name": "s22",
-        "from": 950,
-        "to": 959,
+        "from": 3479,
+        "to": 3539,
         "fps": 30
       },
       {
         "name": "s23",
-        "from": 950,
-        "to": 959,
+        "from": 3540,
+        "to": 3660,
         "fps": 30
       },
       {
         "name": "s24",
-        "from": 950,
-        "to": 959,
+        "from": 3661,
+        "to": 3721,
+        "fps": 30
+      },
+      {
+        "name": "s25",
+        "from": 3722,
+        "to": 3806,
         "fps": 30
       },
       {
         "name": "s26",
-        "from": 950,
-        "to": 959,
+        "from": 3807,
+        "to": 3913,
         "fps": 30
       },
       {
         "name": "s27",
-        "from": 950,
-        "to": 959,
+        "from": 3914,
+        "to": 3998,
+        "fps": 30
+      },
+      {
+        "name": "s28",
+        "from": 3999,
+        "to": 4068,
+        "fps": 30
+      },
+      {
+        "name": "l03",
+        "from": 1052,
+        "to": 1061,
+        "fps": 30
+      },
+      {
+        "name": "l04",
+        "from": 1052,
+        "to": 1061,
+        "fps": 30
+      },
+      {
+        "name": "l05",
+        "from": 1052,
+        "to": 1061,
+        "fps": 30
+      },
+      {
+        "name": "l06",
+        "from": 1052,
+        "to": 1061,
+        "fps": 30
+      },
+      {
+        "name": "l07",
+        "from": 1052,
+        "to": 1061,
+        "fps": 30
+      },
+      {
+        "name": "l08",
+        "from": 1052,
+        "to": 1061,
+        "fps": 30
+      },
+      {
+        "name": "pos",
+        "from": 1052,
+        "to": 1052,
+        "fps": 30
+      },
+      {
+        "name": "s05",
+        "from": 1052,
+        "to": 1061,
+        "fps": 30
+      },
+      {
+        "name": "s08",
+        "from": 3275,
+        "to": 3347,
+        "fps": 30
+      },
+      {
+        "name": "s17",
+        "from": 1052,
+        "to": 1061,
         "fps": 30
       },
       {
         "name": "t02",
-        "from": 950,
-        "to": 959,
+        "from": 1052,
+        "to": 1061,
         "fps": 30
       },
       {
         "name": "t03",
-        "from": 950,
-        "to": 959,
+        "from": 1052,
+        "to": 1061,
         "fps": 30
       },
       {
         "name": "t04",
-        "from": 950,
-        "to": 959,
+        "from": 1052,
+        "to": 1061,
         "fps": 30
       },
       {
         "name": "t05",
-        "from": 950,
-        "to": 959,
+        "from": 1052,
+        "to": 1061,
         "fps": 30
       },
       {
         "name": "t06",
-        "from": 950,
-        "to": 959,
+        "from": 1052,
+        "to": 1061,
         "fps": 30
       },
       {
         "name": "t07",
-        "from": 950,
-        "to": 959,
+        "from": 1052,
+        "to": 1061,
         "fps": 30
       },
       {
         "name": "t08",
-        "from": 950,
-        "to": 959,
+        "from": 1052,
+        "to": 1061,
         "fps": 30
       },
       {
         "name": "t09",
-        "from": 950,
-        "to": 959,
+        "from": 1052,
+        "to": 1061,
         "fps": 30
       }
     ]
@@ -992,8 +1391,9 @@
     "codec": "gzip",
     "fps": 30,
     "alignment": {
-      "scale": 3.4060134046034283,
-      "yaw": 4.71238898038469
+      "scale": 3.2586623636477654,
+      "yaw": 4.71238898038469,
+      "targetHeight": 6
     },
     "bones": 84,
     "animations": [
@@ -1108,326 +1508,1237 @@
       {
         "name": "o01",
         "from": 1722,
-        "to": 1882,
+        "to": 1842,
+        "fps": 60
+      },
+      {
+        "name": "o02",
+        "from": 1843,
+        "to": 1963,
+        "fps": 60
+      },
+      {
+        "name": "o03",
+        "from": 1964,
+        "to": 2084,
         "fps": 60
       },
       {
         "name": "p01",
-        "from": 1883,
-        "to": 2043,
+        "from": 2085,
+        "to": 2245,
         "fps": 60
       },
       {
         "name": "p02",
-        "from": 2044,
-        "to": 2224,
+        "from": 2246,
+        "to": 2426,
+        "fps": 60
+      },
+      {
+        "name": "p03",
+        "from": 2427,
+        "to": 2575,
+        "fps": 60
+      },
+      {
+        "name": "p04",
+        "from": 2576,
+        "to": 2715,
+        "fps": 60
+      },
+      {
+        "name": "p05",
+        "from": 2716,
+        "to": 2899,
         "fps": 60
       },
       {
         "name": "p06",
-        "from": 2225,
-        "to": 2345,
+        "from": 2900,
+        "to": 3020,
+        "fps": 60
+      },
+      {
+        "name": "p07",
+        "from": 3021,
+        "to": 3197,
+        "fps": 60
+      },
+      {
+        "name": "p08",
+        "from": 3198,
+        "to": 3278,
         "fps": 60
       },
       {
         "name": "s01",
-        "from": 2346,
-        "to": 2526,
+        "from": 3279,
+        "to": 3459,
+        "fps": 60
+      },
+      {
+        "name": "s02",
+        "from": 3460,
+        "to": 3588,
         "fps": 60
       },
       {
         "name": "s03",
-        "from": 2527,
-        "to": 2726,
+        "from": 3589,
+        "to": 3788,
+        "fps": 60
+      },
+      {
+        "name": "s04",
+        "from": 3789,
+        "to": 3909,
         "fps": 60
       },
       {
         "name": "s06",
-        "from": 2727,
-        "to": 2826,
+        "from": 3910,
+        "to": 4009,
+        "fps": 60
+      },
+      {
+        "name": "s07",
+        "from": 4010,
+        "to": 4261,
         "fps": 60
       },
       {
         "name": "s09",
-        "from": 2827,
-        "to": 3067,
+        "from": 4262,
+        "to": 4502,
+        "fps": 60
+      },
+      {
+        "name": "s10",
+        "from": 4503,
+        "to": 4693,
+        "fps": 60
+      },
+      {
+        "name": "s11",
+        "from": 4694,
+        "to": 4814,
+        "fps": 60
+      },
+      {
+        "name": "s12",
+        "from": 4815,
+        "to": 4954,
+        "fps": 60
+      },
+      {
+        "name": "s13",
+        "from": 4955,
+        "to": 5085,
+        "fps": 60
+      },
+      {
+        "name": "s14",
+        "from": 5086,
+        "to": 5541,
+        "fps": 60
+      },
+      {
+        "name": "s15",
+        "from": 5542,
+        "to": 5941,
         "fps": 60
       },
       {
         "name": "s16",
-        "from": 3068,
-        "to": 3248,
+        "from": 5942,
+        "to": 6122,
+        "fps": 60
+      },
+      {
+        "name": "s18",
+        "from": 6123,
+        "to": 6383,
+        "fps": 60
+      },
+      {
+        "name": "s19",
+        "from": 6384,
+        "to": 6514,
+        "fps": 60
+      },
+      {
+        "name": "s20",
+        "from": 6515,
+        "to": 6659,
         "fps": 60
       },
       {
         "name": "s21",
-        "from": 3249,
-        "to": 3509,
+        "from": 6660,
+        "to": 6920,
+        "fps": 60
+      },
+      {
+        "name": "s22",
+        "from": 6921,
+        "to": 7041,
+        "fps": 60
+      },
+      {
+        "name": "s23",
+        "from": 7042,
+        "to": 7282,
+        "fps": 60
+      },
+      {
+        "name": "s24",
+        "from": 7283,
+        "to": 7403,
         "fps": 60
       },
       {
         "name": "s25",
-        "from": 3510,
-        "to": 3679,
+        "from": 7404,
+        "to": 7573,
+        "fps": 60
+      },
+      {
+        "name": "s26",
+        "from": 7574,
+        "to": 7787,
+        "fps": 60
+      },
+      {
+        "name": "s27",
+        "from": 7788,
+        "to": 7957,
         "fps": 60
       },
       {
         "name": "s28",
-        "from": 3680,
-        "to": 3819,
+        "from": 7958,
+        "to": 8097,
         "fps": 60
       },
       {
         "name": "l03",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "l04",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "l05",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "l06",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "l07",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "l08",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "o02",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "o03",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "p03",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "p04",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "p05",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "p07",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "p08",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "pos",
-        "from": 1883,
-        "to": 1883,
-        "fps": 30
-      },
-      {
-        "name": "s02",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s04",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2085,
         "fps": 30
       },
       {
         "name": "s05",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s07",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "s08",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s10",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s11",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s12",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s13",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s14",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s15",
-        "from": 1883,
-        "to": 1892,
+        "from": 6515,
+        "to": 6659,
         "fps": 30
       },
       {
         "name": "s17",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s18",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s19",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s20",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s22",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s23",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s24",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s26",
-        "from": 1883,
-        "to": 1892,
-        "fps": 30
-      },
-      {
-        "name": "s27",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "t02",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "t03",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "t04",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "t05",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "t06",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "t07",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "t08",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
       },
       {
         "name": "t09",
-        "from": 1883,
-        "to": 1892,
+        "from": 2085,
+        "to": 2094,
         "fps": 30
+      }
+    ]
+  },
+  "response": {
+    "file": "hum.response.png",
+    "layout": "grid",
+    "side": 128,
+    "columns": 8,
+    "rows": 13,
+    "channels": {
+      "r": "skin",
+      "g": "device",
+      "b": "dyeable"
+    },
+    "maskedLayers": 104,
+    "emblazonedLayers": 5,
+    "note": "Per-texel material response. `r` marks skin, so a complexion multiplies there and a dye does not; `g` marks the heraldic charge; `b` marks what a dye may recolour. A layer with no mask is wholly dyeable."
+  },
+  "appearance": {
+    "complexions": [
+      [
+        1,
+        1,
+        1
+      ],
+      [
+        0.9,
+        0.86,
+        0.82
+      ],
+      [
+        0.8,
+        0.73,
+        0.68
+      ],
+      [
+        1.08,
+        1.04,
+        1
+      ],
+      [
+        1.06,
+        0.97,
+        0.9
+      ],
+      [
+        0.94,
+        0.94,
+        0.97
+      ],
+      [
+        1.02,
+        0.95,
+        0.86
+      ],
+      [
+        0.87,
+        0.83,
+        0.8
+      ]
+    ],
+    "hidePiece": "--",
+    "hair": {
+      "base": 20,
+      "count": 6
+    },
+    "face": {
+      "base": 20,
+      "count": 8
+    },
+    "uniforms": [
+      {
+        "uniform": "04",
+        "label": "Talios Watch",
+        "tier": 2,
+        "texture": 1402,
+        "palette": null,
+        "unmintedPalette": {
+          "neutralize": 1,
+          "pieces": {
+            "ch": [
+              0.61,
+              0.77,
+              0.97
+            ],
+            "lg": [
+              0.56,
+              0.71,
+              0.89
+            ],
+            "ua": [
+              0.61,
+              0.77,
+              0.97
+            ],
+            "ft": [
+              0.45,
+              0.52,
+              0.61
+            ],
+            "hn": [
+              0.99,
+              0.97,
+              0.99
+            ]
+          }
+        },
+        "device": {
+          "strength": 1,
+          "colour": [
+            0.93,
+            0.94,
+            0.97
+          ]
+        },
+        "meshes": null,
+        "minted": true,
+        "layers": [
+          {
+            "piece": "ch",
+            "layers": [
+              {
+                "texNum": "00",
+                "atlasIndex": 74,
+                "layer": "humch0400"
+              },
+              {
+                "texNum": "01",
+                "atlasIndex": 75,
+                "layer": "humch0401"
+              }
+            ]
+          },
+          {
+            "piece": "ft",
+            "layers": [
+              {
+                "texNum": "00",
+                "atlasIndex": 78,
+                "layer": "humft0400"
+              },
+              {
+                "texNum": "01",
+                "atlasIndex": 79,
+                "layer": "humft0401"
+              }
+            ]
+          },
+          {
+            "piece": "hn",
+            "layers": [
+              {
+                "texNum": "00",
+                "atlasIndex": 83,
+                "layer": "humhn0400"
+              },
+              {
+                "texNum": "01",
+                "atlasIndex": 84,
+                "layer": "humhn0401"
+              }
+            ]
+          },
+          {
+            "piece": "lg",
+            "layers": [
+              {
+                "texNum": "00",
+                "atlasIndex": 87,
+                "layer": "humlg0400"
+              },
+              {
+                "texNum": "01",
+                "atlasIndex": 88,
+                "layer": "humlg0401"
+              }
+            ]
+          },
+          {
+            "piece": "ua",
+            "layers": [
+              {
+                "texNum": "00",
+                "atlasIndex": 91,
+                "layer": "humua0400"
+              },
+              {
+                "texNum": "01",
+                "atlasIndex": 92,
+                "layer": "humua0401"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "uniform": "05",
+        "label": "Lowharbor Dockwatch",
+        "tier": 1,
+        "texture": 1501,
+        "palette": null,
+        "unmintedPalette": {
+          "neutralize": 1,
+          "pieces": {
+            "ch": [
+              0.91,
+              1,
+              0.94
+            ],
+            "lg": [
+              0.77,
+              0.85,
+              0.8
+            ],
+            "ua": [
+              0.91,
+              1,
+              0.94
+            ],
+            "ft": [
+              0.42,
+              0.45,
+              0.44
+            ],
+            "hn": [
+              0.96,
+              0.88,
+              0.8
+            ]
+          }
+        },
+        "device": {
+          "strength": 1,
+          "colour": [
+            0.86,
+            0.71,
+            0.36
+          ]
+        },
+        "meshes": null,
+        "minted": true,
+        "layers": [
+          {
+            "piece": "ch",
+            "layers": [
+              {
+                "texNum": "00",
+                "atlasIndex": 76,
+                "layer": "humch0500"
+              },
+              {
+                "texNum": "01",
+                "atlasIndex": 77,
+                "layer": "humch0501"
+              }
+            ]
+          },
+          {
+            "piece": "ft",
+            "layers": [
+              {
+                "texNum": "00",
+                "atlasIndex": 80,
+                "layer": "humft0500"
+              },
+              {
+                "texNum": "01",
+                "atlasIndex": 81,
+                "layer": "humft0501"
+              },
+              {
+                "texNum": "02",
+                "atlasIndex": 82,
+                "layer": "humft0502"
+              }
+            ]
+          },
+          {
+            "piece": "hn",
+            "layers": [
+              {
+                "texNum": "00",
+                "atlasIndex": 85,
+                "layer": "humhn0500"
+              },
+              {
+                "texNum": "01",
+                "atlasIndex": 86,
+                "layer": "humhn0501"
+              }
+            ]
+          },
+          {
+            "piece": "lg",
+            "layers": [
+              {
+                "texNum": "00",
+                "atlasIndex": 89,
+                "layer": "humlg0500"
+              },
+              {
+                "texNum": "01",
+                "atlasIndex": 90,
+                "layer": "humlg0501"
+              }
+            ]
+          },
+          {
+            "piece": "ua",
+            "layers": [
+              {
+                "texNum": "00",
+                "atlasIndex": 93,
+                "layer": "humua0500"
+              },
+              {
+                "texNum": "01",
+                "atlasIndex": 94,
+                "layer": "humua0501"
+              },
+              {
+                "texNum": "02",
+                "atlasIndex": 95,
+                "layer": "humua0502"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "uniform": "06",
+        "label": "Lantern Basilica",
+        "tier": 0,
+        "texture": 1600,
+        "palette": {
+          "neutralize": 1,
+          "pieces": {
+            "ch": [
+              0.95,
+              0.78,
+              0.42
+            ],
+            "lg": [
+              0.88,
+              0.71,
+              0.38
+            ],
+            "ua": [
+              0.95,
+              0.78,
+              0.42
+            ],
+            "ft": [
+              0.5,
+              0.42,
+              0.28
+            ],
+            "hn": [
+              0.9,
+              0.75,
+              0.44
+            ]
+          }
+        },
+        "unmintedPalette": null,
+        "device": {
+          "strength": 1,
+          "colour": [
+            0.24,
+            0.19,
+            0.12
+          ]
+        },
+        "meshes": null,
+        "minted": false,
+        "layers": []
+      },
+      {
+        "uniform": "07",
+        "label": "Ashen Collegium",
+        "tier": 0,
+        "texture": 1700,
+        "palette": {
+          "neutralize": 1,
+          "pieces": {
+            "ch": [
+              0.46,
+              0.55,
+              0.72
+            ],
+            "lg": [
+              0.42,
+              0.5,
+              0.66
+            ],
+            "ua": [
+              0.46,
+              0.55,
+              0.72
+            ],
+            "ft": [
+              0.3,
+              0.34,
+              0.44
+            ],
+            "hn": [
+              0.5,
+              0.58,
+              0.74
+            ]
+          }
+        },
+        "unmintedPalette": null,
+        "device": {
+          "strength": 1,
+          "colour": [
+            0.88,
+            0.9,
+            0.95
+          ]
+        },
+        "meshes": null,
+        "minted": false,
+        "layers": []
+      },
+      {
+        "uniform": "08",
+        "label": "Market trader",
+        "tier": 0,
+        "texture": 1800,
+        "palette": {
+          "neutralize": 1,
+          "pieces": {
+            "ch": [
+              0.97,
+              0.9,
+              0.76
+            ],
+            "lg": [
+              0.9,
+              0.82,
+              0.68
+            ],
+            "ua": [
+              0.97,
+              0.9,
+              0.76
+            ],
+            "ft": [
+              0.55,
+              0.46,
+              0.36
+            ],
+            "hn": [
+              0.95,
+              0.86,
+              0.74
+            ]
+          }
+        },
+        "unmintedPalette": null,
+        "device": {
+          "strength": 0,
+          "colour": [
+            0.86,
+            0.82,
+            0.7
+          ]
+        },
+        "meshes": {
+          "ch": "20",
+          "lg": "21",
+          "ft": "21",
+          "ua": "20",
+          "hn": "--",
+          "hr": "20"
+        },
+        "minted": false,
+        "layers": []
+      },
+      {
+        "uniform": "09",
+        "label": "Smith",
+        "tier": 0,
+        "texture": 1900,
+        "palette": {
+          "neutralize": 1,
+          "pieces": {
+            "ch": [
+              0.62,
+              0.58,
+              0.56
+            ],
+            "lg": [
+              0.55,
+              0.51,
+              0.5
+            ],
+            "ua": [
+              0.62,
+              0.58,
+              0.56
+            ],
+            "ft": [
+              0.38,
+              0.34,
+              0.32
+            ],
+            "hn": [
+              0.72,
+              0.66,
+              0.6
+            ]
+          }
+        },
+        "unmintedPalette": null,
+        "device": {
+          "strength": 0,
+          "colour": [
+            0.5,
+            0.34,
+            0.2
+          ]
+        },
+        "meshes": {
+          "ch": "00",
+          "lg": "00",
+          "ft": "00",
+          "ua": "00",
+          "hn": "00",
+          "hr": "00"
+        },
+        "minted": false,
+        "layers": []
+      },
+      {
+        "uniform": "10",
+        "label": "Fish trade",
+        "tier": 0,
+        "texture": 2000,
+        "palette": {
+          "neutralize": 1,
+          "pieces": {
+            "ch": [
+              0.72,
+              0.86,
+              0.8
+            ],
+            "lg": [
+              0.64,
+              0.78,
+              0.72
+            ],
+            "ua": [
+              0.72,
+              0.86,
+              0.8
+            ],
+            "ft": [
+              0.4,
+              0.46,
+              0.43
+            ],
+            "hn": [
+              0.8,
+              0.9,
+              0.85
+            ]
+          }
+        },
+        "unmintedPalette": null,
+        "device": {
+          "strength": 0,
+          "colour": [
+            0.3,
+            0.33,
+            0.3
+          ]
+        },
+        "meshes": {
+          "ch": "21",
+          "lg": "00",
+          "ft": "00",
+          "ua": "21",
+          "hn": "--",
+          "hr": "21"
+        },
+        "minted": false,
+        "layers": []
+      },
+      {
+        "uniform": "11",
+        "label": "Scholar",
+        "tier": 0,
+        "texture": 2100,
+        "palette": {
+          "neutralize": 1,
+          "pieces": {
+            "ch": [
+              0.42,
+              0.48,
+              0.68
+            ],
+            "lg": [
+              0.36,
+              0.42,
+              0.6
+            ],
+            "ua": [
+              0.42,
+              0.48,
+              0.68
+            ],
+            "ft": [
+              0.3,
+              0.32,
+              0.4
+            ],
+            "hn": [
+              0.6,
+              0.64,
+              0.78
+            ]
+          }
+        },
+        "unmintedPalette": null,
+        "device": null,
+        "meshes": {
+          "ch": "20",
+          "lg": "03",
+          "ft": "20",
+          "ua": "20",
+          "hn": "--",
+          "hr": "22"
+        },
+        "minted": false,
+        "layers": []
+      },
+      {
+        "uniform": "12",
+        "label": "Innkeeper",
+        "tier": 0,
+        "texture": 2200,
+        "palette": {
+          "neutralize": 1,
+          "pieces": {
+            "ch": [
+              0.82,
+              0.62,
+              0.36
+            ],
+            "lg": [
+              0.6,
+              0.5,
+              0.38
+            ],
+            "ua": [
+              0.82,
+              0.62,
+              0.36
+            ],
+            "ft": [
+              0.42,
+              0.34,
+              0.26
+            ],
+            "hn": [
+              0.86,
+              0.72,
+              0.52
+            ]
+          }
+        },
+        "unmintedPalette": null,
+        "device": null,
+        "meshes": {
+          "ch": "20",
+          "lg": "22",
+          "ft": "21",
+          "ua": "21",
+          "hn": "--",
+          "hr": "23"
+        },
+        "minted": false,
+        "layers": []
+      },
+      {
+        "uniform": "13",
+        "label": "Herbalist",
+        "tier": 0,
+        "texture": 2300,
+        "palette": {
+          "neutralize": 1,
+          "pieces": {
+            "ch": [
+              0.6,
+              0.72,
+              0.44
+            ],
+            "lg": [
+              0.5,
+              0.6,
+              0.38
+            ],
+            "ua": [
+              0.6,
+              0.72,
+              0.44
+            ],
+            "ft": [
+              0.36,
+              0.4,
+              0.28
+            ],
+            "hn": [
+              0.74,
+              0.82,
+              0.6
+            ]
+          }
+        },
+        "unmintedPalette": null,
+        "device": null,
+        "meshes": {
+          "ch": "20",
+          "lg": "22",
+          "ft": "22",
+          "ua": "20",
+          "hn": "--",
+          "hr": "24"
+        },
+        "minted": false,
+        "layers": []
+      },
+      {
+        "uniform": "14",
+        "label": "Dockhand",
+        "tier": 0,
+        "texture": 2400,
+        "palette": {
+          "neutralize": 1,
+          "pieces": {
+            "ch": [
+              0.78,
+              0.8,
+              0.82
+            ],
+            "lg": [
+              0.44,
+              0.46,
+              0.48
+            ],
+            "ua": [
+              0.78,
+              0.8,
+              0.82
+            ],
+            "ft": [
+              0.3,
+              0.3,
+              0.32
+            ],
+            "hn": [
+              0.84,
+              0.86,
+              0.88
+            ]
+          }
+        },
+        "unmintedPalette": null,
+        "device": null,
+        "meshes": {
+          "ch": "00",
+          "lg": "21",
+          "ft": "21",
+          "ua": "00",
+          "hn": "--",
+          "hr": "25"
+        },
+        "minted": false,
+        "layers": []
+      },
+      {
+        "uniform": "15",
+        "label": "Factor",
+        "tier": 0,
+        "texture": 2500,
+        "palette": {
+          "neutralize": 1,
+          "pieces": {
+            "ch": [
+              0.52,
+              0.34,
+              0.5
+            ],
+            "lg": [
+              0.44,
+              0.29,
+              0.43
+            ],
+            "ua": [
+              0.52,
+              0.34,
+              0.5
+            ],
+            "ft": [
+              0.32,
+              0.26,
+              0.32
+            ],
+            "hn": [
+              0.7,
+              0.6,
+              0.7
+            ]
+          }
+        },
+        "unmintedPalette": null,
+        "device": null,
+        "meshes": {
+          "ch": "20",
+          "lg": "20",
+          "ft": "20",
+          "ua": "20",
+          "hn": "--",
+          "hr": "20"
+        },
+        "minted": false,
+        "layers": []
+      }
+    ],
+    "faces": [
+      {
+        "variation": "20",
+        "layers": [
+          {
+            "texNum": "04",
+            "atlasIndex": 96,
+            "layer": "humhe2004"
+          }
+        ]
+      },
+      {
+        "variation": "21",
+        "layers": [
+          {
+            "texNum": "04",
+            "atlasIndex": 97,
+            "layer": "humhe2104"
+          }
+        ]
+      },
+      {
+        "variation": "22",
+        "layers": [
+          {
+            "texNum": "04",
+            "atlasIndex": 98,
+            "layer": "humhe2204"
+          }
+        ]
+      },
+      {
+        "variation": "23",
+        "layers": [
+          {
+            "texNum": "04",
+            "atlasIndex": 99,
+            "layer": "humhe2304"
+          }
+        ]
+      },
+      {
+        "variation": "24",
+        "layers": [
+          {
+            "texNum": "04",
+            "atlasIndex": 100,
+            "layer": "humhe2404"
+          }
+        ]
+      },
+      {
+        "variation": "25",
+        "layers": [
+          {
+            "texNum": "04",
+            "atlasIndex": 101,
+            "layer": "humhe2504"
+          }
+        ]
+      },
+      {
+        "variation": "26",
+        "layers": [
+          {
+            "texNum": "04",
+            "atlasIndex": 102,
+            "layer": "humhe2604"
+          }
+        ]
+      },
+      {
+        "variation": "27",
+        "layers": [
+          {
+            "texNum": "04",
+            "atlasIndex": 103,
+            "layer": "humhe2704"
+          }
+        ]
       }
     ]
   },

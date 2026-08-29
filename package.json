@@ -1,6 +1,6 @@
 {
   "name": "@knervous/shado",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "Packed GPU struct schemas + Babylon include emitters with optional AssemblyScript kernels",
   "license": "MIT",
   "author": "knervous",
@@ -136,6 +136,13 @@
       "require": "./dist/preprocess/world-core.cjs",
       "default": "./dist/preprocess/world-core.js"
     },
+    "./devtools": {
+      "source": "./src/devtools/index.ts",
+      "types": "./dist/devtools/index.d.ts",
+      "import": "./dist/devtools/index.js",
+      "require": "./dist/devtools/index.cjs",
+      "default": "./dist/devtools/index.js"
+    },
     "./preprocess/runtime": {
       "source": "./src/preprocess/runtime.ts",
       "types": "./dist/preprocess/runtime.d.ts",
@@ -190,6 +197,7 @@
     "@babylonjs/loaders": "9.16.1",
     "@jest/globals": "^30.2.0",
     "@jridgewell/sourcemap-codec": "^1.5.0",
+    "@kmamal/gpu": "^0.1.6",
     "@playwright/test": "^1.61.1",
     "@swc/core": "^1.15.46",
     "@swc/jest": "^0.2.39",
@@ -204,8 +212,10 @@
     "prettier": "^3.6.2",
     "process": "^0.11.10",
     "rimraf": "^6.0.0",
+    "sharp": "^0.35.4",
     "terser": "^5.44.0",
     "tsup": "^8.5.1",
+    "tsx": "^4.23.12",
     "typescript": "5.7.3"
   },
   "engines": {
@@ -230,6 +240,7 @@
     "benchmark:world-light-field": "npm run build && node bench/world-light-field-bench.mjs",
     "benchmark:world-light-field-webgpu": "node bench/world-light-field-webgpu-bench.mjs",
     "benchmark:webgpu-upload": "node bench/webgpu-upload-bench.mjs",
+    "devtools:preview": "tsx src/devtools/cli.ts",
     "benchmark:webgpu-scatter": "npm run build && node bench/webgpu-scatter-pipeline-bench.mjs",
     "benchmark:lite-scatter": "npm run build && node bench/webgpu-lite-scatter-bench.mjs",
     "benchmark:million-integration": "node bench/million-actor-integration-bench.mjs",

@@ -397,6 +397,9 @@ export default defineConfig({
     // this directly; `preprocess/index` reaches it through the Node shell,
     // which pulls in node:fs and must never enter a bundle.
     'preprocess/world-core': 'src/preprocess/world-core.ts',
+    // Node-only dev tools: headless Dawn + preview rendering. Never bundled
+    // into a browser build, same rule as svat/node.
+    'devtools/index': 'src/devtools/index.ts',
     'world/index': 'src/world/index.ts',
     cli: 'src/cli.ts',
   },
@@ -439,6 +442,12 @@ export default defineConfig({
   },
 
   external: [
+    // Native/optional deps used only by the node-only devtools. Bundling them
+    // rewrites their internal require() calls into an ESM shim that throws
+    // "Dynamic require of 'child_process' is not supported" the moment a
+    // texture is decoded — and only through a real consumer, never in-tree.
+    'sharp',
+    '@kmamal/gpu',
     '@babylonjs/core',
     '@babylonjs/lite',
     '@babylonjs/loaders',

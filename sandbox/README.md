@@ -43,10 +43,43 @@ It is also linked from the nav bar as **Wardrobe modules**, and is part of the
 deployed build — its assets are tracked, and the SPA rewrite is a catch-all, so
 the route works on the published site as well as locally.
 
-The asset is a Ryzom-derived body promoted into the Eltania client: 43
-submeshes grouped into 17 `(piece, variation)` modules across 7 body pieces
-(`hn ch ft lg ua hr he`). Every actor lives in one packed arena with one
-appearance var-array and one VAT texture; only draw ownership is split.
+The asset is a Ryzom-derived body promoted into the Eltania client: 74
+submeshes grouped into 35 `(piece, variation)` modules across 7 body pieces
+(`hn ch ft lg ua hr he`) — four civilian wardrobes, three armour tiers and
+seven hairstyles. Every actor lives in one packed arena with one appearance
+var-array and one VAT texture; only draw ownership is split.
+
+### What the page can vary, and what it costs
+
+Everything below is free at the draw level. The proof panel is the point: turn
+all of it on and the draw count does not move, because none of it is geometry.
+
+| Lever | Mechanism | Draws added |
+| --- | --- | --- |
+| Outfit (7 pieces x 3-7 variations) | picks the module | 0 — modules already exist |
+| Role uniform (12) | repaints the sheet a mesh already samples | 0 |
+| Face (8 minted) | one atlas layer on the visage primitive | 0 |
+| Complexion (8) | multiply where the response marks skin | 0 |
+| Heraldic device | the response's green channel | 0 |
+| Dye | multiply where the response marks dyeable | 0 |
+
+A **role uniform** owns no mesh. Variations `00-03` are the tier ladder, `04-19`
+are uniform repaints and `20+` are grafted meshes the ladder can never reach, so
+selecting a uniform moves only the atlas slice a submesh samples. Two of the
+twelve ship minted art (`04` Talios Watch, `05` Lowharbor Dockwatch); the other
+ten are **palette only** — a faction that differs by colour needs no generated
+art at all, which is the claim the dropdown lets you check.
+
+A minted uniform also **pins the tier its layers were painted from**. The
+repaint reuses the sheet a mesh already samples, so tier-2 chain paint on a
+tier-0 tunic is not a recolour, it is the wrong UVs.
+
+The **material response** is what makes a dye mean something. It is a second
+atlas, one mask per albedo layer: `r` marks skin, `g` the heraldic charge, `b`
+what a dye may recolour. Without it a dye is a flat multiply that repaints the
+face and hands too. It is uploaded lossless while the albedo is JPEG, because it
+is read as three thresholds rather than looked at — a softened edge bleeds dye
+onto a face and puts a charge off-centre.
 
 **What the overlay proves.** Actors, draw calls, populated modules, fps, frame
 ms and the submitted-vs-baseline vertex ratio update together. Step the crowd
@@ -81,8 +114,21 @@ It reads the **post-map** `.babylon`, because only that artifact carries the
 rather than emitting an unstamped bundle. Each bundle is the gzipped
 `.babylon`, the gzipped matrix VAT the page skins from, a `.svat` (Shado
 dual-quaternion VAT — vendored for parity with the client, not yet what this
-page consumes), a PNG grid sheet atlas, and a `.wardrobe.json` manifest naming
-the pieces, variations, clips and runtime scale/yaw.
+page consumes), a JPEG grid sheet atlas, a lossless PNG grid sheet of the
+material response, and a `.wardrobe.json` manifest naming the pieces,
+variations, clips, runtime scale/yaw and the role vocabulary.
+
+The manifest's `appearance` block — uniforms, palettes, devices, complexions,
+per-trade compositions — is read out of the game's own
+`Game/Constants/role-bodies.ts` at vendor time rather than restated in the demo,
+so the page cannot drift from the table the game ships.
+
+The albedo is JPEG at quality 92 with no chroma subsampling. The wardrobe grew
+from 43 layers to 104 and the lossless sheet went with it, 3.9 MB to 11; at q92
+it is 2.1 MB for a mean error of 1.58/255, with 0.45% of texels off by more than
+8. The response sheet stays PNG for the reason given above, and is half the
+albedo's resolution — it is a low-frequency mask, and matching the albedo would
+have doubled the page weight for detail nothing samples.
 
 Two things about this page are load-bearing traps rather than choices: the
 atlas is uploaded **without a mip chain**, because WebGPU's

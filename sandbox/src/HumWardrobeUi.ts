@@ -16,6 +16,23 @@ export type HumWardrobeControls = {
   pieceCount: number;
   pieces: { piece: string; label: string; variations: string[] }[];
   clips: string[];
+  /** Every uniform the atlas can serve, minted or palette-only. */
+  uniforms: {
+    uniform: string;
+    label: string;
+    texture: number;
+    minted: boolean;
+    dyed: boolean;
+    device: boolean;
+  }[];
+  /** The minted `he` layers, as variation codes. */
+  faces: string[];
+  complexions: number;
+  /** False when the bundle predates the material-response sheet. */
+  hasResponse: boolean;
+  setUniform(mode: string): void;
+  setFace(mode: string): void;
+  setComplexion(mode: string): void;
   setCount(count: number, variability: number): void;
   setVariability(variability: number): void;
   setPieceVariation(piece: string, variationIndex: number | null): void;
@@ -104,6 +121,33 @@ export function createHumWardrobeUi(controls: HumWardrobeControls) {
     <p style="margin:-4px 0 0">Outfit variability: 0% dresses everyone alike, which
        collapses the crowd onto the fewest modules.</p>
 
+    <h2>Role</h2>
+    <div class="hw-field">
+      <label>Uniform</label>
+      <select data-role="uniform"></select>
+      <span></span>
+    </div>
+    <p data-role="uniform-note" style="margin:-2px 0 6px"></p>
+
+    <h2>Person</h2>
+    <div class="hw-field">
+      <label>Face</label>
+      <select data-role="face"></select>
+      <span></span>
+    </div>
+    <div class="hw-field">
+      <label>Skin</label>
+      <select data-role="complexion"></select>
+      <span></span>
+    </div>
+    <p style="margin:-2px 0 0">${
+      controls.hasResponse
+        ? 'A dye recolours only what the material response marks dyeable, so skin and ' +
+          'the heraldic charge survive it.'
+        : 'This bundle carries no material response, so a dye multiplies the whole ' +
+          'garment &mdash; re-vendor to protect skin.'
+    }</p>
+
     <h2>Outfit</h2>
     <div class="hw-row">
       <button data-role="randomize-tints">Randomize tints</button>
@@ -155,6 +199,71 @@ export function createHumWardrobeUi(controls: HumWardrobeControls) {
     variabilityValue.textContent = `${variabilityInput.value}%`;
   });
   variabilityInput.addEventListener('change', () => controls.setVariability(variability));
+
+  // ── role, face and complexion ───────────────────────────────────────────
+  // These are the levers that make a crowd read as people rather than as one
+  // asset repeated, and none of them costs a draw: a uniform is a repaint of a
+  // mesh the ladder already picked, a face is one atlas layer, and a complexion
+  // is a multiply on whatever the response marks as skin.
+  const uniformSelect = role<HTMLSelectElement>('uniform');
+  const uniformNote = role('uniform-note');
+  const uniformOptions: { value: string; text: string }[] = [
+    { value: '', text: 'none — civilian' },
+    { value: 'mixed', text: 'mixed — one per actor' },
+    ...controls.uniforms.map((entry) => ({
+      value: entry.uniform,
+      text: `${entry.uniform} · ${entry.label}${entry.minted ? ' (minted)' : ''}`,
+    })),
+  ];
+  for (const option of uniformOptions) {
+    const element = document.createElement('option');
+    element.value = option.value;
+    element.textContent = option.text;
+    uniformSelect.append(element);
+  }
+  const describeUniform = (value: string) => {
+    if (value === '') return 'Each piece keeps the tier the ladder picked.';
+    if (value === 'mixed') return `${controls.uniforms.length} uniforms spread across the crowd.`;
+    const entry = controls.uniforms.find((candidate) => candidate.uniform === value);
+    if (!entry) return '';
+    const parts = [`equipChest ${entry.texture}`];
+    parts.push(entry.minted ? 'minted layers' : 'palette only, no generated art');
+    if (entry.device) parts.push('flies a device');
+    return parts.join(' · ');
+  };
+  uniformNote.textContent = describeUniform('');
+  uniformSelect.addEventListener('change', () => {
+    uniformNote.textContent = describeUniform(uniformSelect.value);
+    controls.setUniform(uniformSelect.value);
+  });
+
+  const faceSelect = role<HTMLSelectElement>('face');
+  for (const option of [
+    { value: 'auto', text: `mixed — ${controls.faces.length} minted` },
+    { value: '', text: "the body's own" },
+    ...controls.faces.map((variation) => ({ value: variation, text: `he ${variation}` })),
+  ]) {
+    const element = document.createElement('option');
+    element.value = option.value;
+    element.textContent = option.text;
+    faceSelect.append(element);
+  }
+  faceSelect.addEventListener('change', () => controls.setFace(faceSelect.value));
+
+  const complexionSelect = role<HTMLSelectElement>('complexion');
+  for (const option of [
+    { value: 'auto', text: `mixed — ${controls.complexions} tones` },
+    ...Array.from({ length: controls.complexions }, (_value, index) => ({
+      value: String(index),
+      text: `tone ${index}`,
+    })),
+  ]) {
+    const element = document.createElement('option');
+    element.value = option.value;
+    element.textContent = option.text;
+    complexionSelect.append(element);
+  }
+  complexionSelect.addEventListener('change', () => controls.setComplexion(complexionSelect.value));
 
   const piecesHost = role('pieces');
   for (const piece of controls.pieces) {
