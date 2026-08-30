@@ -12,6 +12,7 @@ import { compileShadoWorldGrassField } from './grass-field';
 import { compileShadoWorldVisibility } from './visibility';
 import { resolveShadoWorldPointLights } from './point-lights';
 import { resolveShadoWorldAudioEmitters } from './audio-emitters';
+import { compileTerrainSurface } from './terrain-compile';
 
 const LEAF_BIT = 0x80000000;
 const EMPTY_REF = 0xffffffff;
@@ -397,6 +398,13 @@ export function compileShadoWorld(
       vertexColors: 'material-tint',
     },
     terrain: authoring?.terrain ? structuredClone(authoring.terrain) : undefined,
+    terrainSurface: authoring?.terrain
+      ? compileTerrainSurface(authoring.terrain, {
+          worldMin: [worldBounds.min[0], worldBounds.min[2]],
+          worldMax: [worldBounds.max[0], worldBounds.max[2]],
+          ...(authoring.terrain.settings ?? {}),
+        }) ?? undefined
+      : undefined,
     // Topology journals have already been compiled into the derived GLB. They
     // are SQLite authoring history, not runtime payload.
     geometry: authoring?.geometry ? {

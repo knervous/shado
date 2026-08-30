@@ -1,3 +1,5 @@
+import type { EltaniaTerrainSurfaceSpec } from './terrain-compile';
+
 export type WorldVec3 = [number, number, number];
 
 export const SHADO_WORLD_AUTHORING_EXTRAS_KEY = 'EXT_shado_world_authoring';
@@ -40,10 +42,28 @@ export type ShadoWorldTerrainLayer = {
   metadata: Record<string, unknown>;
 };
 
+/**
+ * Zone-wide terrain tuning: the dials that belong to the place rather than to
+ * any one layer. `biomeTint` in particular is where a zone's mood lives, which
+ * is what lets the shared ground palette stay near-neutral and still be used by
+ * a cold marsh and a dry highland without either looking borrowed.
+ */
+export type ShadoWorldTerrainSettings = {
+  /** Slope range, in degrees, over which hybrid layers cross to triplanar. */
+  triplanarDegrees?: [number, number];
+  /** How decisively the locally taller layer wins where two overlap. */
+  heightBlendSharpness?: number;
+  /** World size of the shared macro colour variation, in metres. */
+  macroMetres?: number;
+  macroStrength?: number;
+  biomeTint?: WorldVec3;
+};
+
 export type ShadoWorldTerrainMaterialAuthoring = {
   enabled: boolean;
   controlMaps: string[];
   layers: ShadoWorldTerrainLayer[];
+  settings?: ShadoWorldTerrainSettings;
 };
 
 /** Settings consumed by the headless world compiler unless a caller explicitly overrides them. */
@@ -629,6 +649,15 @@ export type ShadoWorldSpatialPackage = {
   lighting?: ShadoWorldRuntimeLighting;
   /** Layered terrain-material intent consumed by the Eltania runtime material builder. */
   terrain?: ShadoWorldTerrainMaterialAuthoring;
+  /**
+   * The authored terrain resolved against the shared palette at publish time.
+   *
+   * Carried alongside the authoring form rather than replacing it: the editor
+   * still needs the intent to show, and the runtime wants only the constants.
+   * Resolving here means a layer naming a material that is not in the palette
+   * fails the publish rather than rendering as nothing in a player's browser.
+   */
+  terrainSurface?: EltaniaTerrainSurfaceSpec;
   /** Base-scene mesh/material overrides already included in compiled bounds and collision. */
   geometry?: ShadoWorldGeometryAuthoring;
   environment?: ShadoWorldEnvironmentAuthoring;
