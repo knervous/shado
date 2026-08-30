@@ -8,6 +8,7 @@ import { stampShadoWorldIntegrity, validateShadoWorldPackage } from './validatio
 import { validateShadoWorldAuthoring } from './authoring';
 import { encodeShadoWorldCollision } from './collision';
 import { compileShadoWorldGrass } from './grass';
+import { compileShadoWorldGrassField } from './grass-field';
 import { compileShadoWorldVisibility } from './visibility';
 import { resolveShadoWorldPointLights } from './point-lights';
 import { resolveShadoWorldAudioEmitters } from './audio-emitters';
@@ -302,6 +303,11 @@ export function compileShadoWorld(
     options.grass,
     options.grassBlockerPrimitives
   );
+  const grassField = compileShadoWorldGrassField(
+    primitives,
+    options.grassField,
+    options.grassBlockerPrimitives
+  );
   const navigationModifiers = compileNavigationModifiers(authoring);
   const collision = encodeShadoWorldCollision(options.collisionPrimitives ?? primitives, {
     chunkSize: options.physicsChunkSize ?? bake?.physicsChunkSize,
@@ -492,6 +498,7 @@ export function compileShadoWorld(
     },
     objects: compiledObjects,
     grass,
+    grassField,
     tiles: {
       size: tileSize,
       originX,

@@ -17,6 +17,8 @@ import { createHeadlessCanvas, installHeadlessWebGpu, installImageDecoder, type 
 import { installEnvironmentBrdf } from './brdf';
 import { encodePng } from './png';
 import { viewAngles } from './views';
+import { installHeadlessKtx2Transcoder } from './ktx2';
+import { resolveSharedTextureUri } from './shared-textures';
 
 export interface PreviewImage {
   pixels: Uint8Array;
@@ -142,10 +144,17 @@ export async function createPreviewSession(options: SessionOptions = {}): Promis
           if (plugin.name === 'gltf') plugin.skipMaterials = true;
         });
       }
+      // Promoted objects reference their textures out of a shared KTX2 store
+      // rather than embedding them. Without the decoder AND a way to resolve
+      // that reference, the load never settles and the preview stalls.
+      if ((scene as any).__materials) await installHeadlessKtx2Transcoder();
       // Annotated because the loader now arrives through `babylonImport`, whose
       // return is deliberately untyped.
       const container: any = await withDeadline<any>(
-        LoadAssetContainerAsync(glb as never, scene, { pluginExtension: '.glb' }),
+        LoadAssetContainerAsync(glb as never, scene, {
+          pluginExtension: '.glb',
+          pluginOptions: { gltf: { preprocessUrlAsync: resolveSharedTextureUri } },
+        } as never),
         `load ${loadOptions.id ?? 'model'}`,
         phaseTimeout,
       );

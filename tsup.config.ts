@@ -449,6 +449,7 @@ export default defineConfig({
     'sharp',
     '@kmamal/gpu',
     '@babylonjs/core',
+    '@babylonjs/ktx2decoder',
     '@babylonjs/lite',
     '@babylonjs/loaders',
     '@babylonjs/serializers',

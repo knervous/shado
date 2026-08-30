@@ -147,6 +147,14 @@ export function computeShadoWorldLayoutHash(world: ShadoWorldSpatialPackage): st
       }
     }
   }
+  if (world.grassField) {
+    [world.grassField.cells.x, world.grassField.cells.z].forEach(feedArray);
+    world.grassField.coverage.words.forEach(feed);
+    world.grassField.heightField.words.forEach(feed);
+    feedFloatArray(world.grassField.heightField.minimumY);
+    feedFloatArray(world.grassField.heightField.heightRange);
+    world.grassField.heightField.samples.forEach(feed);
+  }
   return hash.toString(16).padStart(8, '0');
 }
 

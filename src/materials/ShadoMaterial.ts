@@ -42,6 +42,21 @@ export interface ShadoMaterialOptions<TActor extends ShadoActor = ShadoActor> {
   vatQuality?: ShadoVatQualityTier;
   /** Additional application-owned textures exposed to generated shaders. */
   textures?: Record<string, Texture>;
+  /**
+   * Extra uniform names declared by an extension's shader hooks.
+   *
+   * Hook bodies are injected as source, but Babylon only resolves uniforms it
+   * was told about at construction. Extensions that add their own uniforms
+   * must name them here or every `setFloat`/`setVector3` against them is a
+   * silent no-op.
+   */
+  uniformNames?: string[];
+  /**
+   * Runs once per frame, immediately before the draw binds, so an extension
+   * can push the current value of its own uniforms. Called after Shado's base
+   * lighting and atlas binding, so it may override either.
+   */
+  onBind?: (material: ShadoMaterial<any>) => void;
   /** Optional compact actor list for one module/cohort draw. */
   drawSelection?: ShadoInstanceDrawSelection;
   /** Shared clip range/phase/rate for a synchronized animation cohort. */
@@ -174,6 +189,9 @@ export class ShadoMaterial<T extends Shado> extends BABYLON.ShaderMaterial {
       uniforms.push('uDQHasScale');
       if (opts?.sharedAnimation) uniforms.push('uShadoSharedAnimation');
     }
+    for (const uniform of opts?.uniformNames ?? []) {
+      if (!uniforms.includes(uniform)) uniforms.push(uniform);
+    }
 
     const samplers = [
       ...shaderIo.samplers,
@@ -300,6 +318,7 @@ export class ShadoMaterial<T extends Shado> extends BABYLON.ShaderMaterial {
         (shado as any).getVisibleCount?.() ?? (shado as any).visibleCount ?? 0;
       mesh.forcedInstanceCount = Math.max(0, visibleCount | 0);
       mesh.isVisible = mesh.forcedInstanceCount > 0;
+      opts?.onBind?.(this);
     };
     syncMaterial();
     this.forceCompilation(mesh);

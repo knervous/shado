@@ -15,6 +15,7 @@
  */
 
 import {
+  isShadoWorldFoliageMetadata,
   buildShadoWorldLightingManifest,
   compileShadoWorld,
   encodeShadoWorldCollision,
@@ -126,6 +127,26 @@ const GLB_JSON_CHUNK = 0x4e4f534a;
  * separately contributes transformed render geometry to the grass coverage
  * mask, so roads, floors, and roofs suppress the terrain blades below them.
  */
+/**
+ * Whether a stamp suppresses the grass beneath it.
+ *
+ * Default-on, for the same reason collision is: an omitted flag must never
+ * leave blades growing up through a paved surface. Opt-in was tried and did
+ * exactly that — 90 of the 93 Crownward lane stamps had grass under them
+ * because the kit never set the flag, while the civic roads that did set it
+ * were clean. Foliage is the one category excluded by default, because grass
+ * under a tree is the point and a canopy's upward-facing leaves would
+ * otherwise clear a circle of lawn the size of the tree.
+ */
+export function stampBlocksGrass(
+  prototype: { id: string; metadata: Readonly<Record<string, unknown>> },
+  stamp: { metadata: Readonly<Record<string, unknown>> }
+): boolean {
+  const flag = stamp.metadata.grassBlocker ?? prototype.metadata.grassBlocker;
+  if (flag !== undefined) return flag !== false;
+  return !isShadoWorldFoliageMetadata(prototype.id, prototype.metadata);
+}
+
 export async function importStampedObjectGeometry(
   authoring: ShadoWorldCompileOptions['authoring'],
   loadObjectAsset?: WorldObjectAssetLoader
@@ -154,9 +175,7 @@ export async function importStampedObjectGeometry(
     const includeCollision =
       prototype.metadata.clientPhysics !== false &&
       stamp.metadata.clientPhysics !== false;
-    const includeGrassBlocker =
-      prototype.metadata.grassBlocker === true &&
-      stamp.metadata.grassBlocker !== false;
+    const includeGrassBlocker = stampBlocksGrass(prototype, stamp);
     if (!includeCollision && !includeGrassBlocker) continue;
     let sourceGeometry = cache.get(prototype.id);
     if (!sourceGeometry) {

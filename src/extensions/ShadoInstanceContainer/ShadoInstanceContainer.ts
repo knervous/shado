@@ -97,6 +97,10 @@ export type ShadoInstanceContainerOptions = {
   picking?: boolean | ShadoInstanceAsyncPickingOptions<any>;
   /** Additional textures consumed by container-specific shader extensions. */
   materialTextures?: Record<string, Texture>;
+  /** Uniform names declared by this container's shader hooks. */
+  materialUniforms?: string[];
+  /** Per-frame hook for pushing the current value of hook-owned uniforms. */
+  materialBind?: (material: ShadoMaterial<any>) => void;
 };
 
 /**
@@ -268,6 +272,28 @@ export class ShadoInstanceContainer<T extends ShadoActor> extends Shado {
   // We fill in the instances array struct dynamically
 
   private static _instanceName: string = ShadoActor.getSchema().name;
+  /**
+   * Actor schema name per concrete container family.
+   *
+   * The single static above is written by whichever family initialized last,
+   * which is fine until two families coexist and one compiles a material
+   * *later* — lazily created picking materials for entities were generated
+   * against the foliage actor header after a grass rebuild re-initialized the
+   * foliage family, and every draw through them failed WebGPU validation.
+   * Shader generation therefore resolves the name through this map, walking
+   * the prototype chain from the instance's own constructor.
+   */
+  private static readonly _instanceNames = new Map<Function, string>();
+
+  protected static _resolveActorName(ctor: Function): string {
+    let current: Function | null = ctor;
+    while (current) {
+      const name = ShadoInstanceContainer._instanceNames.get(current);
+      if (name) return name;
+      current = Object.getPrototypeOf(current);
+    }
+    return ShadoInstanceContainer._instanceName;
+  }
 
   declare instances: T[];
   private _clipRanges: Map<string, number> = new Map();
@@ -383,7 +409,11 @@ export class ShadoInstanceContainer<T extends ShadoActor> extends Shado {
       // subclass, leaving shaders stuck on ShadoActor and making Babylon fetch
       // the missing include as a URL. Keep the selected actor schema global to
       // this generated container family.
-      ShadoInstanceContainer._instanceName = childCtor.getSchema?.().name ?? childCtor.name;
+      const actorName = childCtor.getSchema?.().name ?? childCtor.name;
+      // The static stays for the ASC kernel codegen, which runs synchronously
+      // inside this same initialize call while the value is fresh.
+      ShadoInstanceContainer._instanceName = actorName;
+      ShadoInstanceContainer._instanceNames.set(this as unknown as Function, actorName);
     }
     return super.initialize(engine, config);
   }
@@ -671,6 +701,8 @@ export class ShadoInstanceContainer<T extends ShadoActor> extends Shado {
       useVat,
       vatQuality,
       textures: opts.materialTextures,
+      uniformNames: opts.materialUniforms,
+      onBind: opts.materialBind,
       posePalette: this._posePalette,
     });
     if (this.vat) som.vatDQ = this.vat;
@@ -883,6 +915,8 @@ export class ShadoInstanceContainer<T extends ShadoActor> extends Shado {
         useVat: useVat && !usePreSkin,
         vatQuality,
         textures: opts.materialTextures,
+        uniformNames: opts.materialUniforms,
+        onBind: opts.materialBind,
         drawSelection: selection,
         // Binding the cohort uniform sets SHADO_VAT_SHARED_POSE, which makes
         // every actor read one animation vec4. Leaving it off falls through to
@@ -1004,7 +1038,11 @@ export class ShadoInstanceContainer<T extends ShadoActor> extends Shado {
   }
 
   static ascExtension: ASCExtension = {
-    source: _schema => `
+    source: _schema => {
+      // The kernel is generated during this family's own initialize call,
+      // when the static holds this family's freshly-set actor name.
+      const actorName = ShadoInstanceContainer._instanceName;
+      return `
 export function frustumMarkSoA(
   base: usize,
   planesPtr: usize,
@@ -1050,7 +1088,7 @@ export function frustumMarkSoA(
   for (let i = 0; i < count; i++) {
     store<u8>(visibilityPtr + <usize>i, 0);
 
-    const pos = v128.load(readPtr + <usize>OFFSET_${ShadoInstanceContainer._instanceName}_translation);
+    const pos = v128.load(readPtr + <usize>OFFSET_${actorName}_translation);
 
     if (doRange) {
       const dx = f32x4.extract_lane(pos, 0) - camX;
@@ -1061,7 +1099,7 @@ export function frustumMarkSoA(
       const md = maxDist + r;
       const d2 = dx*dx + dy*dy + dz*dz;
       if (d2 > md*md) {
-        readPtr += <usize>SIZEOF_${ShadoInstanceContainer._instanceName}Header;
+        readPtr += <usize>SIZEOF_${actorName}Header;
         continue;
       }
     }
@@ -1106,7 +1144,7 @@ export function frustumMarkSoA(
       visCount++;
     }
 
-    readPtr += <usize>SIZEOF_${ShadoInstanceContainer._instanceName}Header;
+    readPtr += <usize>SIZEOF_${actorName}Header;
   }
 
   return visCount;
@@ -1114,7 +1152,8 @@ export function frustumMarkSoA(
 
 
 
-`,
+`;
+    },
   };
 
   // Call this each frame *only if* the frustum changed (or just call it; it's cheap).
@@ -1335,6 +1374,7 @@ export function frustumMarkSoA(
   public override generateGLSLPair(): { vs: string; fs: string } {
     // Get the instance-specific include name
     const includeName = (this as any)._includeName ?? 'ShadoInstanceContainer';
+    const actorName = ShadoInstanceContainer._resolveActorName(this.constructor);
     const hooks = this.getGLSLHooks();
 
     const fs = `
@@ -1390,8 +1430,8 @@ uniform vec3 uShadoLightDirection;
 uniform vec3 uShadoLightColor;
 uniform vec3 uShadoAmbientColor;
 
-#include<${ShadoInstanceContainer._instanceName}>
-#include<${ShadoInstanceContainer._instanceName}Offsets>
+#include<${actorName}>
+#include<${actorName}Offsets>
 #include<${includeName}Storage>
 
 uniform highp sampler2D uShadoVisibleIndices;
@@ -1425,7 +1465,7 @@ void main(void) {
   int drawIdx = gl_InstanceID;
   int srcIdx = Shado_visibleActorIndex(drawIdx);
 
-  ${ShadoInstanceContainer._instanceName}Header inst = ShadoInstanceContainer_instances_get(srcIdx);
+  ${actorName}Header inst = ShadoInstanceContainer_instances_get(srcIdx);
   vec4 T = inst.translation;
   vec4 shadoColor = inst.color;
   ${hooks.vertexInstance ?? ''}
@@ -1491,8 +1531,8 @@ uniform int  uDQStrideTexels;   // 2 (no scale) or 3 (has scale)
 uniform bool uDQHasScale;       // true when scale texel is present
 
 // Instance data & storage indirection
-#include<${ShadoInstanceContainer._instanceName}>
-#include<${ShadoInstanceContainer._instanceName}Offsets>
+#include<${actorName}>
+#include<${actorName}Offsets>
 #include<${includeName}Storage>
 
 uniform highp sampler2D uShadoVisibleIndices;
@@ -1599,7 +1639,7 @@ void main(void) {
   int drawIdx   = gl_InstanceID;
   int srcIdx    = Shado_visibleActorIndex(drawIdx);
 
-  ${ShadoInstanceContainer._instanceName}Header inst = ShadoInstanceContainer_instances_get(srcIdx);
+  ${actorName}Header inst = ShadoInstanceContainer_instances_get(srcIdx);
   vec4 T = inst.translation; // xyz + instance scale in w
   vec4 C = inst.color;
   vec4 shadoColor = C;
@@ -1750,7 +1790,7 @@ void main(void) {
 
   public override generateWGSLPair(): { vs: string; fs: string } {
     const includeName = (this as any)._includeName ?? 'ShadoInstanceContainer';
-    const actorName = ShadoInstanceContainer._instanceName;
+    const actorName = ShadoInstanceContainer._resolveActorName(this.constructor);
     const hooks = this.getWGSLHooks();
 
     const declarations = `

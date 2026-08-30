@@ -471,6 +471,58 @@ export type ShadoWorldGrassPackage = {
   };
 };
 
+/**
+ * Density-independent grass authoring. Unlike {@link ShadoWorldGrassCompileOptions}
+ * this has no placement caps, because no per-blade records are produced.
+ */
+export type ShadoWorldGrassFieldCompileOptions = {
+  cellSize?: number;
+  /** Target blades per square metre. A runtime quality knob, not a package cost. */
+  density?: number;
+  minimumUpNormal?: number;
+  minHeight?: number;
+  maxHeight?: number;
+  bladeWidth?: number;
+  seed?: number;
+};
+
+/**
+ * Where grass may grow, without saying where each blade is.
+ *
+ * Size is a function of the grass area alone: one 32-bit word per coverage row
+ * and 64 quantized heights per cell, whatever the density.
+ */
+export type ShadoWorldGrassFieldPackage = {
+  version: 2;
+  cellSize: number;
+  density: number;
+  minHeight: number;
+  maxHeight: number;
+  bladeWidth: number;
+  /** Shared by every consumer that derives blades, so placement is reproducible. */
+  seed: number;
+  cells: {
+    x: number[];
+    z: number[];
+  };
+  coverage: {
+    resolution: number;
+    wordsPerCell: number;
+    /** One bit per coverage texel: may a blade root here. */
+    words: number[];
+  };
+  heightField: {
+    resolution: number;
+    wordsPerCell: number;
+    /** One bit per height sample: is this sample valid. */
+    words: number[];
+    minimumY: number[];
+    heightRange: number[];
+    /** Ground height, normalized into 0..0xffff across the cell's own range. */
+    samples: number[];
+  };
+};
+
 export type ShadoWorldCompileOptions = {
   name: string;
   source?: string;
@@ -500,6 +552,8 @@ export type ShadoWorldCompileOptions = {
   visibilityMaxDistance?: number;
   /** Offline proximity-grass conversion. Set false to omit tagged grass. */
   grass?: ShadoWorldGrassCompileOptions | false;
+  /** Density-independent grass field. Compiled alongside `grass`, never instead of it. */
+  grassField?: ShadoWorldGrassFieldCompileOptions | false;
   /** Explicit runtime lighting authority. Vertex-color presence is never used to infer this. */
   runtimeLighting?: ShadoWorldRuntimeLighting;
   authoring?: ShadoWorldAuthoringDocument;
@@ -697,6 +751,8 @@ export type ShadoWorldSpatialPackage = {
   };
   /** Offline-converted static grass placements grouped into proximity cells. */
   grass?: ShadoWorldGrassPackage;
+  /** Density-independent grass field. Preferred over `grass` when both are present. */
+  grassField?: ShadoWorldGrassFieldPackage;
   tiles: {
     size: number;
     originX: number;

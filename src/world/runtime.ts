@@ -91,12 +91,20 @@ export function buildShadoWorldObjectRenderBatches(
   });
 }
 
-function writeStampMatrix(
+const QUATERNION_SCRATCH = new Float32Array(4);
+
+/**
+ * Converts an authored stamp's Y-X-Z Euler degrees into a quaternion.
+ *
+ * Exported because the Euler convention is a package contract: any renderer
+ * that places stamps without going through {@link buildShadoWorldObjectRenderBatches}
+ * must resolve rotation identically or its objects face the wrong way.
+ */
+export function shadoWorldStampQuaternion(
   stamps: NonNullable<ShadoWorldSpatialPackage['objects']>['stamps'],
   stamp: number,
-  target: Float32Array,
-  offset: number
-): void {
+  out: Float32Array = new Float32Array(4)
+): Float32Array {
   const radians = Math.PI / 180;
   const halfRoll = stamps.rotationZ[stamp] * radians * 0.5;
   const halfPitch = stamps.rotationX[stamp] * radians * 0.5;
@@ -107,10 +115,20 @@ function writeStampMatrix(
     cosPitch = Math.cos(halfPitch);
   const sinYaw = Math.sin(halfYaw),
     cosYaw = Math.cos(halfYaw);
-  const x = cosYaw * sinPitch * cosRoll + sinYaw * cosPitch * sinRoll;
-  const y = sinYaw * cosPitch * cosRoll - cosYaw * sinPitch * sinRoll;
-  const z = cosYaw * cosPitch * sinRoll - sinYaw * sinPitch * cosRoll;
-  const w = cosYaw * cosPitch * cosRoll + sinYaw * sinPitch * sinRoll;
+  out[0] = cosYaw * sinPitch * cosRoll + sinYaw * cosPitch * sinRoll;
+  out[1] = sinYaw * cosPitch * cosRoll - cosYaw * sinPitch * sinRoll;
+  out[2] = cosYaw * cosPitch * sinRoll - sinYaw * sinPitch * cosRoll;
+  out[3] = cosYaw * cosPitch * cosRoll + sinYaw * sinPitch * sinRoll;
+  return out;
+}
+
+function writeStampMatrix(
+  stamps: NonNullable<ShadoWorldSpatialPackage['objects']>['stamps'],
+  stamp: number,
+  target: Float32Array,
+  offset: number
+): void {
+  const [x, y, z, w] = shadoWorldStampQuaternion(stamps, stamp, QUATERNION_SCRATCH);
   const x2 = x + x,
     y2 = y + y,
     z2 = z + z;
