@@ -2,6 +2,7 @@ import type {
   ShadoWorldCompileOptions,
   ShadoWorldPrimitive,
   ShadoWorldSpatialPackage,
+  ShadoWorldTerrainMaterialAuthoring,
   WorldVec3,
 } from './types';
 import { stampShadoWorldIntegrity, validateShadoWorldPackage } from './validation';
@@ -12,7 +13,23 @@ import { compileShadoWorldGrassField } from './grass-field';
 import { compileShadoWorldVisibility } from './visibility';
 import { resolveShadoWorldPointLights } from './point-lights';
 import { resolveShadoWorldAudioEmitters } from './audio-emitters';
-import { compileTerrainSurface } from './terrain-compile';
+import { compileTerrainSurface, type EltaniaTerrainSurfaceSpec } from './terrain-compile';
+
+function compileTerrainSurfaceOrNothing(
+  authoring: { terrain?: ShadoWorldTerrainMaterialAuthoring } | undefined,
+  bounds: { min: WorldVec3; max: WorldVec3 },
+): EltaniaTerrainSurfaceSpec | undefined {
+  if (!authoring?.terrain) return undefined;
+  try {
+    return compileTerrainSurface(authoring.terrain, {
+      worldMin: [bounds.min[0], bounds.min[2]],
+      worldMax: [bounds.max[0], bounds.max[2]],
+      ...(authoring.terrain.settings ?? {}),
+    }) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 const LEAF_BIT = 0x80000000;
 const EMPTY_REF = 0xffffffff;
@@ -398,13 +415,17 @@ export function compileShadoWorld(
       vertexColors: 'material-tint',
     },
     terrain: authoring?.terrain ? structuredClone(authoring.terrain) : undefined,
-    terrainSurface: authoring?.terrain
-      ? compileTerrainSurface(authoring.terrain, {
-          worldMin: [worldBounds.min[0], worldBounds.min[2]],
-          worldMax: [worldBounds.max[0], worldBounds.max[2]],
-          ...(authoring.terrain.settings ?? {}),
-        }) ?? undefined
-      : undefined,
+    /**
+     * Resolving terrain must not be able to fail a world build.
+     *
+     * A layer naming a material outside the shared palette is a real authoring
+     * error and should be reported — but by validation, which can say which
+     * layer and which material, not by aborting the compilation of geometry,
+     * collision and visibility that have nothing to do with it. A world whose
+     * terrain cannot resolve still needs to build; it simply ships without a
+     * compiled surface and renders with its packaged materials.
+     */
+    terrainSurface: compileTerrainSurfaceOrNothing(authoring, worldBounds),
     // Topology journals have already been compiled into the derived GLB. They
     // are SQLite authoring history, not runtime payload.
     geometry: authoring?.geometry ? {

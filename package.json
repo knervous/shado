@@ -1,8 +1,28 @@
 {
   "name": "@knervous/shado",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "Packed GPU struct schemas + Babylon include emitters with optional AssemblyScript kernels",
   "license": "MIT",
+  "keywords": [
+    "babylon",
+    "babylonjs",
+    "webgpu",
+    "wgsl",
+    "headless",
+    "headless-rendering",
+    "offline-rendering",
+    "video",
+    "video-capture",
+    "turntable",
+    "ffmpeg",
+    "webcodecs",
+    "gltf",
+    "glb",
+    "dawn",
+    "gpu-instancing",
+    "struct-of-arrays",
+    "assemblyscript"
+  ],
   "author": "knervous",
   "private": false,
   "repository": {
@@ -21,6 +41,7 @@
     "msdf",
     "!**/.DS_Store",
     "README.md",
+    "VIDEO_CAPTURE.md",
     "BABYLON_RENDERER_STRATEGY.md",
     "SHADO_RENDER_DATA_SCALING.md",
     "OPFS_DEFERRED_STORAGE_SLABS.md",
@@ -136,6 +157,20 @@
       "require": "./dist/preprocess/world-core.cjs",
       "default": "./dist/preprocess/world-core.js"
     },
+    "./video": {
+      "source": "./src/video/index.ts",
+      "types": "./dist/video/index.d.ts",
+      "import": "./dist/video/index.js",
+      "require": "./dist/video/index.cjs",
+      "default": "./dist/video/index.js"
+    },
+    "./video/node": {
+      "source": "./src/video/node.ts",
+      "types": "./dist/video/node.d.ts",
+      "import": "./dist/video/node.js",
+      "require": "./dist/video/node.cjs",
+      "default": "./dist/video/node.js"
+    },
     "./devtools": {
       "source": "./src/devtools/index.ts",
       "types": "./dist/devtools/index.d.ts",
@@ -159,6 +194,7 @@
     }
   },
   "bin": {
+    "shado-video": "./dist/video/cli.js",
     "shado": "./dist/cli.js",
     "shado-pack-model": "./dist/cli.js",
     "shado-pack-world": "./dist/cli.js",
@@ -172,7 +208,9 @@
     "@babylonjs/loaders": "^9.5.0",
     "@babylonjs/serializers": "^9.5.0",
     "assemblyscript": "^0.28.8",
-    "binaryen": "^124.0.0"
+    "binaryen": "^124.0.0",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "mp4-muxer": "^5.2.2"
   },
   "peerDependenciesMeta": {
     "@babylonjs/lite": {
@@ -189,6 +227,12 @@
     },
     "binaryen": {
       "optional": true
+    },
+    "@ffmpeg-installer/ffmpeg": {
+      "optional": true
+    },
+    "mp4-muxer": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -196,6 +240,7 @@
     "@babylonjs/ktx2decoder": "^9.18.0",
     "@babylonjs/lite": "^1.14.0",
     "@babylonjs/loaders": "9.18.0",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@jest/globals": "^30.2.0",
     "@jridgewell/sourcemap-codec": "^1.5.0",
     "@kmamal/gpu": "^0.1.6",
@@ -209,6 +254,7 @@
     "binaryen": "^124.0.0",
     "cross-env": "^10.1.0",
     "jest": "^30.2.0",
+    "mp4-muxer": "^5.2.2",
     "oxlint": "^1.75.0",
     "prettier": "^3.6.2",
     "process": "^0.11.10",
@@ -242,12 +288,13 @@
     "benchmark:world-light-field-webgpu": "node bench/world-light-field-webgpu-bench.mjs",
     "benchmark:webgpu-upload": "node bench/webgpu-upload-bench.mjs",
     "devtools:preview": "tsx src/devtools/cli.ts",
+    "video:render": "tsx src/video/cli.ts",
     "benchmark:webgpu-scatter": "npm run build && node bench/webgpu-scatter-pipeline-bench.mjs",
     "benchmark:lite-scatter": "npm run build && node bench/webgpu-lite-scatter-bench.mjs",
     "benchmark:million-integration": "node bench/million-actor-integration-bench.mjs",
     "benchmark:opfs-slabs": "npm run build && node bench/opfs-deferred-slab-bench.mjs",
     "benchmark:five-million-opfs": "node bench/five-million-opfs-integration-bench.mjs",
-    "postbuild": "chmod +x dist/cli.js",
+    "postbuild": "chmod +x dist/cli.js dist/video/cli.js",
     "dev": "cross-env DEV=true tsup --watch",
     "prepublishOnly": "npm run release:check",
     "asbuild:debug": "asb --target debug",
@@ -266,7 +313,8 @@
     "preprocess:sandbox:manifest": "node dist/cli.js manifest models --config sandbox/shado.config.mjs",
     "preprocess:sandbox:models": "npm run build && node dist/cli.js pack models --config sandbox/shado.config.mjs",
     "preprocess:qey2hh1:world": "npm run build && npm run build:world-reducer && node dist/cli.js pack worlds --config world/qey2hh1.shado.config.mjs",
-    "migrate:zones": "npm run build && npm run build:world-reducer && node dist/cli.js migrate worlds"
+    "migrate:zones": "npm run build && npm run build:world-reducer && node dist/cli.js migrate worlds",
+    "demo:live": "node demo/live-stream/server.mjs"
   },
   "dependencies": {
     "fantasy-name-generator": "^2.0.0",

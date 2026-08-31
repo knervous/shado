@@ -56,7 +56,18 @@ export type ShadoWorldTerrainSettings = {
   /** World size of the shared macro colour variation, in metres. */
   macroMetres?: number;
   macroStrength?: number;
+  /** How completely painted path wear clears the layers it runs over. */
+  pathSuppression?: number;
   biomeTint?: WorldVec3;
+  /**
+   * Meshes the terrain material applies to, by name.
+   *
+   * A packed zone marks its ground with the `grass` shader role and needs
+   * nothing here. A presentation scene has no packer and therefore no role, so
+   * without this the editor cannot tell its terrain from its horizon ring or
+   * its sky dome -- and the terrain preview silently has nothing to paint on.
+   */
+  groundMeshes?: string[];
 };
 
 export type ShadoWorldTerrainMaterialAuthoring = {

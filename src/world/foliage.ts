@@ -44,6 +44,10 @@ export function isShadoWorldTransientFoliageMetadata(
   metadata: Readonly<Record<string, unknown>> = {}
 ): boolean {
   if (metadata.collisionPolicy === 'explicit') return false;
+  // The authored override wins outright, so Libra can force either rendering
+  // path per prototype without renaming it.
+  if (metadata.transientFoliage === false) return false;
+  if (metadata.transientFoliage === true) return true;
   // Understory words win over the generic canopy words, so a
   // 'tcw-foliage-fern-v1' is a fern, not a tree that happens to say foliage.
   if (UNDERSTORY.test(id)) return true;

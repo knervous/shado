@@ -400,6 +400,9 @@ export default defineConfig({
     // Node-only dev tools: headless Dawn + preview rendering. Never bundled
     // into a browser build, same rule as svat/node.
     'devtools/index': 'src/devtools/index.ts',
+    'video/index': 'src/video/index.ts',
+    'video/node': 'src/video/node.ts',
+    'video/cli': 'src/video/cli.ts',
     'world/index': 'src/world/index.ts',
     cli: 'src/cli.ts',
   },
@@ -448,6 +451,11 @@ export default defineConfig({
     // texture is decoded — and only through a real consumer, never in-tree.
     'sharp',
     '@kmamal/gpu',
+    // Optional deps of the video subpath. Bundling mp4-muxer would inline a
+    // muxer into every browser consumer of `/video` whether or not they encode
+    // with WebCodecs, and would make an "optional" dependency required to build.
+    'mp4-muxer',
+    '@ffmpeg-installer/ffmpeg',
     '@babylonjs/core',
     '@babylonjs/ktx2decoder',
     '@babylonjs/lite',

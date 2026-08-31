@@ -43,6 +43,13 @@ export interface ShadoMaterialOptions<TActor extends ShadoActor = ShadoActor> {
   /** Additional application-owned textures exposed to generated shaders. */
   textures?: Record<string, Texture>;
   /**
+   * Bind the source mesh material's albedo/opacity/emissive textures. The
+   * atlas already carries their pixels, so paths that only read the atlas
+   * (foliage) turn this off — the extra bindings pushed one WebGPU pipeline
+   * past the per-stage uniform-buffer limit and the mesh silently vanished.
+   */
+  sourceTextures?: boolean;
+  /**
    * Extra uniform names declared by an extension's shader hooks.
    *
    * Hook bodies are injected as source, but Babylon only resolves uniforms it
@@ -155,7 +162,9 @@ export class ShadoMaterial<T extends Shado> extends BABYLON.ShaderMaterial {
     if (opts?.worldLights) defines.add('SHADO_WORLD_LIGHTS');
 
     // ── Decide texture features from current mesh material ───────────────────
-    const tex = pickCommonTextures(mesh.material);
+    const tex = opts?.sourceTextures === false
+      ? { albedo: null, opacity: null, emissive: null }
+      : pickCommonTextures(mesh.material);
     if (tex.albedo) defines.add('USE_ALBEDO');
     if (tex.opacity) defines.add('USE_OPACITY');
     if (tex.emissive) defines.add('USE_EMISSIVE');

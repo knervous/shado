@@ -63,6 +63,11 @@ export type EltaniaTerrainSurfaceSpec = {
   /** Reciprocal world size of the shared macro colour variation. */
   macroScale: number;
   macroStrength: number;
+  /**
+   * How completely painted path wear clears everything that is not itself
+   * path-driven. A road is a road: at 1 nothing else survives under it.
+   */
+  pathSuppression: number;
   /** Multiplied into every layer's albedo; where a zone's mood lives. */
   biomeTint: [number, number, number];
 };
@@ -75,6 +80,7 @@ export type TerrainCompileOptions = {
   heightBlendSharpness?: number;
   macroMetres?: number;
   macroStrength?: number;
+  pathSuppression?: number;
   biomeTint?: [number, number, number];
 };
 
@@ -83,9 +89,13 @@ export type TerrainCompileOptions = {
  *
  * A painted channel has to be able to overrule the procedural rules outright —
  * an author painting a road across a meadow means a road, not a suggestion —
- * so a fully painted control contributes several times a layer's base weight.
- * It is a gain rather than a hard override so the road still varies with the
- * macro noise underneath it and does not read as a stencilled ribbon.
+ * so a fully painted control contributes several times any layer's own weight.
+ *
+ * The gain is absolute, not a multiple of the layer's base weight. Scaling it
+ * by that weight meant the quieter a layer was by default, the less painting it
+ * could do: a path layer sitting at 0.4 could only ever add 1.04, which lost
+ * outright to grass that the growth channel had already lifted to 2.87. The
+ * brush felt inert precisely where an author most wanted it to bite.
  */
 const CONTROL_GAIN = 2.6;
 
@@ -105,9 +115,17 @@ export function compileTerrainSurface(
       'Disable a layer or fold two together.',
     );
   }
-  if (terrain.controlMaps.length === 0) {
-    throw new Error('Terrain is enabled but has no published control map; paint and publish control0 first.');
-  }
+  /**
+   * A control map is optional.
+   *
+   * The whole design is procedural first and painted second: slope, altitude
+   * and macro noise decide the predictable behaviour, and an author paints only
+   * the exceptions. Terrain that has never been painted is therefore a complete
+   * and valid surface, and demanding a published control map before anything
+   * could compile inverted that — it broke the exact order an author works in,
+   * enabling terrain and choosing layers before deciding where the paths go.
+   * The runtime binds a neutral map when none is published.
+   */
 
   const resolved: ResolvedTerrainLayer[] = enabled.map((layer) => resolveTerrainLayer(layer));
   const triplanarDegrees = options.triplanarDegrees ?? [24, 46];
@@ -142,6 +160,7 @@ export function compileTerrainSurface(
     heightBlendSharpness: options.heightBlendSharpness ?? 0.14,
     macroScale: 1 / Math.max(1, macroMetres),
     macroStrength: options.macroStrength ?? 0.22,
+    pathSuppression: options.pathSuppression ?? 0.92,
     biomeTint: options.biomeTint ?? [1, 1, 1],
   };
 }

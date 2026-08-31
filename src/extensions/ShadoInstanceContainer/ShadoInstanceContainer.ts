@@ -101,6 +101,8 @@ export type ShadoInstanceContainerOptions = {
   materialUniforms?: string[];
   /** Per-frame hook for pushing the current value of hook-owned uniforms. */
   materialBind?: (material: ShadoMaterial<any>) => void;
+  /** Bind the source material's albedo/opacity/emissive alongside the atlas. */
+  sourceTextures?: boolean;
 };
 
 /**
@@ -701,6 +703,7 @@ export class ShadoInstanceContainer<T extends ShadoActor> extends Shado {
       useVat,
       vatQuality,
       textures: opts.materialTextures,
+      sourceTextures: opts.sourceTextures,
       uniformNames: opts.materialUniforms,
       onBind: opts.materialBind,
       posePalette: this._posePalette,
@@ -915,6 +918,7 @@ export class ShadoInstanceContainer<T extends ShadoActor> extends Shado {
         useVat: useVat && !usePreSkin,
         vatQuality,
         textures: opts.materialTextures,
+        sourceTextures: opts.sourceTextures,
         uniformNames: opts.materialUniforms,
         onBind: opts.materialBind,
         drawSelection: selection,

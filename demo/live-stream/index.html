@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>shado — server-rendered live video</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; min-height: 100vh; display: grid; place-items: center;
+         background: #0b0d10; color: #dfe3e8;
+         font: 14px/1.6 ui-sans-serif, system-ui, sans-serif; }
+  main { width: min(960px, 92vw); }
+  h1 { font-size: 17px; font-weight: 600; margin: 0 0 4px; }
+  p { margin: 0 0 18px; color: #8b95a1; }
+  video { width: 100%; aspect-ratio: 16/9; background: #000;
+          border-radius: 10px; border: 1px solid #232a32; display: block; }
+  code { background: #1c222a; padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Server-rendered live video</h1>
+  <p>
+    Babylon is running headless on the server, rendering to a GPU and encoding
+    to fragmented MP4 in real time. This page renders nothing — it is one
+    <code>&lt;video&gt;</code> element pointed at <code>/live.mp4</code>.
+  </p>
+  <video src="/live.mp4" autoplay muted playsinline controls></video>
+</main>
+</body>
+</html>

@@ -313,10 +313,24 @@ function installXmlHttpRequestShim(): void {
   (globalThis as any).XMLHttpRequest = FetchXhr;
 }
 
+/**
+ * Which Dawn binding to load.
+ *
+ * `@kmamal/gpu` is the historical default. `webgpu` (dawn-gpu/node-webgpu) is
+ * the same Dawn behind a different N-API layer, and its `mapAsync` round trip
+ * is ~1ms against `@kmamal/gpu`'s flat ~100ms — a 100x difference in GPU
+ * readback, which is ~99% of the cost of any capture. Both take the same shims
+ * below, so this is a module name and nothing else.
+ */
+export const DEFAULT_DAWN_MODULE = process.env.SHADO_DAWN_MODULE ?? '@kmamal/gpu';
+
 /** Installs `navigator.gpu` and the globals Babylon's WebGPU engine reads. */
-export async function installHeadlessWebGpu(dawnModule = '@kmamal/gpu'): Promise<HeadlessGpu> {
+export async function installHeadlessWebGpu(dawnModule = DEFAULT_DAWN_MODULE): Promise<HeadlessGpu> {
   const loaded: any = await import(/* @vite-ignore */ dawnModule);
   const dawn = loaded.default ?? loaded;
+  // node-webgpu expects its WebGPU constants (GPUBufferUsage, GPUMapMode, ...)
+  // to be installed globally; @kmamal/gpu exposes none and needs none.
+  if (dawn.globals) for (const [key, value] of Object.entries(dawn.globals)) (globalThis as any)[key] ??= value;
   const instance = dawn.create([]);
   const gpu = {
     requestAdapter: async (options?: unknown) => {

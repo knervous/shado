@@ -161,6 +161,11 @@ export class ShadoFoliageContainer extends ShadoInstanceContainer<ShadoFoliageAc
       // where this container's hook locals do not exist.
       vat: 'none',
       vatQuality: 'rigid',
+      // The atlas already carries every source texture's pixels; binding the
+      // originals as well added three texture slots and pushed the pipeline
+      // past WebGPU's per-stage uniform-buffer limit — the whole draw then
+      // silently failed validation and the foliage vanished.
+      sourceTextures: false,
       picking: options.picking ?? false,
       materialUniforms,
       materialBind,
@@ -237,7 +242,14 @@ ${collect('displace')}
   // remains the caller's job.
   if (shadoFoliageFade <= 0.0) gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
   vShadoFoliageFade = shadoFoliageFade;`,
-      fragmentSurface: collect('fragmentSurface'),
+      // Leaf textures are alpha cutouts, and this material draws opaque: a
+      // low-alpha texel must DISCARD, and everything kept must write alpha 1.
+      // Writing the sampled alpha through an opaque pipeline onto a
+      // premultiplied canvas literally punches transparent holes in the page.
+      fragmentSurface: `
+  if (surface.a < 0.4) discard;
+  surface.a = 1.0;
+${collect('fragmentSurface')}`,
     };
   }
 
@@ -279,7 +291,10 @@ ${collect('displace')}
     vertexOutputs.position = vec4f(2.0, 2.0, 2.0, 1.0);
   }
   vertexOutputs.vShadoFoliageFade = shadoFoliageFade;`,
-      fragmentSurface: collect('fragmentSurface'),
+      fragmentSurface: `
+  if (surface.a < 0.4) { discard; }
+  surface = vec4f(surface.rgb, 1.0);
+${collect('fragmentSurface')}`,
     };
   }
 }

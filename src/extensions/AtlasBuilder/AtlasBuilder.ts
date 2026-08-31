@@ -94,16 +94,40 @@ async function readTextureToImageData(scene: Scene, tex: Texture): Promise<Image
   // decode JPEGs as RGB while glTF textures are usually RGBA; read both and
   // normalize to the atlas' RGBA8 contract.
   if (!it.is3D && !it.isCube) {
-    const source = (await tex.readPixels()) as ArrayBufferView | null;
-    if (!source) throw new Error('readTextureToImageData: texture returned no pixels');
-    const values = source as unknown as ArrayLike<number>;
-    const channels = values.length / Math.max(1, w * h);
-    if (channels === 4 || channels === 3 || channels === 1) {
+    let source: ArrayBufferView | null = null;
+    try {
+      source = (await tex.readPixels()) as ArrayBufferView | null;
+    } catch {
+      source = null;
+    }
+    let values = source as unknown as ArrayLike<number> | null;
+    let channels = values ? values.length / Math.max(1, w * h) : 0;
+    if (channels !== 4 && channels !== 3 && channels !== 1) {
+      // Block-compressed textures (KTX2 decoded to BC7/ASTC) cannot be read
+      // back directly — the copy either throws or returns block data whose
+      // length no longer maps to pixels. They are still sampleable, so blit
+      // through a shader into an RGBA8 target and read that instead.
+      const blit = BABYLON.TextureTools.CreateResizedCopy(tex as Texture, w, h, true);
+      await new Promise<void>(resolve => {
+        if (blit.isReady()) resolve();
+        else blit.onLoadObservable.addOnce(() => resolve());
+      });
+      // The pass renders on the next frame; poke one render so the target is
+      // populated before readback when no render loop is running.
+      scene.render();
+      source = (await blit.readPixels()) as ArrayBufferView | null;
+      blit.dispose();
+      if (!source) throw new Error('readTextureToImageData: blit readback returned no pixels');
+      values = source as unknown as ArrayLike<number>;
+      channels = values.length / Math.max(1, w * h);
+    }
+    if (values && (channels === 4 || channels === 3 || channels === 1)) {
+      const pixels = values;
       const rgba = new Uint8ClampedArray(w * h * 4);
       const isByte = source instanceof Uint8Array || source instanceof Uint8ClampedArray;
       const isFloat = source instanceof Float32Array || source instanceof Float64Array;
       const channel = (index: number) => {
-        const value = Number(values[index] ?? 0);
+        const value = Number(pixels[index] ?? 0);
         if (isByte) return value;
         if (isFloat) return Math.round(Math.max(0, Math.min(1, value)) * 255);
         // Half/unsigned-short texture readback.

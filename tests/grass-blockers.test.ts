@@ -49,6 +49,25 @@ describe('isShadoWorldFoliageMetadata', () => {
     ).toBe(true);
   });
 
+  it('honours the explicit transientFoliage override in both directions', () => {
+    // Libra sets this on the prototype so an artist can force either path.
+    expect(
+      isShadoWorldTransientFoliageMetadata('tcw-garden-shrub-v1', { transientFoliage: false })
+    ).toBe(false);
+    expect(
+      isShadoWorldTransientFoliageMetadata('tcw-decorative-reed-cluster-v1', {
+        transientFoliage: true,
+      })
+    ).toBe(true);
+    // Walked-on things stay architecture even when someone flags them.
+    expect(
+      isShadoWorldTransientFoliageMetadata('tcw-hedge-walkway-v1', {
+        transientFoliage: true,
+        collisionPolicy: 'explicit',
+      })
+    ).toBe(false);
+  });
+
   it('does not classify paving or structure as foliage', () => {
     for (const id of [
       'tcw-crownward-lane-cobble-4m-v1',

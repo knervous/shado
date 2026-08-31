@@ -395,6 +395,67 @@ WASM pass intersects PVS, cell policy, frustum, range, enabled state, and phase,
 then uploads only compact row indices. `maxRuntimePointLights` is therefore a
 quality/performance ceiling on the active list, not an authoring limit.
 
+## Headless video capture
+
+Render a scene to a video file, or stream it live, with no browser process.
+Babylon's real WebGPU engine runs on Dawn in Node, so what is captured is the
+engine the game uses rather than an approximation.
+
+```bash
+npm install @knervous/shado @ffmpeg-installer/ffmpeg
+
+# a turntable of a model
+npx shado-video --input model.glb --out spin.mp4 --seconds 6 --materials
+
+# a scene script: animations, rigs, a camera on a path
+npx shado-video --script my-scene.mts --out clip.mp4 --materials --gif
+```
+
+The encoder is a package dependency, never something found on `PATH`, but it is
+an *optional peer* — it ships ~35MB of prebuilt binaries and video is one of
+twenty subpaths, so installing it is a deliberate step. The tools check for it
+before doing any work and name the install command if it is missing.
+
+A capture is three seams that know nothing about each other: a `FrameSource`
+produces frames, a `ShadoVideoEncoder` compresses them into fragmented MP4, and
+a `VideoSink` carries the bytes.
+
+```ts
+import { createSessionFrameSource, orbitCamera, renderVideo } from '@knervous/shado/video';
+import { createFfmpegEncoder, createFileSink } from '@knervous/shado/video/node';
+import { createPreviewSession } from '@knervous/shado/devtools';
+
+const session = await createPreviewSession({ width: 1280, height: 720 });
+await session.loadGlb(bytes);
+const camera = await session.frameCamera({ zoom: 2.4 });
+
+await renderVideo({
+  source: await createSessionFrameSource(session, {
+    width: 1280, height: 720, camera,
+    onFrame: orbitCamera(camera, { seconds: 6 }),
+  }),
+  encoder: createFfmpegEncoder(),
+  sink: createFileSink('spin.mp4'),
+  seconds: 6, fps: 30,
+});
+```
+
+Because the container is fragmented MP4, the same byte stream is a valid file
+and is playable as it arrives — so swapping `createFileSink` for
+`createHttpSink`, `createWebSocketSink` or `createDataChannelSink` changes one
+argument. `pacing: 'realtime'` paces to the wall clock for streaming a running
+app; the default runs as fast as the renderer manages and still produces exact
+timestamps.
+
+Frames are converted to yuv420p in a compute shader and read back pipelined,
+which together took a 1440p capture from 2.8s to 1.4s — see
+[VIDEO_CAPTURE.md](./VIDEO_CAPTURE.md) for the measurements, the scene-script
+API, transports, and the GIF and colour-management notes.
+
+`npm run demo:live` then <http://localhost:8787> is a runnable example: Babylon
+renders headless on the server, encodes in real time, and streams into a plain
+`<video src="/live.mp4">`. The page contains no script at all.
+
 ## Package entry points
 
 - `@knervous/shado` — schemas, arenas, backings, decorators, Babylon helpers, and
@@ -415,6 +476,12 @@ quality/performance ceiling on the active list, not an authoring limit.
   decompression.
 - `@knervous/shado/world` — authored/compiled world contracts, PVS reduction,
   mutable light SoA state, collision, and runtime package loading.
+- `@knervous/shado/devtools` — Node-only headless Babylon on Dawn: preview
+  sessions, model/scene renders, pipelined GPU capture, RGBA-to-yuv420p
+  conversion, configurable glTF loaders, PNG output, and pipeline comparison.
+- `@knervous/shado/video` — runtime-neutral video capture: frame sources, the
+  capture driver, WebCodecs encoding, and HTTP/WebSocket/WebRTC sinks.
+- `@knervous/shado/video/node` — the ffmpeg encoder, file sink, and GIF output.
 
 ## Examples and development
 
