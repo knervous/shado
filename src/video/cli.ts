@@ -53,11 +53,15 @@ const USAGE = `usage: --input <glb|glb.gz> [--input ...] | --scene <scene.json> 
        [--width N] [--height N] [--revolutions N] [--zoom N] [--beta rad]
        [--codec h264|vp9] [--crf N] [--bitrate bps] [--preset fast|balanced|quality]
        [--depth N] [--dither] [--stats] [--gif [file.gif]] [--gif-fps N] [--gif-width N]
-       [--ffmpeg <path>] [--hw] [--hw-encoder <name>] [--rgba]
+       [--ffmpeg <path>] [--system-ffmpeg] [--hw] [--hw-encoder <name>] [--rgba]
        [--materials] [--verbose]
 
   Frames convert to yuv420p on the GPU by default, which needs width % 8 == 0
   and height % 2 == 0. --rgba forces the portable RGBA readback instead.
+
+  ffmpeg resolves in order: --ffmpeg, $SHADO_FFMPEG, the bundled
+  @ffmpeg-installer/ffmpeg, then PATH if --system-ffmpeg or
+  $SHADO_FFMPEG_FROM_PATH=1. PATH is never searched unless asked for.
 
   --scene   JSON of { "placements": [{ "glb": "path.glb", "position": [x,y,z],
             "rotationDegrees": [p,y,r], "scale": [x,y,z] }] }, paths relative
@@ -139,7 +143,13 @@ async function main(): Promise<void> {
   // Checked before anything expensive happens. Discovering the encoder is
   // missing after a GPU device, a scene and a textured model have loaded is a
   // slow way to learn a one-line fix.
-  await resolveFfmpegPath(flag('ffmpeg'));
+  // CI images ship their own ffmpeg; --system-ffmpeg (or SHADO_FFMPEG_FROM_PATH=1)
+  // opts into it rather than installing a second 35MB copy per job.
+  const ffmpeg = {
+    ...(flag('ffmpeg') ? { ffmpegPath: flag('ffmpeg')! } : {}),
+    ...(argv.includes('--system-ffmpeg') ? { allowSystemPath: true } : {}),
+  };
+  await resolveFfmpegPath(ffmpeg.ffmpegPath, ffmpeg);
 
   const session = await createPreviewSession({ width, height, ...(decodeImage ? { decodeImage } : {}) });
   let teardown: () => Promise<void> = async () => {};
@@ -208,7 +218,7 @@ async function main(): Promise<void> {
       sink = createFileSink(out!);
     }
     const encoder = createFfmpegEncoder({
-      ...(flag('ffmpeg') ? { ffmpegPath: flag('ffmpeg')! } : {}),
+      ...ffmpeg,
       ...(verbose ? { onLog: (line: string) => process.stderr.write(`ffmpeg: ${line}\n`) } : {}),
     });
 
@@ -250,6 +260,7 @@ async function main(): Promise<void> {
       if (!out) throw new Error('--gif converts the written file, so it needs --out');
       const gifPath = flag('gif')?.endsWith('.gif') ? flag('gif')! : out.replace(/\.\w+$/, '.gif');
       await writeGif(out, gifPath, {
+        ...ffmpeg,
         ...(flag('gif-fps') ? { fps: Number(flag('gif-fps')) } : {}),
         ...(flag('gif-width') ? { width: Number(flag('gif-width')) } : {}),
       });

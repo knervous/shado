@@ -47,7 +47,10 @@ class HeadlessCanvasContext {
     this.texture = this.device.createTexture({
       size: [this.canvas.width, this.canvas.height],
       format: this.format,
-      usage: this.usage | TEXTURE_USAGE.RENDER_ATTACHMENT | TEXTURE_USAGE.COPY_SRC,
+      // TEXTURE_BINDING beyond what a swapchain needs, so a compute pass can
+      // sample the drawn frame — that is what lets the yuv converter read a
+      // surface directly instead of going through a CPU readback first.
+      usage: this.usage | TEXTURE_USAGE.RENDER_ATTACHMENT | TEXTURE_USAGE.COPY_SRC | TEXTURE_USAGE.TEXTURE_BINDING,
     });
   }
   unconfigure(): void { this.texture?.destroy?.(); this.texture = null; }
@@ -108,26 +111,53 @@ function widenRgba8(source: Uint8Array, pixels: number, format: string): ArrayBu
 }
 
 function adaptQueue(queue: any): any {
+  const writeTexture = (destination: any, data: any, layout: any, size: any): unknown => {
+    const format: string | undefined = destination?.texture?.format;
+    const needed = format ? BYTES_PER_PIXEL[format] : undefined;
+    const width = size?.width ?? size?.[0] ?? 0;
+    const height = size?.height ?? size?.[1] ?? 1;
+    const view = ArrayBuffer.isView(data)
+      ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+      : new Uint8Array(data);
+    const supplied = width && height ? view.byteLength / (width * height) : 0;
+    if (needed && needed !== 4 && Math.round(supplied) === 4) {
+      const widened = widenRgba8(view, width * height, format!);
+      return queue.writeTexture(destination, widened, { ...layout, bytesPerRow: width * needed, rowsPerImage: height }, size);
+    }
+    return queue.writeTexture(destination, data, layout, size);
+  };
+
+  /**
+   * Dawn rejects synthetic sources for `copyExternalImageToTexture`, and our
+   * `createImageBitmap` shim only produces synthetic ones. Babylon's core
+   * engine sidesteps this by branching on `byteLength` and calling
+   * `writeTexture` itself; Babylon Lite calls the external-image path
+   * unconditionally, so the translation has to live here instead.
+   */
+  const copyExternalImageToTexture = (source: any, destination: any, copySize: any): unknown => {
+    const image = source?.source ?? source;
+    const width = copySize?.width ?? copySize?.[0] ?? image?.width ?? 0;
+    const height = copySize?.height ?? copySize?.[1] ?? image?.height ?? 1;
+    const bytes = ArrayBuffer.isView(image)
+      ? new Uint8Array(image.buffer, image.byteOffset, image.byteLength)
+      : image?.data instanceof Uint8Array
+        ? image.data
+        : null;
+    if (!bytes) return queue.copyExternalImageToTexture(source, destination, copySize);
+    return writeTexture(
+      { texture: destination?.texture, mipLevel: destination?.mipLevel ?? 0, origin: destination?.origin ?? { x: 0, y: 0, z: 0 } },
+      bytes,
+      { offset: 0, bytesPerRow: width * 4, rowsPerImage: height },
+      { width, height, depthOrArrayLayers: 1 },
+    );
+  };
+
   return new Proxy(queue, {
     get(object, key) {
+      if (key === 'writeTexture') return writeTexture;
+      if (key === 'copyExternalImageToTexture') return copyExternalImageToTexture;
       const value = object[key];
-      if (typeof value !== 'function') return value;
-      if (key !== 'writeTexture') return value.bind(object);
-      return (destination: any, data: any, layout: any, size: any) => {
-        const format: string | undefined = destination?.texture?.format;
-        const needed = format ? BYTES_PER_PIXEL[format] : undefined;
-        const width = size?.width ?? size?.[0] ?? 0;
-        const height = size?.height ?? size?.[1] ?? 1;
-        const view = ArrayBuffer.isView(data)
-          ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
-          : new Uint8Array(data);
-        const supplied = width && height ? view.byteLength / (width * height) : 0;
-        if (needed && needed !== 4 && Math.round(supplied) === 4) {
-          const widened = widenRgba8(view, width * height, format!);
-          return value.call(object, destination, widened, { ...layout, bytesPerRow: width * needed, rowsPerImage: height }, size);
-        }
-        return value.call(object, destination, data, layout, size);
-      };
+      return typeof value === 'function' ? value.bind(object) : value;
     },
   });
 }
@@ -324,6 +354,29 @@ function installXmlHttpRequestShim(): void {
  */
 export const DEFAULT_DAWN_MODULE = process.env.SHADO_DAWN_MODULE ?? '@kmamal/gpu';
 
+/**
+ * WebGPU's constant namespaces, which the spec exposes as globals.
+ *
+ * The `webgpu` binding installs these; `@kmamal/gpu` does not. Babylon's core
+ * engine happens not to read them — it carries its own copies — so their
+ * absence stayed invisible until Babylon Lite failed on
+ * `GPUShaderStage.VERTEX`. Anything written against plain WebGPU expects them.
+ */
+const WEBGPU_CONSTANTS: Record<string, Record<string, number>> = {
+  GPUBufferUsage: {
+    MAP_READ: 0x0001, MAP_WRITE: 0x0002, COPY_SRC: 0x0004, COPY_DST: 0x0008,
+    INDEX: 0x0010, VERTEX: 0x0020, UNIFORM: 0x0040, STORAGE: 0x0080,
+    INDIRECT: 0x0100, QUERY_RESOLVE: 0x0200,
+  },
+  GPUTextureUsage: {
+    COPY_SRC: 0x01, COPY_DST: 0x02, TEXTURE_BINDING: 0x04,
+    STORAGE_BINDING: 0x08, RENDER_ATTACHMENT: 0x10,
+  },
+  GPUShaderStage: { VERTEX: 0x1, FRAGMENT: 0x2, COMPUTE: 0x4 },
+  GPUMapMode: { READ: 0x1, WRITE: 0x2 },
+  GPUColorWrite: { RED: 0x1, GREEN: 0x2, BLUE: 0x4, ALPHA: 0x8, ALL: 0xf },
+};
+
 /** Installs `navigator.gpu` and the globals Babylon's WebGPU engine reads. */
 export async function installHeadlessWebGpu(dawnModule = DEFAULT_DAWN_MODULE): Promise<HeadlessGpu> {
   const loaded: any = await import(/* @vite-ignore */ dawnModule);
@@ -345,6 +398,11 @@ export async function installHeadlessWebGpu(dawnModule = DEFAULT_DAWN_MODULE): P
     configurable: true,
     value: { ...(globalThis.navigator ?? {}), gpu, userAgent: 'node', language: 'en', onLine: true },
   });
+  // Only fill what the binding left out, so a binding that provides its own
+  // (and may know better) keeps them.
+  for (const [name, values] of Object.entries(WEBGPU_CONSTANTS)) {
+    (globalThis as any)[name] ??= Object.freeze({ ...values });
+  }
   installXmlHttpRequestShim();
   (globalThis as any).self ??= globalThis;
   (globalThis as any).requestAnimationFrame ??= (callback: (t: number) => void) => setTimeout(() => callback(Date.now()), 0);

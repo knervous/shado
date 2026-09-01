@@ -43,7 +43,7 @@ export interface RawFrame {
   /** Bottom-up rows. False for GPU-converted yuv420p, which flips as it converts. */
   flipped: boolean;
   /** Defaults to rgba8 when absent. */
-  format?: 'rgba8' | 'yuv420p';
+  format?: 'rgba8' | 'bgra8' | 'yuv420p';
 }
 
 /**
@@ -137,7 +137,7 @@ export interface CaptureOptions {
  * 4, already flipped — which removes ~71% of what an ffmpeg encode was
  * spending its time on. `rgba8` is the portable fallback.
  */
-export type CaptureFormat = 'rgba8' | 'yuv420p';
+export type CaptureFormat = 'rgba8' | 'bgra8' | 'yuv420p';
 
 export interface CaptureStreamOptions extends CaptureOptions {
   /**
@@ -178,6 +178,12 @@ export interface CaptureStream {
   readonly height: number;
   readonly depth: number;
   readonly format: CaptureFormat;
+  /**
+   * Whether frames come back bottom-up. Declared rather than inferred from the
+   * format: Babylon's `readPixels` is bottom-up while a swapchain read is not,
+   * so the same `rgba8`/`bgra8` label means opposite things across backends.
+   */
+  readonly flipped: boolean;
   /**
    * Renders one frame and returns its readback.
    *
@@ -555,6 +561,8 @@ export async function createPreviewSession(options: SessionOptions = {}): Promis
         height: streamHeight,
         depth: streamDepth,
         format: streamFormat,
+        // readPixels is bottom-up; the compute conversion flips as it converts.
+        flipped: streamFormat !== 'yuv420p',
         capture(): Promise<RawFrame> {
           if (disposed) throw new Error('This capture stream is disposed');
           const slot = cursor++ % streamDepth;

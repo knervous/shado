@@ -16,19 +16,63 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { constants, createWriteStream, type WriteStream } from 'node:fs';
 import { access, chmod, mkdir, unlink } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { delimiter, dirname, join } from 'node:path';
 import { once } from 'node:events';
 
 import type { CapturedFrame, ShadoVideoEncoder, VideoSink, VideoSpec } from './types';
 
+/** Environment overrides, so CI can configure this without touching code. */
+export const FFMPEG_PATH_ENV = 'SHADO_FFMPEG';
+export const FFMPEG_FROM_PATH_ENV = 'SHADO_FFMPEG_FROM_PATH';
+
+export interface FfmpegResolveOptions {
+  /**
+   * Search `PATH` if the bundled package is absent.
+   *
+   * Off by default: a library that silently uses whatever binary the host
+   * happens to have is a library whose output depends on the machine. It is
+   * opt-in rather than forbidden because CI images ship their own ffmpeg and
+   * installing a second 35MB copy per job is waste, not safety.
+   *
+   * Also enabled by `SHADO_FFMPEG_FROM_PATH=1`.
+   */
+  allowSystemPath?: boolean;
+}
+
+/** Finds an executable on `PATH` without shelling out, so it works on Windows too. */
+async function findOnSystemPath(name: string): Promise<string | undefined> {
+  const directories = (process.env.PATH ?? '').split(delimiter).filter(Boolean);
+  // PATHEXT is how Windows decides what counts as executable; POSIX has no
+  // equivalent and an empty suffix is the only candidate.
+  const suffixes = process.platform === 'win32'
+    ? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT').split(';').filter(Boolean)
+    : [''];
+  for (const directory of directories) {
+    for (const suffix of suffixes) {
+      const candidate = join(directory, name + suffix);
+      try {
+        await access(candidate, constants.X_OK);
+        return candidate;
+      } catch {
+        // Not here, or not executable; keep looking.
+      }
+    }
+  }
+  return undefined;
+}
+
 /**
- * Locates the bundled ffmpeg.
+ * Locates ffmpeg, in order: an explicit path, `SHADO_FFMPEG`, the bundled
+ * package, then — only when allowed — `PATH`.
  *
- * Resolution is package-only by design. An explicit `override` is honoured
- * because a caller naming a path has made a decision; searching PATH would be
- * this library quietly depending on the host's software.
+ * The default stays package-only by design, so a normal install cannot end up
+ * depending on the host's software without someone saying so.
  */
-export async function resolveFfmpegPath(override?: string): Promise<string> {
+export async function resolveFfmpegPath(
+  override?: string,
+  options: FfmpegResolveOptions = {},
+): Promise<string> {
+  override ??= process.env[FFMPEG_PATH_ENV] || undefined;
   if (override) {
     // Validated rather than trusted: an unchecked override defeats the whole
     // point of resolving early, and surfaces as a spawn failure after a GPU
@@ -49,9 +93,13 @@ export async function resolveFfmpegPath(override?: string): Promise<string> {
     const loaded: any = await import('@ffmpeg-installer/ffmpeg');
     path = (loaded.default ?? loaded)?.path;
   } catch (error) {
+    const allowSystem = options.allowSystemPath || process.env[FFMPEG_FROM_PATH_ENV] === '1';
+    const found = allowSystem ? await findOnSystemPath('ffmpeg') : undefined;
+    if (found) return found;
     throw new Error(
-      'shado video needs @ffmpeg-installer/ffmpeg. Install it (`npm i @ffmpeg-installer/ffmpeg`) '
-      + `or pass ffmpegPath explicitly. Import failed: ${(error as Error).message}`,
+      'shado video needs an ffmpeg. Install the bundled one (`npm i @ffmpeg-installer/ffmpeg`), '
+      + `set ${FFMPEG_PATH_ENV}=/path/to/ffmpeg, or allow the system one with `
+      + `${FFMPEG_FROM_PATH_ENV}=1. Import failed: ${(error as Error).message}`,
     );
   }
   if (!path) throw new Error('@ffmpeg-installer/ffmpeg resolved without a binary path');
@@ -156,8 +204,8 @@ export function ffmpegArgs(spec: VideoSpec): string[] {
   return args;
 }
 
-export interface FfmpegEncoderOptions {
-  /** Overrides the bundled binary. Nothing searches PATH on your behalf. */
+export interface FfmpegEncoderOptions extends FfmpegResolveOptions {
+  /** Overrides the bundled binary. Also settable with `SHADO_FFMPEG`. */
   ffmpegPath?: string;
   /** Receives ffmpeg's stderr lines; useful when a run produces nothing. */
   onLog?: (line: string) => void;
@@ -191,7 +239,7 @@ export function createFfmpegEncoder(options: FfmpegEncoderOptions = {}): ShadoVi
         );
       }
       sink = target;
-      const binary = await resolveFfmpegPath(options.ffmpegPath);
+      const binary = await resolveFfmpegPath(options.ffmpegPath, options);
       const args = ffmpegArgs(spec);
       child = spawn(binary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
 
@@ -263,7 +311,7 @@ export function createFfmpegEncoder(options: FfmpegEncoderOptions = {}): ShadoVi
   };
 }
 
-export interface GifOptions {
+export interface GifOptions extends FfmpegResolveOptions {
   /** Frame rate of the GIF. 12-15 reads as smooth and keeps the file sane. */
   fps?: number;
   /** Output width; height follows the aspect ratio. Defaults to 480. */
@@ -295,7 +343,7 @@ export interface GifOptions {
  * palette looks far worse for no saving.
  */
 export async function writeGif(input: string, output: string, options: GifOptions = {}): Promise<void> {
-  const binary = await resolveFfmpegPath(options.ffmpegPath);
+  const binary = await resolveFfmpegPath(options.ffmpegPath, options);
   const fps = options.fps ?? 15;
   const width = options.width ?? 480;
   const dither = options.dither ?? 'sierra2_4a';

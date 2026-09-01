@@ -15,7 +15,7 @@ export interface SessionRawFrame {
   width: number;
   height: number;
   flipped: boolean;
-  format?: 'rgba8' | 'yuv420p';
+  format?: 'rgba8' | 'bgra8' | 'yuv420p';
 }
 
 /** The pipelined capture loop a session exposes. */
@@ -23,7 +23,8 @@ export interface SessionCaptureStream {
   readonly width: number;
   readonly height: number;
   readonly depth: number;
-  readonly format?: 'rgba8' | 'yuv420p';
+  readonly format?: 'rgba8' | 'bgra8' | 'yuv420p';
+  readonly flipped?: boolean;
   capture(): Promise<SessionRawFrame>;
   dispose(): void;
 }
@@ -31,13 +32,22 @@ export interface SessionCaptureStream {
 /** The slice of a preview session a capture loop actually needs. */
 export interface CaptureCapableSession {
   readonly scene: unknown;
+  /**
+   * Pixel layout `captureRaw` returns, when the session has no capture stream
+   * to declare it. Defaults to `rgba8` bottom-up, which is what Babylon's
+   * `readPixels` produces — a session whose readback differs (Lite reads its
+   * swapchain, which is bgra8 top-down) must say so, or the driver rejects its
+   * first frame.
+   */
+  readonly captureFormat?: 'rgba8' | 'bgra8' | 'yuv420p';
+  readonly captureFlipped?: boolean;
   captureRaw(options?: { width?: number; height?: number; camera?: unknown }): Promise<SessionRawFrame>;
   createCaptureStream?(options?: {
     width?: number;
     height?: number;
     camera?: unknown;
     depth?: number;
-    format?: 'rgba8' | 'yuv420p';
+    format?: 'rgba8' | 'bgra8' | 'yuv420p';
   }): Promise<SessionCaptureStream>;
 }
 
@@ -66,7 +76,7 @@ export interface SessionFrameSourceOptions {
    * Convert to yuv420p on the GPU rather than reading back RGBA. Much faster
    * end to end, but needs width % 8 == 0 and height % 2 == 0.
    */
-  format?: 'rgba8' | 'yuv420p';
+  format?: 'rgba8' | 'bgra8' | 'yuv420p';
 }
 
 /**
@@ -114,14 +124,19 @@ export async function createSessionFrameSource(
     timestampUs,
   });
 
-  const format = stream?.format ?? 'rgba8';
+  const format = stream?.format ?? session.captureFormat ?? 'rgba8';
+  // Always declared by whoever produces the frames — inferring it from the
+  // format is wrong the moment a second backend reads a swapchain instead of
+  // calling readPixels.
+  const flipped = stream
+    ? stream.flipped ?? format !== 'yuv420p'
+    : session.captureFlipped ?? true;
   return {
     kind: 'buffer',
     width,
     height,
     format,
-    // The GPU conversion flips as it converts; the RGBA readback does not.
-    flipped: format !== 'yuv420p',
+    flipped,
     depth: stream?.depth ?? 1,
     async frame(timeSeconds, timestampUs): Promise<BufferFrame> {
       advance(timeSeconds);

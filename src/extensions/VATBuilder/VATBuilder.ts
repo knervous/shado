@@ -2,6 +2,7 @@
 import type { Effect, Scene, Mesh, Skeleton, Texture, AnimationGroup, Matrix } from '../../babylon';
 import { BABYLON } from '../../babylon';
 import { packVatMatrices } from './VATWorker';
+import { halfToFloat } from '../../svat/SvatFilters';
 
 export type DQClipInfo = {
   name: string;
@@ -190,11 +191,20 @@ export class VATBuilder {
     const caps = engine.getCaps();
     const maxTex = caps.maxTextureSize | 0;
 
-    // OPTIMIZATION: Pack scale into qd.w to reduce texture fetches
-    // - Standard: qr(vec4) + qd(vec4) = 2 texels, 2 fetches
-    // - With scale: qr(vec4) + qd(vec3,scale) = 2 texels, 2 fetches (pack scale into qd.w)
-    // This reduces stride from 3→2 when scale is present, saving 33% bandwidth
-    const strideTexels = hasScale ? 3 : 2; // Always 2 texels: (qr), (qd.xyz + scale in w)
+    // A bone costs two texels rigid — qr and qd — and three when a scale plane
+    // rides along, the third holding (s, 0, 0, 0).
+    //
+    // An older comment here claimed the scale was packed into qd.w for a flat
+    // two-texel stride. It never was, and it cannot be without work elsewhere:
+    // qd.w is read by the translation reconstruction in `fetchBoneDQScale`
+    // (`t = 2*(qd.xyz*qr.w - qr.xyz*qd.w + cross(qr.xyz, qd.xyz))`) and by its
+    // two WGSL mirrors, so the slot is occupied. It is *recoverable* rather than
+    // independent — a unit rigid DQ satisfies dot(qr, qd) = 0, so
+    // qd.w = -dot(qr.xyz, qd.xyz) / qr.w — but that reconstruction degenerates as
+    // qr.w approaches zero, which is exactly a half-turn, and it would have to
+    // land in three shader sites plus `packDQ` at once. Not worth it while the
+    // collapse below means a stride of 3 almost never survives the bake.
+    const strideTexels = hasScale ? 3 : 2;
 
     const dqWidthBones = Math.max(1, Math.min(bones, Math.floor(maxTex / strideTexels)));
     const tilesX = Math.ceil(bones / dqWidthBones);
@@ -345,10 +355,17 @@ export class VATBuilder {
       frameRowBase += frames;
     }
 
+    // The scale plane earns its texel or it does not ship.
+    const collapsed = collapseConstantScalePlane(pixels, atlasWidthTexels, atlasHeight, strideTexels);
+    const bakedPixels = collapsed?.pixels ?? pixels;
+    const bakedWidthTexels = collapsed?.widthTexels ?? atlasWidthTexels;
+    const bakedStrideTexels = collapsed ? 2 : strideTexels;
+    const bakedHasScale = collapsed ? false : hasScale;
+
     // 5) Create RawTexture (NEAREST, no mips, CLAMP)
     const dqTex = new BABYLON.RawTexture(
-      pixels,
-      atlasWidthTexels,
+      bakedPixels,
+      bakedWidthTexels,
       atlasHeight,
       BABYLON.Engine.TEXTUREFORMAT_RGBA,
       engine,
@@ -363,12 +380,12 @@ export class VATBuilder {
     dq._dqTex = dqTex;
     dq._dqWidthBones = dqWidthBones;
     dq._dqTilesX = tilesX;
-    dq._dqStrideTexels = strideTexels;
-    dq._dqHasScale = hasScale;
-    dq._dqWidthTexels = atlasWidthTexels;
+    dq._dqStrideTexels = bakedStrideTexels;
+    dq._dqHasScale = bakedHasScale;
+    dq._dqWidthTexels = bakedWidthTexels;
     dq._dqHeightTexels = atlasHeight;
     dq._dqComponentType = useHalf ? 'float16' : 'float32';
-    dq._dqPixels = pixels;
+    dq._dqPixels = bakedPixels;
 
     return dq;
   }
@@ -452,9 +469,16 @@ export class VATBuilder {
       useHalf,
       worker: opts.execution === 'worker',
     });
+    // The scale plane earns its texel or it does not ship.
+    const collapsed = collapseConstantScalePlane(pixels, atlasWidthTexels, atlasHeight, strideTexels);
+    const bakedPixels = collapsed?.pixels ?? pixels;
+    const bakedWidthTexels = collapsed?.widthTexels ?? atlasWidthTexels;
+    const bakedStrideTexels = collapsed ? 2 : strideTexels;
+    const bakedHasScale = collapsed ? false : hasScale;
+
     const texture = opts.createTexture === false ? undefined : new BABYLON.RawTexture(
-      pixels,
-      atlasWidthTexels,
+      bakedPixels,
+      bakedWidthTexels,
       atlasHeight,
       BABYLON.Engine.TEXTUREFORMAT_RGBA,
       engine,
@@ -474,12 +498,12 @@ export class VATBuilder {
     dq._dqTex = texture;
     dq._dqWidthBones = dqWidthBones;
     dq._dqTilesX = tilesX;
-    dq._dqStrideTexels = strideTexels;
-    dq._dqHasScale = hasScale;
-    dq._dqWidthTexels = atlasWidthTexels;
+    dq._dqStrideTexels = bakedStrideTexels;
+    dq._dqHasScale = bakedHasScale;
+    dq._dqWidthTexels = bakedWidthTexels;
     dq._dqHeightTexels = atlasHeight;
     dq._dqComponentType = useHalf ? 'float16' : 'float32';
-    dq._dqPixels = pixels;
+    dq._dqPixels = bakedPixels;
     return dq;
   }
 
@@ -978,6 +1002,84 @@ function detectAnimatedScale(
     ag.stop();
   }
   return { hasScale, hasAnisotropic };
+}
+
+/**
+ * Tolerance for calling a baked scale plane constant.
+ *
+ * Deliberately not `scaleEpsilon`, which asks a question about source animation.
+ * This one asks whether the *stored* plane carries information, and has to be
+ * read at the storage precision: half-float spacing just below 1.0 is 2^-11,
+ * about 4.9e-4, so a plane that is unit for every practical purpose still reads
+ * back as a mixture of 1.0 and 0.99951. A threshold tighter than one ULP could
+ * never fire on the very atlases this exists for.
+ *
+ * The cost of the choice, stated plainly: a real uniform scale within 0.1% of
+ * unity is discarded. That is well under a millimetre on a two-metre body. A
+ * bone deliberately scaled to zero to hide it is nowhere near that threshold and
+ * is never discarded — see the note in collapseConstantScalePlane.
+ */
+const CONSTANT_SCALE_EPSILON = 1e-3;
+
+/**
+ * Drop the scale plane from a freshly packed atlas when it turned out constant.
+ * Returns `null` — meaning keep the atlas as baked — when it carries anything.
+ *
+ * `detectAnimatedScale` runs before the bake and answers "does any bone deviate
+ * from unit scale". That is not the question that decides whether a third texel
+ * is worth writing, so this decides on the bytes that were actually written: a
+ * rig whose scale survives the bake keeps its plane however small the deviation
+ * looked beforehand, and a rig whose scale washes out loses it however large.
+ *
+ * Measured against the shipped corpus, that distinction matters and this rarely
+ * fires. The promoted Ryzom female bodies look like they carry a dead plane —
+ * 87 of their 88 bones are unit in every frame — but bone 87, the
+ * `dummy_poignet_droit` helper, is scaled to zero in all of them, which is how
+ * it stays hidden. One live value in 700k is still live, so the plane stays and
+ * the collapse correctly declines. Do not "fix" that by widening the epsilon:
+ * the threshold has to stay far below zero-scale or hidden helper bones spring
+ * back into the mesh.
+ *
+ * The collapse is a strided copy rather than a re-bake — the first two texels of
+ * every bone slot already are what a stride-2 atlas holds — and needs no shader
+ * change, because `fetchBoneDQScale` and its two WGSL mirrors already substitute
+ * s = 1.0 whenever the stride is under 3.
+ *
+ * `dqWidthBones` is left as it was computed for the wider stride. It only caps
+ * bones per atlas row, so keeping it is correct, merely not maximally tight, and
+ * only for a rig with more bones than a third of the maximum texture size.
+ */
+function collapseConstantScalePlane(
+  pixels: Uint16Array | Float32Array,
+  widthTexels: number,
+  heightTexels: number,
+  strideTexels: number
+): { pixels: Uint16Array | Float32Array; widthTexels: number } | null {
+  if (strideTexels < 3) return null;
+  const slotsPerRow = Math.floor(widthTexels / strideTexels);
+  if (slotsPerRow < 1) return null;
+  const isHalf = pixels instanceof Uint16Array;
+  const read = (index: number) => (isHalf ? halfToFloat(pixels[index]) : pixels[index]);
+
+  for (let row = 0; row < heightTexels; row++) {
+    for (let slot = 0; slot < slotsPerRow; slot++) {
+      const scaleComponent = (row * widthTexels + slot * strideTexels + 2) * 4;
+      if (Math.abs(read(scaleComponent) - 1) > CONSTANT_SCALE_EPSILON) return null;
+    }
+  }
+
+  const nextWidthTexels = slotsPerRow * 2;
+  const collapsed = isHalf
+    ? new Uint16Array(nextWidthTexels * heightTexels * 4)
+    : new Float32Array(nextWidthTexels * heightTexels * 4);
+  for (let row = 0; row < heightTexels; row++) {
+    for (let slot = 0; slot < slotsPerRow; slot++) {
+      const from = (row * widthTexels + slot * strideTexels) * 4;
+      // Two whole texels: qr then qd.
+      collapsed.set(pixels.subarray(from, from + 8), (row * nextWidthTexels + slot * 2) * 4);
+    }
+  }
+  return { pixels: collapsed, widthTexels: nextWidthTexels };
 }
 
 /**

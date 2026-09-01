@@ -30,6 +30,18 @@ export function packDQ(input: usize, output: usize, count: i32, hasScale: i32): 
   for (let sample = 0; sample < count; sample++) {
     const base = sample * 16;
     let sx: f32, sy: f32, sz: f32;
+    // The true column magnitudes, captured before the clamp below.
+    //
+    // sx/sy/sz get clamped to 1 so the rotation can be recovered by dividing the
+    // columns through — you cannot divide by a zero-length column. That guard is
+    // required, but it must not reach the scale slot: a bone deliberately scaled
+    // to 0 to hide it would be written out as scale 1 and its geometry would
+    // spring back into the mesh. Every promoted Ryzom female body has exactly
+    // one such bone (`dummy_poignet_droit`, zero in all frames), which is how
+    // this was found: the worker path silently disagreed with the sync packer in
+    // VATBuilder.buildFromScene, which reads the magnitudes off Babylon's own
+    // decompose and reports the 0.
+    let scaleX: f32 = 1, scaleY: f32 = 1, scaleZ: f32 = 1;
     let m00: f32, m01: f32, m02: f32;
     let m10: f32, m11: f32, m12: f32;
     let m20: f32, m21: f32, m22: f32;
@@ -42,6 +54,7 @@ export function packDQ(input: usize, output: usize, count: i32, hasScale: i32): 
       const column2 = v128.load(byteBase + 32);
       const column3 = v128.load(byteBase + 48);
       sx = length3(column0); sy = length3(column1); sz = length3(column2);
+      scaleX = sx; scaleY = sy; scaleZ = sz;
       if (sx < 0.0000001) sx = 1; if (sy < 0.0000001) sy = 1; if (sz < 0.0000001) sz = 1;
       const c0 = f32x4.div(column0, f32x4.splat(sx));
       const c1 = f32x4.div(column1, f32x4.splat(sy));
@@ -54,6 +67,7 @@ export function packDQ(input: usize, output: usize, count: i32, hasScale: i32): 
       sx = Mathf.sqrt(readF32(input, base) * readF32(input, base) + readF32(input, base + 1) * readF32(input, base + 1) + readF32(input, base + 2) * readF32(input, base + 2));
       sy = Mathf.sqrt(readF32(input, base + 4) * readF32(input, base + 4) + readF32(input, base + 5) * readF32(input, base + 5) + readF32(input, base + 6) * readF32(input, base + 6));
       sz = Mathf.sqrt(readF32(input, base + 8) * readF32(input, base + 8) + readF32(input, base + 9) * readF32(input, base + 9) + readF32(input, base + 10) * readF32(input, base + 10));
+      scaleX = sx; scaleY = sy; scaleZ = sz;
       if (sx < 0.0000001) sx = 1; if (sy < 0.0000001) sy = 1; if (sz < 0.0000001) sz = 1;
       m00 = readF32(input, base) / sx; m01 = readF32(input, base + 4) / sy; m02 = readF32(input, base + 8) / sz;
       m10 = readF32(input, base + 1) / sx; m11 = readF32(input, base + 5) / sy; m12 = readF32(input, base + 9) / sz;
@@ -118,6 +132,6 @@ export function packDQ(input: usize, output: usize, count: i32, hasScale: i32): 
       writeF32(output, out, x); writeF32(output, out + 1, y); writeF32(output, out + 2, z); writeF32(output, out + 3, w);
       writeF32(output, out + 4, dx); writeF32(output, out + 5, dy); writeF32(output, out + 6, dz); writeF32(output, out + 7, dw);
     }
-    if (hasScale != 0) { writeF32(output, out + 8, (Mathf.abs(sx) + Mathf.abs(sy) + Mathf.abs(sz)) / 3); writeF32(output, out + 9, 0); writeF32(output, out + 10, 0); writeF32(output, out + 11, 0); }
+    if (hasScale != 0) { writeF32(output, out + 8, (Mathf.abs(scaleX) + Mathf.abs(scaleY) + Mathf.abs(scaleZ)) / 3); writeF32(output, out + 9, 0); writeF32(output, out + 10, 0); writeF32(output, out + 11, 0); }
   }
 }

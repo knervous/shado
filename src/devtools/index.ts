@@ -16,6 +16,13 @@ export {
 } from './babylon';
 export { installHeadlessWebGpu, createHeadlessCanvas, DEFAULT_DAWN_MODULE, BUFFER_USAGE, TEXTURE_USAGE, type HeadlessGpu } from './headless-gpu';
 export { encodePng } from './png';
+export {
+  createLitePreviewSession,
+  type LiteCameraFraming,
+  type LitePreviewSession,
+  type LiteSceneOptions,
+  type LiteSessionOptions,
+} from './lite-session';
 export { createYuvConverter, supportsGpuYuv, type YuvConverter, type YuvConverterOptions } from './yuv';
 // Exported so a consumer can install the transcoder itself, or point the
 // shared-store resolver at a checkout laid out differently.

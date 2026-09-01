@@ -150,6 +150,37 @@ In the browser, `createCanvasFrameSource` plus `createWebCodecsEncoder` needs no
 ffmpeg: a canvas goes straight into a `VideoFrame`, so the pixels never leave
 the GPU. `createMseAppender` is the receiving half for a WebSocket transport.
 
+## Babylon Lite
+
+`createLitePreviewSession` from `@knervous/shado/devtools` is a second backend,
+and everything downstream works against it unchanged — the same
+`createSessionFrameSource`, driver, encoders and sinks:
+
+```ts
+import { createLitePreviewSession } from '@knervous/shado/devtools';
+
+const session = await createLitePreviewSession({ width: 640, height: 480, decodeImage });
+await session.newScene({});
+const container = await session.loadGlb(bytes);
+const camera = await session.frameCamera({ zoom: 2 });
+const source = await createSessionFrameSource(session, {
+  width: 640, height: 480, camera, format: 'yuv420p',
+  onFrame: (t) => { clip.currentTime = t % clip.duration; },
+});
+```
+
+Lite is a different library rather than a smaller build of the same one: its API
+is functional (`createEngine`, `renderFrame`), animation groups seek in seconds
+via `currentTime` rather than frames, and it renders through a loop it owns
+unless you drive `renderFrame` directly — which this does, so capture stays
+deterministic.
+
+Two differences leak through the seam, and both are declared rather than
+inferred. A Lite capture reads the swapchain, so it is `bgra8` and **top-down**,
+where Babylon's `readPixels` is `rgba8` and bottom-up; `CaptureStream.flipped`
+and `CaptureCapableSession.captureFormat` exist for exactly this. The GPU
+yuv420p path works on both.
+
 ## Performance
 
 Two findings dominate, both counter-intuitive and both measured rather than
@@ -221,6 +252,26 @@ your own build; nothing ever searches `PATH`.
 
 `mp4-muxer` is likewise an optional peer, needed only for the browser
 WebCodecs encoder.
+
+### Bring your own ffmpeg
+
+Resolution order, highest first:
+
+1. `--ffmpeg <path>` / `ffmpegPath` option
+2. `SHADO_FFMPEG=/path/to/ffmpeg`
+3. the bundled `@ffmpeg-installer/ffmpeg`
+4. `PATH` — **only** with `--system-ffmpeg`, `allowSystemPath: true`, or
+   `SHADO_FFMPEG_FROM_PATH=1`
+
+`PATH` is never searched unless asked for, so a normal install cannot silently
+depend on whatever binary the host happens to have. CI images that already ship
+ffmpeg should set `SHADO_FFMPEG_FROM_PATH=1` rather than installing a second
+35MB copy per job — no code change needed:
+
+```yaml
+env:
+  SHADO_FFMPEG_FROM_PATH: '1'
+```
 
 Node has no built-in WebCodecs and none is on its roadmap — there is not a
 single mention of it in the Node issue tracker. The native implementations that
