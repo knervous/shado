@@ -84,6 +84,58 @@ const BYTES_PER_PIXEL: Record<string, number> = {
   rgba16float: 8, rgba32float: 16,
 };
 
+type Descriptor = Record<string, unknown>;
+
+function asDescriptor(value: unknown): Descriptor | undefined {
+  return typeof value === 'object' && value !== null ? value as Descriptor : undefined;
+}
+
+function readComponent(value: unknown, key: string, index: number, fallback?: number): number {
+  const descriptor = asDescriptor(value);
+  const component = descriptor?.[key] ?? descriptor?.[String(index)];
+  if (component === undefined && fallback !== undefined) return fallback;
+  if (typeof component !== 'number' || !Number.isInteger(component) || component < 0) {
+    throw new RangeError(`${key} must be a non-negative integer`);
+  }
+  return component;
+}
+
+function imageBytes(image: unknown): Uint8Array | null {
+  if (ArrayBuffer.isView(image)) {
+    return new Uint8Array(image.buffer, image.byteOffset, image.byteLength);
+  }
+  const data = asDescriptor(image)?.data;
+  return ArrayBuffer.isView(data)
+    ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength)
+    : null;
+}
+
+function copyPackedRgba(
+  bytes: Uint8Array,
+  imageWidth: number,
+  originX: number,
+  originY: number,
+  width: number,
+  height: number,
+  flipY: boolean,
+): Uint8Array {
+  const packed = new Uint8Array(width * height * 4);
+  for (let destinationY = 0; destinationY < height; destinationY++) {
+    const sourceY = originY + (flipY ? height - destinationY - 1 : destinationY);
+    const sourceOffset = (sourceY * imageWidth + originX) * 4;
+    packed.set(bytes.subarray(sourceOffset, sourceOffset + width * 4), destinationY * width * 4);
+  }
+  return packed;
+}
+
+function swizzleRgbaToBgra(bytes: Uint8Array): void {
+  for (let offset = 0; offset < bytes.byteLength; offset += 4) {
+    const red = bytes[offset]!;
+    bytes[offset] = bytes[offset + 2]!;
+    bytes[offset + 2] = red;
+  }
+}
+
 /**
  * Converts 8-bit RGBA to a wider float format.
  *
@@ -110,7 +162,7 @@ function widenRgba8(source: Uint8Array, pixels: number, format: string): ArrayBu
   return source;
 }
 
-function adaptQueue(queue: any): any {
+export function adaptQueue(queue: any): any {
   const writeTexture = (destination: any, data: any, layout: any, size: any): unknown => {
     const format: string | undefined = destination?.texture?.format;
     const needed = format ? BYTES_PER_PIXEL[format] : undefined;
@@ -134,20 +186,73 @@ function adaptQueue(queue: any): any {
    * `writeTexture` itself; Babylon Lite calls the external-image path
    * unconditionally, so the translation has to live here instead.
    */
-  const copyExternalImageToTexture = (source: any, destination: any, copySize: any): unknown => {
-    const image = source?.source ?? source;
-    const width = copySize?.width ?? copySize?.[0] ?? image?.width ?? 0;
-    const height = copySize?.height ?? copySize?.[1] ?? image?.height ?? 1;
-    const bytes = ArrayBuffer.isView(image)
-      ? new Uint8Array(image.buffer, image.byteOffset, image.byteLength)
-      : image?.data instanceof Uint8Array
-        ? image.data
-        : null;
+  const copyExternalImageToTexture = (source: unknown, destination: unknown, copySize: unknown): unknown => {
+    const sourceDescriptor = asDescriptor(source);
+    const image = sourceDescriptor?.source ?? source;
+    const bytes = imageBytes(image);
     if (!bytes) return queue.copyExternalImageToTexture(source, destination, copySize);
-    return writeTexture(
-      { texture: destination?.texture, mipLevel: destination?.mipLevel ?? 0, origin: destination?.origin ?? { x: 0, y: 0, z: 0 } },
-      bytes,
-      { offset: 0, bytesPerRow: width * 4, rowsPerImage: height },
+
+    const imageDescriptor = asDescriptor(image);
+    const imageWidth = readComponent(imageDescriptor, 'width', 0);
+    const imageHeight = readComponent(imageDescriptor, 'height', 1);
+    if (bytes.byteLength < imageWidth * imageHeight * 4) {
+      throw new RangeError('External image data is smaller than its RGBA dimensions');
+    }
+
+    const sourceOrigin = sourceDescriptor?.origin;
+    const originX = readComponent(sourceOrigin, 'x', 0, 0);
+    const originY = readComponent(sourceOrigin, 'y', 1, 0);
+    const width = readComponent(copySize, 'width', 0);
+    const height = readComponent(copySize, 'height', 1, 1);
+    const depthOrArrayLayers = readComponent(copySize, 'depthOrArrayLayers', 2, 1);
+    if (depthOrArrayLayers > 1) {
+      throw new RangeError('copyExternalImageToTexture requires depthOrArrayLayers to be at most 1');
+    }
+    if (originX + width > imageWidth || originY + height > imageHeight) {
+      throw new RangeError('External image copy exceeds the source dimensions');
+    }
+
+    const destinationDescriptor = asDescriptor(destination);
+    if (destinationDescriptor?.premultipliedAlpha) {
+      throw new TypeError('Headless external-image uploads do not support premultipliedAlpha: true');
+    }
+    const colorSpace = destinationDescriptor?.colorSpace;
+    if (colorSpace !== undefined && colorSpace !== 'srgb') {
+      throw new TypeError(`Headless external-image uploads do not support colorSpace: ${String(colorSpace)}`);
+    }
+
+    const texture = destinationDescriptor?.texture;
+    const format = asDescriptor(texture)?.format;
+    const bytesPerPixel = typeof format === 'string' ? BYTES_PER_PIXEL[format] ?? 4 : 4;
+    const needsBgraSwizzle = format === 'bgra8unorm' || format === 'bgra8unorm-srgb';
+    const flipY = Boolean(sourceDescriptor?.flipY);
+    let uploadBytes: ArrayBufferView = bytes;
+    let offset = (originY * imageWidth + originX) * 4;
+    let bytesPerRow = imageWidth * 4;
+    let rowsPerImage = imageHeight;
+
+    if (depthOrArrayLayers === 0) return;
+
+    if (flipY || bytesPerPixel !== 4 || needsBgraSwizzle) {
+      const packed = copyPackedRgba(bytes, imageWidth, originX, originY, width, height, flipY);
+      if (needsBgraSwizzle) swizzleRgbaToBgra(packed);
+      uploadBytes = bytesPerPixel === 4 ? packed : widenRgba8(packed, width * height, String(format));
+      offset = 0;
+      bytesPerRow = width * bytesPerPixel;
+      rowsPerImage = height;
+    }
+
+    const writeDestination: Descriptor = {
+      texture,
+      mipLevel: destinationDescriptor?.mipLevel ?? 0,
+      origin: destinationDescriptor?.origin ?? { x: 0, y: 0, z: 0 },
+    };
+    if (destinationDescriptor?.aspect !== undefined) writeDestination.aspect = destinationDescriptor.aspect;
+
+    return queue.writeTexture(
+      writeDestination,
+      uploadBytes,
+      { offset, bytesPerRow, rowsPerImage },
       { width, height, depthOrArrayLayers: 1 },
     );
   };
@@ -213,6 +318,28 @@ export interface DecodedImage {
 /** Decodes PNG/JPEG/WebP bytes to RGBA. `sharp` satisfies this. */
 export type ImageDecoder = (bytes: Uint8Array, mimeType: string) => Promise<DecodedImage>;
 
+function assertSupportedImageBitmapOptions(options: unknown): void {
+  if (options === undefined) return;
+  const descriptor = asDescriptor(options);
+  if (!descriptor) throw new TypeError('createImageBitmap options must be an object');
+
+  const unsupported = [
+    descriptor.imageOrientation !== undefined && descriptor.imageOrientation !== 'from-image' ? 'imageOrientation' : null,
+    descriptor.premultiplyAlpha !== undefined
+      && descriptor.premultiplyAlpha !== 'default'
+      && descriptor.premultiplyAlpha !== 'none' ? 'premultiplyAlpha' : null,
+    descriptor.colorSpaceConversion !== undefined
+      && descriptor.colorSpaceConversion !== 'default'
+      && descriptor.colorSpaceConversion !== 'none' ? 'colorSpaceConversion' : null,
+    descriptor.resizeWidth !== undefined ? 'resizeWidth' : null,
+    descriptor.resizeHeight !== undefined ? 'resizeHeight' : null,
+    descriptor.resizeQuality !== undefined ? 'resizeQuality' : null,
+  ].find((name): name is string => name !== null);
+  if (unsupported) {
+    throw new TypeError(`createImageBitmap shim does not support the ${unsupported} option`);
+  }
+}
+
 /**
  * Lets Babylon's real texture pipeline run in Node.
  *
@@ -229,7 +356,15 @@ export type ImageDecoder = (bytes: Uint8Array, mimeType: string) => Promise<Deco
  */
 export function installImageDecoder(decode: ImageDecoder): void {
   if (typeof (globalThis as any).createImageBitmap === 'function') return;
-  (globalThis as any).createImageBitmap = async (source: any): Promise<unknown> => {
+  (globalThis as any).createImageBitmap = async (source: unknown, ...arguments_: unknown[]): Promise<unknown> => {
+    if (arguments_.length >= 4) {
+      throw new TypeError('createImageBitmap shim does not support the crop overload');
+    }
+    if (arguments_.length > 1) {
+      throw new TypeError('Invalid createImageBitmap arguments');
+    }
+    assertSupportedImageBitmapOptions(arguments_[0]);
+
     let bytes: Uint8Array;
     let mimeType = 'image/png';
     if (source instanceof Uint8Array) bytes = source;
