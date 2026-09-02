@@ -103,9 +103,9 @@ fn vPlane(@builtin(global_invocation_id) id: vec3<u32>) {
 `;
 
 /**
- * WebGPU's constant objects are globals in a browser, but the Dawn bindings
- * differ: `webgpu` installs them, `@kmamal/gpu` does not. Using the numbers
- * directly is what makes this work on both, and on any future binding.
+ * WebGPU's constant objects are globals in a browser. Using the numbers
+ * directly keeps this module independent of when the native globals are
+ * installed.
  */
 const USAGE = {
   MAP_READ: 0x0001,

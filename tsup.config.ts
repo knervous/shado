@@ -450,7 +450,7 @@ export default defineConfig({
     // "Dynamic require of 'child_process' is not supported" the moment a
     // texture is decoded — and only through a real consumer, never in-tree.
     'sharp',
-    '@kmamal/gpu',
+    'webgpu',
     // Optional deps of the video subpath. Bundling mp4-muxer would inline a
     // muxer into every browser consumer of `/video` whether or not they encode
     // with WebCodecs, and would make an "optional" dependency required to build.

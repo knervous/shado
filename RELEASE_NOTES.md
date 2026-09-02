@@ -1,5 +1,19 @@
 # Release notes
 
+## Unreleased
+
+- Replaced `@kmamal/gpu` with the official `webgpu@0.6.0` Dawn binding for all
+  Node headless rendering. `webgpu` is now a runtime dependency and supports
+  current optional features including `primitive-index` and
+  `texture-component-swizzle`.
+- Headless adapters now forward Dawn's `wgslLanguageFeatures` instead of
+  reporting an empty set. Detailed Babylon Lite GPU picking can request
+  `primitive-index` and compile `@builtin(primitive_index)` shaders.
+- Removed the `SHADO_DAWN_MODULE` override, `DEFAULT_DAWN_MODULE` export, and
+  the `dawnModule` session options. Shado now has one supported native backend.
+- Headless disposal restores the prior global `navigator`, releasing Shado's
+  reference to the native GPU instance.
+
 ## 1.5.0 — 2026-08-27
 
 Shado moved to its own public repository at

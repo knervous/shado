@@ -89,8 +89,6 @@ export interface SessionOptions {
   decodeImage?: ImageDecoder;
   /** A healthy render is ~1s; anything far past this is a stall, not slow work. */
   phaseTimeoutMs?: number;
-  /** Dawn binding to load; see {@link DEFAULT_DAWN_MODULE}. */
-  dawnModule?: string;
   /** Applied to every load in this session. Per-load resolvers run first. */
   resolveUri?: UriResolver;
   /** Loader options for every load in this session; per-load ones merge over these. */
@@ -150,11 +148,8 @@ export interface CaptureStreamOptions extends CaptureOptions {
   /**
    * How many GPU readbacks may be in flight at once.
    *
-   * On `@kmamal/gpu` this is the whole performance story: that binding
-   * dispatches map callbacks on a shared ~100ms tick, so one readback and
-   * sixteen cost the same wall clock — depth 1 is 100ms/frame, depth 8 is
-   * 16.7ms, depth 16 is 8.3ms. It helps on `webgpu` too, where readback is
-   * genuinely fast (~7ms) but still worth overlapping.
+   * The native `webgpu` binding has fast readback (~7ms), but overlapping it
+   * with rendering still improves throughput.
    *
    * Costs `depth * width * height * 4` bytes of resident buffers, which is why
    * the default is derived from a memory budget rather than fixed.
@@ -282,7 +277,7 @@ export async function createPreviewSession(options: SessionOptions = {}): Promis
   const width = options.width ?? 1024;
   const height = options.height ?? 768;
   const phaseTimeout = options.phaseTimeoutMs ?? DEFAULT_PHASE_TIMEOUT_MS;
-  const gpu: HeadlessGpu = await installHeadlessWebGpu(options.dawnModule);
+  const gpu: HeadlessGpu = await installHeadlessWebGpu();
   if (options.decodeImage) installImageDecoder(options.decodeImage);
 
   const { WebGPUEngine } = await babylonImport('@babylonjs/core/Engines/webgpuEngine.js');

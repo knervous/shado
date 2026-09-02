@@ -1,6 +1,6 @@
 {
   "name": "@knervous/shado",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "description": "Packed GPU struct schemas + Babylon include emitters with optional AssemblyScript kernels",
   "license": "MIT",
   "keywords": [
@@ -243,7 +243,6 @@
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@jest/globals": "^30.2.0",
     "@jridgewell/sourcemap-codec": "^1.5.0",
-    "@kmamal/gpu": "^0.1.6",
     "@playwright/test": "^1.61.1",
     "@swc/core": "^1.15.46",
     "@swc/jest": "^0.2.39",
@@ -276,7 +275,7 @@
     "lint:fix": "oxlint src --tsconfig tsconfig.json --fix",
     "format": "prettier --write src/**/*.ts",
     "format:check": "prettier --check src/**/*.ts",
-    "build": "tsup",
+    "build": "cross-env NODE_OPTIONS=--max-old-space-size=8192 tsup",
     "build:vat-kernel": "node scripts/build-vat-kernel.mjs",
     "build:vat-bake-worker": "npm run build:vat-kernel && node scripts/build-vat-bake-worker.mjs",
     "build:showcase-culling": "npm run build && node scripts/build-showcase-culling-wasm.mjs",
@@ -318,6 +317,7 @@
   },
   "dependencies": {
     "fantasy-name-generator": "^2.0.0",
-    "maxrects-packer": "^2.7.3"
+    "maxrects-packer": "^2.7.3",
+    "webgpu": "0.6.0"
   }
 }

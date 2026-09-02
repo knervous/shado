@@ -47,8 +47,6 @@ export interface LiteSessionOptions {
   height?: number;
   /** Enables texture decoding. `sharp` satisfies this. */
   decodeImage?: ImageDecoder;
-  /** Dawn binding to load. */
-  dawnModule?: string;
   /** Overrides the Lite module specifier, for hosts that own their own copy. */
   liteModule?: string;
 }
@@ -102,7 +100,7 @@ export async function createLitePreviewSession(
 ): Promise<LitePreviewSession> {
   const width = options.width ?? 1024;
   const height = options.height ?? 768;
-  const gpu: HeadlessGpu = await installHeadlessWebGpu(options.dawnModule);
+  const gpu: HeadlessGpu = await installHeadlessWebGpu();
   if (options.decodeImage) installImageDecoder(options.decodeImage);
 
   const lite: any = await import(/* @vite-ignore */ options.liteModule ?? '@babylonjs/lite');

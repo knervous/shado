@@ -4,6 +4,10 @@ Render Babylon scenes to video with no browser process, or stream a running
 scene live. Babylon's real WebGPU engine runs on Dawn in Node, so what is
 captured is the engine the game uses rather than an approximation.
 
+The Node backend is the bundled `webgpu@0.6.0` package from
+dawn-gpu/node-webgpu. On Ubuntu CI, install `libvulkan1` and
+`mesa-vulkan-drivers` so Dawn can acquire a software Vulkan adapter.
+
 ```bash
 npm install @knervous/shado @ffmpeg-installer/ffmpeg
 npx shado-video --input model.glb --out spin.mp4 --seconds 6 --materials
@@ -186,18 +190,9 @@ yuv420p path works on both.
 Two findings dominate, both counter-intuitive and both measured rather than
 assumed.
 
-**GPU readback, not rendering, is the cost.** Rendering a framed model is
-~0.6ms; reading it back was ~100ms — and flat across resolutions, because the
-Dawn binding dispatches map callbacks on a shared tick rather than being
-bandwidth-bound. The tick is *shared*, so readbacks pipeline almost perfectly:
-
-| in flight | ms/frame at 960x540 |
-| --- | --- |
-| 1 | 100.0 |
-| 2 | 51.2 |
-| 8 | 12.8 |
-| 16 | 8.3 |
-
+**GPU readback still benefits from overlap.** The `webgpu` binding returns
+mapped buffers promptly (about 7ms in current measurements), but pipelining
+readback with subsequent rendering still improves throughput.
 `createCaptureStream` does this automatically, sizing the ring from a 64MB
 budget. `--depth` overrides it.
 

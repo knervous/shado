@@ -14,7 +14,7 @@ export {
   babylonImport,
   type BabylonModuleImporter,
 } from './babylon';
-export { installHeadlessWebGpu, createHeadlessCanvas, DEFAULT_DAWN_MODULE, BUFFER_USAGE, TEXTURE_USAGE, type HeadlessGpu } from './headless-gpu';
+export { installHeadlessWebGpu, createHeadlessCanvas, BUFFER_USAGE, TEXTURE_USAGE, type HeadlessGpu } from './headless-gpu';
 export { encodePng } from './png';
 export {
   createLitePreviewSession,

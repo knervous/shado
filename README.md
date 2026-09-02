@@ -401,6 +401,12 @@ Render a scene to a video file, or stream it live, with no browser process.
 Babylon's real WebGPU engine runs on Dawn in Node, so what is captured is the
 engine the game uses rather than an approximation.
 
+Shado includes `webgpu@0.6.0`, the official dawn-gpu/node-webgpu binding. Its
+current Dawn build exposes optional features used by Babylon Lite, including
+`primitive-index` for detailed GPU picking. Linux CI hosts need a Vulkan
+loader and implementation; on Ubuntu install `libvulkan1` and
+`mesa-vulkan-drivers` before starting a headless session.
+
 ```bash
 npm install @knervous/shado @ffmpeg-installer/ffmpeg
 

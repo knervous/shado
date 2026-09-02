@@ -7,10 +7,9 @@
  * the dev tools can drive the real engine — real materials, real shaders — with
  * no browser process.
  *
- * Pin `@kmamal/gpu` to 0.1.6. On 0.2.1 every `texture.createView()` fails
- * validation ("swizzle used without the FeatureName::TextureComponentSwizzle
- * feature enabled"), which makes all rendering impossible. Compute is
- * unaffected, so the breakage stays invisible until something tries to draw.
+ * The native implementation is dawn-gpu/node-webgpu's `webgpu` package. It
+ * ships Dawn for Node and exposes current optional features such as
+ * `primitive-index` and `texture-component-swizzle`.
  */
 
 export const TEXTURE_USAGE = {
@@ -270,7 +269,7 @@ export function adaptQueue(queue: any): any {
 function adaptDawnObject(target: any): any {
   return new Proxy(target, {
     get(object, key) {
-      if (key === 'features') return new Set([...object.features]);
+      if (key === 'features') return new Set(object.features);
       if (key === 'queue') return adaptQueue(object.queue);
       if (key === 'addEventListener' || key === 'removeEventListener') return () => {};
       const value = object[key];
@@ -479,23 +478,10 @@ function installXmlHttpRequestShim(): void {
 }
 
 /**
- * Which Dawn binding to load.
- *
- * `@kmamal/gpu` is the historical default. `webgpu` (dawn-gpu/node-webgpu) is
- * the same Dawn behind a different N-API layer, and its `mapAsync` round trip
- * is ~1ms against `@kmamal/gpu`'s flat ~100ms — a 100x difference in GPU
- * readback, which is ~99% of the cost of any capture. Both take the same shims
- * below, so this is a module name and nothing else.
- */
-export const DEFAULT_DAWN_MODULE = process.env.SHADO_DAWN_MODULE ?? '@kmamal/gpu';
-
-/**
  * WebGPU's constant namespaces, which the spec exposes as globals.
  *
- * The `webgpu` binding installs these; `@kmamal/gpu` does not. Babylon's core
- * engine happens not to read them — it carries its own copies — so their
- * absence stayed invisible until Babylon Lite failed on
- * `GPUShaderStage.VERTEX`. Anything written against plain WebGPU expects them.
+ * `webgpu` provides these through its `globals` export. The numeric fallback
+ * keeps the shim explicit and protects against an incomplete native export.
  */
 const WEBGPU_CONSTANTS: Record<string, Record<string, number>> = {
   GPUBufferUsage: {
@@ -513,25 +499,26 @@ const WEBGPU_CONSTANTS: Record<string, Record<string, number>> = {
 };
 
 /** Installs `navigator.gpu` and the globals Babylon's WebGPU engine reads. */
-export async function installHeadlessWebGpu(dawnModule = DEFAULT_DAWN_MODULE): Promise<HeadlessGpu> {
-  const loaded: any = await import(/* @vite-ignore */ dawnModule);
-  const dawn = loaded.default ?? loaded;
+export async function installHeadlessWebGpu(): Promise<HeadlessGpu> {
+  const dawn = await import('webgpu');
+  const previousNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  let instance: any = dawn.create([]);
   // node-webgpu expects its WebGPU constants (GPUBufferUsage, GPUMapMode, ...)
-  // to be installed globally; @kmamal/gpu exposes none and needs none.
+  // to be installed globally.
   if (dawn.globals) for (const [key, value] of Object.entries(dawn.globals)) (globalThis as any)[key] ??= value;
-  const instance = dawn.create([]);
   const gpu = {
     requestAdapter: async (options?: unknown) => {
+      if (!instance) throw new Error('Headless WebGPU has been disposed');
       const adapter = await instance.requestAdapter(options);
       return adapter ? adaptDawnObject(adapter) : adapter;
     },
     getPreferredCanvasFormat: () => 'bgra8unorm',
-    wgslLanguageFeatures: new Set<string>(),
+    wgslLanguageFeatures: new Set<string>(instance.wgslLanguageFeatures ?? []),
   };
   // Node 24 exposes `navigator` as a getter-only global, so redefine it.
   Object.defineProperty(globalThis, 'navigator', {
     configurable: true,
-    value: { ...(globalThis.navigator ?? {}), gpu, userAgent: 'node', language: 'en', onLine: true },
+    value: { ...globalThis.navigator, gpu, userAgent: 'node', language: 'en', onLine: true },
   });
   // Only fill what the binding left out, so a binding that provides its own
   // (and may know better) keeps them.
@@ -542,5 +529,15 @@ export async function installHeadlessWebGpu(dawnModule = DEFAULT_DAWN_MODULE): P
   (globalThis as any).self ??= globalThis;
   (globalThis as any).requestAnimationFrame ??= (callback: (t: number) => void) => setTimeout(() => callback(Date.now()), 0);
   (globalThis as any).cancelAnimationFrame ??= (id: any) => clearTimeout(id);
-  return { gpu, dispose: () => dawn.destroy?.(instance) };
+  return {
+    gpu,
+    dispose: () => {
+      if (!instance) return;
+      if ((globalThis as any).navigator?.gpu === gpu) {
+        if (previousNavigator) Object.defineProperty(globalThis, 'navigator', previousNavigator);
+        else delete (globalThis as any).navigator;
+      }
+      instance = null;
+    },
+  };
 }
