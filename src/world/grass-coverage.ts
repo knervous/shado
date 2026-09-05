@@ -55,7 +55,7 @@ export function compileCoverage(
   // because its walking surface is more than a couple of metres above ground.
   // Foliage is unaffected because water/sky are skipped and near-vertical
   // surfaces do not pass the up-normal threshold.
-  const blockedSamples = new Set<string>();
+  const blockedCells = new Set<CoverageCell & { blocked?: Uint8Array }>();
   for (const primitive of [...primitives, ...blockerPrimitives]) {
     if (
       primitive.extraShader === 'grass' ||
@@ -67,7 +67,7 @@ export function compileCoverage(
     const triangles = eligibleTriangles(primitive, 0.35);
     for (const triangle of triangles) {
       rasterizeTriangle(primitive, triangle, settings.cellSize, (x, z, sample, y) => {
-        const cell = cells.get(`${x}:${z}`);
+        const cell = cells.get(`${x}:${z}`) as (CoverageCell & { blocked?: Uint8Array }) | undefined;
         const grassY = cell?.heights[sample];
         if (
           cell &&
@@ -75,11 +75,11 @@ export function compileCoverage(
           y >= grassY! - BLOCKER_BELOW_TOLERANCE
         ) {
           cell.heights[sample] = Number.NaN;
-          const localX = sample % COVERAGE_RESOLUTION;
-          const localZ = Math.floor(sample / COVERAGE_RESOLUTION);
-          blockedSamples.add(
-            `${x * COVERAGE_RESOLUTION + localX}:${z * COVERAGE_RESOLUTION + localZ}`
-          );
+          if (!cell.blocked) {
+            cell.blocked = new Uint8Array(COVERAGE_RESOLUTION * COVERAGE_RESOLUTION);
+            blockedCells.add(cell);
+          }
+          cell.blocked[sample] = 1;
         }
       });
     }
@@ -87,20 +87,29 @@ export function compileCoverage(
   // Triangle coverage is sampled at texel centres. Dilate one texel so blades
   // whose roots land just inside a structural edge cannot survive because the
   // nearest blocker sample centre happened to fall just outside it.
-  for (const key of blockedSamples) {
-    const [gridX, gridZ] = key.split(':').map(Number);
-    for (let dz = -1; dz <= 1; dz++) {
-      for (let dx = -1; dx <= 1; dx++) {
-        const sampleX = gridX! + dx;
-        const sampleZ = gridZ! + dz;
-        const cellX = Math.floor(sampleX / COVERAGE_RESOLUTION);
-        const cellZ = Math.floor(sampleZ / COVERAGE_RESOLUTION);
-        const localX = ((sampleX % COVERAGE_RESOLUTION) + COVERAGE_RESOLUTION) % COVERAGE_RESOLUTION;
-        const localZ = ((sampleZ % COVERAGE_RESOLUTION) + COVERAGE_RESOLUTION) % COVERAGE_RESOLUTION;
-        const cell = cells.get(`${cellX}:${cellZ}`);
-        if (cell) cell.heights[localZ * COVERAGE_RESOLUTION + localX] = Number.NaN;
+  for (const cell of blockedCells) {
+    const blocked = cell.blocked!;
+    for (let sample = 0; sample < blocked.length; sample++) {
+      if (!blocked[sample]) continue;
+      const localX = sample % COVERAGE_RESOLUTION;
+      const localZ = Math.floor(sample / COVERAGE_RESOLUTION);
+      const gridX = cell.x * COVERAGE_RESOLUTION + localX;
+      const gridZ = cell.z * COVERAGE_RESOLUTION + localZ;
+      for (let dz = -1; dz <= 1; dz++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dz === 0) continue;
+          const sampleX = gridX + dx;
+          const sampleZ = gridZ + dz;
+          const targetCellX = Math.floor(sampleX / COVERAGE_RESOLUTION);
+          const targetCellZ = Math.floor(sampleZ / COVERAGE_RESOLUTION);
+          const targetLocalX = ((sampleX % COVERAGE_RESOLUTION) + COVERAGE_RESOLUTION) % COVERAGE_RESOLUTION;
+          const targetLocalZ = ((sampleZ % COVERAGE_RESOLUTION) + COVERAGE_RESOLUTION) % COVERAGE_RESOLUTION;
+          const targetCell = targetCellX === cell.x && targetCellZ === cell.z ? cell : cells.get(`${targetCellX}:${targetCellZ}`);
+          if (targetCell) targetCell.heights[targetLocalZ * COVERAGE_RESOLUTION + targetLocalX] = Number.NaN;
+        }
       }
     }
+    delete cell.blocked;
   }
   for (const [key, cell] of cells) {
     if (!cell.heights.some(Number.isFinite)) cells.delete(key);

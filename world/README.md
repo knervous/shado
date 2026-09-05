@@ -17,25 +17,6 @@ The current slice builds the geometry-query layer:
 - a JavaScript frustum-query oracle;
 - an embedded AssemblyScript/WASM BVH4 reducer used by the browser runtime.
 
-The `qey2hh1` reference candidate is configured in
-`qey2hh1.shado.config.mjs`. Build it with:
-
-```sh
-npm run preprocess:qey2hh1:world
-```
-
-The default input is:
-
-```text
-assets/reference/everquest_rof2/zones/qey2hh1.glb.gz
-```
-
-Set `SHADO_QEY2HH1_GLB` to exercise another export without editing the config.
-The output is `sandbox/public/shado/worlds/qey2hh1.spatial.json.gz` and can be
-loaded in browser or Node runtimes with `deserializeShadoWorld()`. The packer
-also emits required `qey2hh1.collision.bin.gz`; the source GLB is copied
-alongside them as `qey2hh1.glb.gz` for the demo runtime.
-
 The sandbox exposes two routes:
 
 - `/world` loads the processed zone, rebuilds 45 render-chunk index ranges, and
@@ -86,39 +67,13 @@ position/scale gizmos, duplication, type replacement, deletion, complete-file
 replacement, and JSON export.
 
 The browser keeps working changes under `shado-world-authoring:<world>` in local
-storage. Export the document to:
-
-```text
-sandbox/public/shado/worlds/qey2hh1.authoring.json
-```
-
-Then run `npm run preprocess:qey2hh1:world`. The packer validates stable IDs and
+storage. Export the document beside the world's source scene and run that world's
+preprocess step. The packer validates stable IDs and
 compiles region bounds and phase data into SoA planes in the spatial artifact,
 while retaining indexed tags and metadata for tools and gameplay. The same
 document can optionally be stored in GLB root extras under
 `EXT_shado_world_authoring`; the separate sidecar remains the preferred source
 because it is diffable and can be replaced without rewriting the GLB binary.
-
-## One-off zone migration
-
-Convert every `.glb` and `.glb.gz` in a flat directory with the compiler defaults:
-
-```sh
-npm run migrate:zones -- --input-dir ../assets/reference/everquest_rof2/zones \
-  --metadata-dir ../assets/reference/everquest_rof2/zones \
-  --object-prefix /eqrequiem/objects \
-  --out-dir sandbox/public/shado/worlds
-```
-
-Each zone produces a compressed spatial package, a copied runtime GLB, a
-required compressed collision binary, and an editable
-`<zone>.authoring.json` sidecar. When `<zone>.json` exists in the
-metadata directory, its regions and object placement table are promoted
-automatically. Object model keys become deduplicated prototypes and placements
-become stable stamps with explicit degree rotations. Every conversion merges
-new prototype, placement, and region IDs from the metadata sidecar. Existing
-rows remain authoring-owned, so editor changes are preserved rather than reset
-to the legacy sidecar values.
 
 The spatial package stores object transforms as SoA arrays, conservative stamp
 radii and cell IDs, plus prototype-to-stamp reference ranges. At runtime,

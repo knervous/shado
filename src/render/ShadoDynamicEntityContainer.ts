@@ -18,6 +18,8 @@ import {
 import {
   hashEntityId,
   SHADO_ENTITY2D_MESH_INDEX_MOTION_COMPONENT,
+  SHADO_ENTITY_HIGHLIGHTED,
+  SHADO_ENTITY_SELECTED,
   SHADO_ENTITY_VISIBLE,
   ShadoEntity2D,
   type ShadoEntity2DDestinationInput,
@@ -25,8 +27,10 @@ import {
 } from './ShadoEntity2D';
 import type { ShadoTextureAtlas } from './ShadoTextureAtlas';
 
-export interface ShadoDynamicEntityInput
-  extends Omit<ShadoEntity2DInput, 'textureLayer' | 'uvRect'> {
+export interface ShadoDynamicEntityInput extends Omit<
+  ShadoEntity2DInput,
+  'textureLayer' | 'uvRect'
+> {
   id: string;
   textureKey?: string;
 }
@@ -42,6 +46,54 @@ export interface ShadoDynamicEntityExpirationInput {
 }
 
 export type ShadoDynamicEntityGeometryMode = 'box' | 'plane' | 'spriteSlab' | 'mesh';
+export type ShadoSpritePresentation = 'ground' | 'billboard-y' | 'billboard-screen' | 'slab';
+export type ShadoSpriteAlphaMode = 'cutout' | 'premultiplied';
+export type ShadoSpriteSortMode = 'none' | 'camera-back-to-front';
+
+export interface ShadoDynamicEntityRenderModeOptions {
+  geometry?: ShadoDynamicEntityGeometryMode;
+  billboard?: boolean;
+  presentation?: ShadoSpritePresentation;
+  alphaMode?: ShadoSpriteAlphaMode;
+}
+
+export type ShadoResolvedDynamicEntityRenderMode = {
+  geometry: ShadoDynamicEntityGeometryMode;
+  billboard: boolean;
+  presentation: ShadoSpritePresentation | undefined;
+  alphaMode: ShadoSpriteAlphaMode;
+};
+
+/** Translate the legacy geometry/billboard pair once, before shader generation. */
+export function resolveShadoDynamicEntityRenderMode(
+  options: ShadoDynamicEntityRenderModeOptions = {}
+): ShadoResolvedDynamicEntityRenderMode {
+  const explicitPresentation = options.presentation;
+  const geometry =
+    explicitPresentation === 'slab'
+      ? 'spriteSlab'
+      : explicitPresentation
+        ? 'plane'
+        : (options.geometry ?? 'box');
+  const presentation =
+    explicitPresentation ??
+    (geometry === 'plane'
+      ? options.billboard === false
+        ? 'ground'
+        : 'billboard-y'
+      : geometry === 'spriteSlab'
+        ? 'slab'
+        : undefined);
+  return {
+    geometry,
+    presentation,
+    billboard: presentation === 'billboard-y' || presentation === 'billboard-screen',
+    // Preserve the 1.x renderer's blended-opacity result for callers that do
+    // not opt into the new explicit alpha policy. Premultiplied output plus
+    // premultiplied blending is equivalent to the former straight-alpha path.
+    alphaMode: options.alphaMode ?? 'premultiplied',
+  };
+}
 
 type EntityRecord = {
   id: string;
@@ -74,9 +126,17 @@ export class ShadoDynamicEntityContainer extends Shado {
   private readonly meshBuckets = new Map<number, number[]>();
   private readonly meshRanges = new Map<number, { offset: number; count: number }>();
   private drawListSorted = false;
+  private cameraSort?: {
+    position: readonly [number, number, number];
+    forward: readonly [number, number, number];
+  };
+  private cameraSortSignature = '';
+  private entityRevision = 0;
   private atlas?: ShadoTextureAtlas;
   private geometryMode: ShadoDynamicEntityGeometryMode = 'box';
   private billboard = false;
+  private presentation?: ShadoSpritePresentation;
+  private alphaMode: ShadoSpriteAlphaMode = 'cutout';
   private reducer?: ShadoDynamicEntityReducer;
   private reducerArenaSignature = '';
   private deltaScratchPtr = 0;
@@ -125,23 +185,30 @@ export class ShadoDynamicEntityContainer extends Shado {
     this.atlas = atlas;
   }
 
-  public configureRenderMode(options: {
-    geometry?: ShadoDynamicEntityGeometryMode;
-    billboard?: boolean;
-  }): void {
-    this.geometryMode = options.geometry ?? this.geometryMode;
-    this.billboard = options.billboard ?? this.billboard;
+  public configureRenderMode(options: ShadoDynamicEntityRenderModeOptions): void {
+    const mode = resolveShadoDynamicEntityRenderMode({
+      geometry: options.geometry ?? this.geometryMode,
+      billboard: options.billboard ?? this.billboard,
+      presentation: options.presentation,
+      alphaMode: options.alphaMode ?? this.alphaMode,
+    });
+    this.geometryMode = mode.geometry;
+    this.billboard = mode.billboard;
+    this.presentation = mode.presentation;
+    this.alphaMode = mode.alphaMode;
   }
 
   public getShaderNamesForRenderMode(
-    options: {
-      geometry?: ShadoDynamicEntityGeometryMode;
-      billboard?: boolean;
-    } = {},
+    options: ShadoDynamicEntityRenderModeOptions = {},
     _rewrite: boolean = true
   ): { vertex: string; fragment: string } {
-    const geometry = options.geometry ?? this.geometryMode;
-    const billboard = options.billboard ?? this.billboard;
+    const mode = resolveShadoDynamicEntityRenderMode({
+      geometry: options.geometry ?? this.geometryMode,
+      billboard: options.billboard ?? this.billboard,
+      presentation: options.presentation ?? this.presentation,
+      alphaMode: options.alphaMode ?? this.alphaMode,
+    });
+    const { geometry, billboard, presentation, alphaMode } = mode;
     const effect = BABYLON.Effect as any;
     const shaderStore = BABYLON.ShaderStore as any;
     const useStorageWGSL =
@@ -150,10 +217,10 @@ export class ShadoDynamicEntityContainer extends Shado {
         this._engine?.getClassName?.() === 'WebGPUEngine') &&
       (this.constructor as any).backingPreference === 'storage';
     if (useStorageWGSL) {
-      const pair = this.generateWGSLPairForRenderMode(geometry, billboard);
+      const pair = this.generateWGSLPairForRenderMode(geometry, presentation, alphaMode);
       const idBase = this.sharedShaderName(
         pair,
-        `wgsl_${geometry}_${billboard ? 'billboard' : 'flat'}`
+        `wgsl_${geometry}_${presentation ?? (billboard ? 'billboard' : 'flat')}_${alphaMode}`
       );
       const vKey = `${idBase}VertexShader`;
       const fKey = `${idBase}FragmentShader`;
@@ -165,10 +232,10 @@ export class ShadoDynamicEntityContainer extends Shado {
       return { vertex: idBase, fragment: idBase };
     }
 
-    const pair = this.generateGLSLPairForRenderMode(geometry, billboard);
+    const pair = this.generateGLSLPairForRenderMode(geometry, presentation, alphaMode);
     const idBase = this.sharedShaderName(
       pair,
-      `glsl_${geometry}_${billboard ? 'billboard' : 'flat'}`
+      `glsl_${geometry}_${presentation ?? (billboard ? 'billboard' : 'flat')}_${alphaMode}`
     );
     const vKey = `${idBase}VertexShader`;
     const fKey = `${idBase}FragmentShader`;
@@ -342,6 +409,20 @@ export class ShadoDynamicEntityContainer extends Shado {
     return updated;
   }
 
+  public setVisible(id: string, visible: boolean): boolean {
+    const changed = this.setEntityFlag(id, SHADO_ENTITY_VISIBLE, visible);
+    if (changed) this.syncDrawList();
+    return changed;
+  }
+
+  public setSelected(id: string, selected: boolean): boolean {
+    return this.setEntityFlag(id, SHADO_ENTITY_SELECTED, selected);
+  }
+
+  public setHighlighted(id: string, highlighted: boolean): boolean {
+    return this.setEntityFlag(id, SHADO_ENTITY_HIGHLIGHTED, highlighted);
+  }
+
   public applyReducerDeltaBytes(deltaBytes: Uint8Array): number {
     if (!(deltaBytes instanceof Uint8Array) || deltaBytes.byteLength <= 0) return 0;
     const reducer = this.ensureSharedReducer();
@@ -483,6 +564,8 @@ export class ShadoDynamicEntityContainer extends Shado {
 
   public syncDrawList(options: { sort?: boolean } = {}): void {
     this.drawListSorted = options.sort ?? this.drawListSorted;
+    this.cameraSort = undefined;
+    this.cameraSortSignature = '';
     this.meshBuckets.clear();
     for (let i = 0; i < this.records.length; i++) {
       const entity = this.getEntity(i);
@@ -493,6 +576,23 @@ export class ShadoDynamicEntityContainer extends Shado {
       if (!bucket) this.meshBuckets.set(meshIndex, (bucket = []));
       bucket.push(i);
     }
+    this.rebuildDrawIdsFromBuckets();
+  }
+
+  /** Reorder each material bucket by displayed camera depth, far to near. */
+  public sortDrawListByCamera(
+    position: readonly [number, number, number],
+    forward: readonly [number, number, number]
+  ): void {
+    const signature = [
+      ...position.map(value => value.toFixed(5)),
+      ...forward.map(value => value.toFixed(5)),
+      this.entityRevision,
+    ].join(':');
+    if (signature === this.cameraSortSignature) return;
+    this.drawListSorted = true;
+    this.cameraSort = { position, forward };
+    this.cameraSortSignature = signature;
     this.rebuildDrawIdsFromBuckets();
   }
 
@@ -511,6 +611,20 @@ export class ShadoDynamicEntityContainer extends Shado {
         bucket.sort((a, b) => {
           const ea = this.getEntity(a);
           const eb = this.getEntity(b);
+          if (this.cameraSort && ea && eb) {
+            const { position, forward } = this.cameraSort;
+            const depthA =
+              (ea.positionSize[0] - position[0]) * forward[0] +
+              (ea.render[0] - position[1]) * forward[1] +
+              (ea.positionSize[1] - position[2]) * forward[2];
+            const depthB =
+              (eb.positionSize[0] - position[0]) * forward[0] +
+              (eb.render[0] - position[1]) * forward[1] +
+              (eb.positionSize[1] - position[2]) * forward[2];
+            const cameraOrder = depthB - depthA;
+            if (Math.abs(cameraOrder) > 0.00001) return cameraOrder;
+            return (eb.renderState[3] ?? 0) - (ea.renderState[3] ?? 0);
+          }
           return (ea?.renderState[3] ?? 0) - (eb?.renderState[3] ?? 0);
         });
       }
@@ -529,6 +643,7 @@ export class ShadoDynamicEntityContainer extends Shado {
 
   /** Mark exactly the changed entity records dirty for partial GPU upload. */
   private markEntityRecordsDirty(indices: Iterable<number>): void {
+    this.entityRevision++;
     const seg = (this as any)._structSeg?.entities;
     const strideF = (this.getStructArrayStrideBytes('entities') / 4) | 0;
     const arena = this.arena as any;
@@ -539,6 +654,19 @@ export class ShadoDynamicEntityContainer extends Shado {
     for (const index of indices) {
       arena.markDirtyFloats((seg.offF | 0) + index * strideF, strideF);
     }
+  }
+
+  private setEntityFlag(id: string, flag: number, enabled: boolean): boolean {
+    const index = this.indexById.get(id);
+    if (index === undefined) return false;
+    const entity = this.getEntity(index);
+    if (!entity) return false;
+    const flags = entity.renderState[1] | 0;
+    const next = enabled ? flags | flag : flags & ~flag;
+    if (next === flags) return false;
+    entity.renderState[1] = next;
+    this.markEntityRecordsDirty([index]);
+    return true;
   }
 
   private writeEntity(entity: ShadoEntity2D, input: ShadoDynamicEntityInput): void {
@@ -653,7 +781,8 @@ export class ShadoDynamicEntityContainer extends Shado {
 
   private generateGLSLPairForRenderMode(
     geometryMode: ShadoDynamicEntityGeometryMode,
-    billboard: boolean
+    presentation: ShadoSpritePresentation | undefined,
+    alphaMode: ShadoSpriteAlphaMode
   ): { vs: string; fs: string } {
     const schema = this.getSchema();
     const actor = schema.structArrays.entities.schema.name;
@@ -663,8 +792,10 @@ export class ShadoDynamicEntityContainer extends Shado {
     const isPlane = geometryMode === 'plane';
     const isMesh = geometryMode === 'mesh';
     const isSpriteSlab = geometryMode === 'spriteSlab';
-    const isBillboard = isPlane && billboard;
+    const isBillboard = presentation === 'billboard-y' || presentation === 'billboard-screen';
+    const isCylindricalBillboard = presentation === 'billboard-y';
     const viewUniform = isBillboard ? 'uniform mat4 view;\n' : '';
+    const spriteUniforms = isPlane ? 'uniform vec2 uShadoSpritePivot;\n' : '';
     const uvBlock = isMesh
       ? `
   vUV = uv;
@@ -687,18 +818,26 @@ export class ShadoDynamicEntityContainer extends Shado {
 `;
     const worldPositionBlock = isBillboard
       ? `
-  vec3 center = vec3(positionSize.x, render.x + (positionSize.w * 0.5), positionSize.y);
+  vec2 pivotOffset = vec2(
+    position.x + 0.5 - uShadoSpritePivot.x,
+    position.y + 0.5 - uShadoSpritePivot.y
+  );
   vec3 cameraRight = vec3(view[0][0], view[1][0], view[2][0]);
-  vec3 cameraUp = vec3(view[0][1], view[1][1], view[2][1]);
-  vec3 worldPosition = center
-    + cameraRight * (position.x * positionSize.z)
-    + cameraUp * (position.y * positionSize.w);
+  ${isCylindricalBillboard ? 'cameraRight = normalize(vec3(cameraRight.x, 0.0, cameraRight.z));' : ''}
+  vec3 cameraUp = ${isCylindricalBillboard ? 'vec3(0.0, 1.0, 0.0)' : 'vec3(view[0][1], view[1][1], view[2][1])'};
+  vec3 worldPosition = vec3(positionSize.x, render.x, positionSize.y)
+    + cameraRight * (pivotOffset.x * positionSize.z)
+    + cameraUp * (pivotOffset.y * render.y);
 `
       : isPlane
         ? `
   float c = cos(render.z);
   float s = sin(render.z);
-  vec2 localPlane = vec2(position.x * positionSize.z, position.y * positionSize.w);
+  vec2 pivotOffset = vec2(
+    position.x + 0.5 - uShadoSpritePivot.x,
+    position.y + 0.5 - uShadoSpritePivot.y
+  );
+  vec2 localPlane = vec2(pivotOffset.x * positionSize.z, pivotOffset.y * render.y);
   vec2 rotatedXZ = vec2(localPlane.x * c - localPlane.y * s, localPlane.x * s + localPlane.y * c);
   vec3 worldPosition = vec3(
     positionSize.x + rotatedXZ.x,
@@ -730,7 +869,7 @@ attribute vec2 uv;
 uniform mat4 worldViewProjection;
 uniform float uShadoEntityMeshIndex;
 uniform float uShadoDrawOffset;
-${viewUniform}#define SHADO_DYNAMIC_ENTITY_${geometryMode.toUpperCase()} 1
+${viewUniform}${spriteUniforms}#define SHADO_DYNAMIC_ENTITY_${geometryMode.toUpperCase()} 1
 ${isBillboard ? '#define SHADO_DYNAMIC_ENTITY_BILLBOARD 1\n' : ''}
 #include<${actor}>
 #include<${offsetsInclude}>
@@ -739,6 +878,7 @@ varying vec2 vUV;
 varying vec4 vColor;
 varying float vLayer;
 varying float vSpriteSlabSurface;
+varying float vFlags;
 
 void main(void) {
   // Draw IDs are partitioned into contiguous per-mesh ranges; this renderer
@@ -753,6 +893,7 @@ ${worldPositionBlock}
 ${uvBlock}
   vColor = vec4(entity.color.rgb, entity.color.a * render.w);
   vLayer = entity.renderState.x;
+  vFlags = entity.renderState.y;
   gl_Position = worldViewProjection * vec4(worldPosition, 1.0);
 }
 `;
@@ -764,21 +905,28 @@ varying vec2 vUV;
 varying vec4 vColor;
 varying float vLayer;
 varying float vSpriteSlabSurface;
+varying float vFlags;
 uniform highp sampler2DArray uShadoEntityAtlas;
 uniform sampler2D uShadoEntityMeshTexture;
 uniform float uUseShadoEntityMeshTexture;
+uniform float uShadoAlphaCutoff;
 
 void main(void) {
   vec4 texel = uUseShadoEntityMeshTexture > 0.5
     ? texture2D(uShadoEntityMeshTexture, vUV)
-    : texture(uShadoEntityAtlas, vec3(vUV, floor(vLayer + 0.5)));
+    : textureLod(uShadoEntityAtlas, vec3(vUV, floor(vLayer + 0.5)), 0.0);
   vec4 slabSide = vec4(0.70, 0.74, 0.76, vColor.a);
   vec4 outColor = vSpriteSlabSurface < -0.5
     ? vec4(0.0)
     : vSpriteSlabSurface < 0.5
       ? slabSide
       : texel * vColor;
-  if (outColor.a <= 0.001) discard;
+  if (outColor.a < uShadoAlphaCutoff) discard;
+  float selected = mod(floor(vFlags / 2.0), 2.0);
+  float highlighted = mod(floor(vFlags / 4.0), 2.0);
+  outColor.rgb = mix(outColor.rgb, vec3(0.78, 0.96, 1.0), selected * 0.55);
+  outColor.rgb = mix(outColor.rgb, vec3(1.0, 0.72, 0.12), highlighted * 0.48);
+  ${alphaMode === 'premultiplied' ? 'outColor.rgb *= outColor.a;' : ''}
   gl_FragColor = outColor;
 }
 `;
@@ -787,12 +935,13 @@ void main(void) {
   }
 
   public override generateGLSLPair(): { vs: string; fs: string } {
-    return this.generateGLSLPairForRenderMode(this.geometryMode, this.billboard);
+    return this.generateGLSLPairForRenderMode(this.geometryMode, this.presentation, this.alphaMode);
   }
 
   private generateWGSLPairForRenderMode(
     geometryMode: ShadoDynamicEntityGeometryMode,
-    billboard: boolean
+    presentation: ShadoSpritePresentation | undefined,
+    alphaMode: ShadoSpriteAlphaMode
   ): { vs: string; fs: string } {
     const schema = this.getSchema();
     const actor = schema.structArrays.entities.schema.name;
@@ -800,8 +949,10 @@ void main(void) {
     const isPlane = geometryMode === 'plane';
     const isMesh = geometryMode === 'mesh';
     const isSpriteSlab = geometryMode === 'spriteSlab';
-    const isBillboard = isPlane && billboard;
+    const isBillboard = presentation === 'billboard-y' || presentation === 'billboard-screen';
+    const isCylindricalBillboard = presentation === 'billboard-y';
     const viewUniform = isBillboard ? 'uniform view: mat4x4f;\n' : '';
+    const spriteUniforms = isPlane ? 'uniform uShadoSpritePivot: vec2f;\n' : '';
     const uvBlock = isMesh
       ? `
   vertexOutputs.vUV = vertexInputs.uv;
@@ -828,20 +979,28 @@ void main(void) {
 `;
     const worldPositionBlock = isBillboard
       ? `
-  let center = vec3f(positionSize.x, render.x + positionSize.w * 0.5, positionSize.y);
-  let cameraRight = vec3f(uniforms.view[0].x, uniforms.view[1].x, uniforms.view[2].x);
-  let cameraUp = vec3f(uniforms.view[0].y, uniforms.view[1].y, uniforms.view[2].y);
-  let worldPosition = center
-    + cameraRight * (vertexInputs.position.x * positionSize.z)
-    + cameraUp * (vertexInputs.position.y * positionSize.w);
+  let pivotOffset = vec2f(
+    vertexInputs.position.x + 0.5 - uniforms.uShadoSpritePivot.x,
+    vertexInputs.position.y + 0.5 - uniforms.uShadoSpritePivot.y
+  );
+  var cameraRight = vec3f(uniforms.view[0].x, uniforms.view[1].x, uniforms.view[2].x);
+  ${isCylindricalBillboard ? 'cameraRight = normalize(vec3f(cameraRight.x, 0.0, cameraRight.z));' : ''}
+  let cameraUp = ${isCylindricalBillboard ? 'vec3f(0.0, 1.0, 0.0)' : 'vec3f(uniforms.view[0].y, uniforms.view[1].y, uniforms.view[2].y)'};
+  let worldPosition = vec3f(positionSize.x, render.x, positionSize.y)
+    + cameraRight * (pivotOffset.x * positionSize.z)
+    + cameraUp * (pivotOffset.y * render.y);
 `
       : isPlane
         ? `
   let c = cos(render.z);
   let s = sin(render.z);
+  let pivotOffset = vec2f(
+    vertexInputs.position.x + 0.5 - uniforms.uShadoSpritePivot.x,
+    vertexInputs.position.y + 0.5 - uniforms.uShadoSpritePivot.y
+  );
   let localPlane = vec2f(
-    vertexInputs.position.x * positionSize.z,
-    vertexInputs.position.y * positionSize.w
+    pivotOffset.x * positionSize.z,
+    pivotOffset.y * render.y
   );
   let rotatedXZ = vec2f(
     localPlane.x * c - localPlane.y * s,
@@ -874,13 +1033,14 @@ attribute uv: vec2f;
 uniform worldViewProjection: mat4x4f;
 uniform uShadoEntityMeshIndex: f32;
 uniform uShadoDrawOffset: f32;
-${viewUniform}
+${viewUniform}${spriteUniforms}
 #include<${actor}>
 #include<${container}Storage>
 varying vUV: vec2f;
 varying vColor: vec4f;
 varying vLayer: f32;
 varying vSpriteSlabSurface: f32;
+varying vFlags: f32;
 
 @vertex
 fn main(input: VertexInputs) -> FragmentInputs {
@@ -893,6 +1053,7 @@ ${worldPositionBlock}
 ${uvBlock}
   vertexOutputs.vColor = vec4f(entity.color.rgb, entity.color.a * render.w);
   vertexOutputs.vLayer = entity.renderState.x;
+  vertexOutputs.vFlags = entity.renderState.y;
   vertexOutputs.position = uniforms.worldViewProjection * vec4f(worldPosition, 1.0);
 }
 `;
@@ -902,7 +1063,9 @@ varying vUV: vec2f;
 varying vColor: vec4f;
 varying vLayer: f32;
 varying vSpriteSlabSurface: f32;
+varying vFlags: f32;
 uniform uUseShadoEntityMeshTexture: f32;
+uniform uShadoAlphaCutoff: f32;
 var uShadoEntityAtlasSampler: sampler;
 var uShadoEntityAtlas: texture_2d_array<f32>;
 var uShadoEntityMeshTextureSampler: sampler;
@@ -933,9 +1096,21 @@ fn main(input: FragmentInputs) -> FragmentOutputs {
   if (fragmentInputs.vSpriteSlabSurface < -0.5) {
     outColor = vec4f(0.0);
   }
-  if (outColor.a <= 0.001) {
+  if (outColor.a < uniforms.uShadoAlphaCutoff) {
     discard;
   }
+  let flags = i32(fragmentInputs.vFlags + 0.5);
+  let selected = f32((flags >> 1) & 1);
+  let highlighted = f32((flags >> 2) & 1);
+  outColor = vec4f(
+    mix(
+      mix(outColor.rgb, vec3f(0.78, 0.96, 1.0), selected * 0.55),
+      vec3f(1.0, 0.72, 0.12),
+      highlighted * 0.48
+    ),
+    outColor.a
+  );
+  ${alphaMode === 'premultiplied' ? 'outColor = vec4f(outColor.rgb * outColor.a, outColor.a);' : ''}
   fragmentOutputs.color = outColor;
 }
 `;
@@ -943,6 +1118,6 @@ fn main(input: FragmentInputs) -> FragmentOutputs {
   }
 
   public override generateWGSLPair(): { vs: string; fs: string } {
-    return this.generateWGSLPairForRenderMode(this.geometryMode, this.billboard);
+    return this.generateWGSLPairForRenderMode(this.geometryMode, this.presentation, this.alphaMode);
   }
 }

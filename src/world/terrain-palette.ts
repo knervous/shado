@@ -162,6 +162,17 @@ export type ResolvedTerrainLayer = {
   control: EltaniaTerrainControlDefinition | null;
   /** Signed influence of the control channel: paths add dirt and remove grass. */
   controlSign: number;
+  /**
+   * World metres the baked height field rises under a fully painted mask, and
+   * the metres over which it ramps up at the mask edge.
+   *
+   * These two stay in author units where every other resolved field is
+   * converted, because their consumer is the zone bake rather than the shader.
+   * The bake works in world metres and knows its own zone-units-per-metre; a
+   * reciprocal or a steepness here would only have to be undone.
+   */
+  protrusionMetres: number;
+  protrusionFalloffMetres: number;
 };
 
 /**
@@ -231,8 +242,21 @@ export function resolveTerrainLayer(layer: ShadoWorldTerrainLayer): ResolvedTerr
     heightContrast: material.heightContrast,
     control,
     controlSign: authored.controlAdds === false ? -1 : 1,
+    // No mask, no protrusion: a lift needs somewhere to say where it stops.
+    protrusionMetres: control ? Math.max(0, layer.protrusionMetres ?? 0) : 0,
+    protrusionFalloffMetres: Math.max(0, layer.protrusionFalloffMetres ?? DEFAULT_PROTRUSION_FALLOFF_METRES),
   };
 }
+
+/**
+ * The falloff a protruding layer gets when its author has not chosen one.
+ *
+ * Two metres is a little under one 8-unit Crownward grid cell, which is the
+ * coarsest thing the ramp has to be resolvable on, and about the width of the
+ * verge beside a real road — narrow enough that the causeway still reads as
+ * built, wide enough that nothing about it is a step.
+ */
+export const DEFAULT_PROTRUSION_FALLOFF_METRES = 2;
 
 /**
  * The most layers the terrain shader binds at once.

@@ -1,6 +1,6 @@
 {
   "name": "@knervous/shado",
-  "version": "1.9.0",
+  "version": "1.10.0",
   "description": "Packed GPU struct schemas + Babylon include emitters with optional AssemblyScript kernels",
   "license": "MIT",
   "keywords": [
@@ -128,6 +128,13 @@
       "import": "./dist/render/index.js",
       "require": "./dist/render/index.cjs",
       "default": "./dist/render/index.js"
+    },
+    "./render/sprite-2d-motion": {
+      "source": "./src/render/ShadoSprite2DMotionKernel.ts",
+      "types": "./dist/render/sprite-2d-motion.d.ts",
+      "import": "./dist/render/sprite-2d-motion.js",
+      "require": "./dist/render/sprite-2d-motion.cjs",
+      "default": "./dist/render/sprite-2d-motion.js"
     },
     "./svat": {
       "source": "./src/svat/index.ts",
@@ -277,12 +284,14 @@
     "format:check": "prettier --check src/**/*.ts",
     "build": "cross-env NODE_OPTIONS=--max-old-space-size=8192 tsup",
     "build:vat-kernel": "node scripts/build-vat-kernel.mjs",
+    "build:sprite-2d-motion-kernel": "node scripts/build-sprite-2d-motion-kernel.mjs",
     "build:vat-bake-worker": "npm run build:vat-kernel && node scripts/build-vat-bake-worker.mjs",
     "build:showcase-culling": "npm run build && node scripts/build-showcase-culling-wasm.mjs",
     "build:world-reducer": "node dist/cli.js asc build --config world/shado.config.mjs",
     "benchmark:vat-kernel": "npm run build:vat-kernel && node scripts/benchmark-vat-kernel.mjs",
     "benchmark:actor-projection": "npm run build && node bench/actor-projection-bench.mjs",
     "benchmark:instance-addition": "npm run build && node bench/instance-addition-bench.mjs",
+    "benchmark:sprite-2d": "node bench/sprite-2d-load-bench.mjs",
     "benchmark:world-light-field": "npm run build && node bench/world-light-field-bench.mjs",
     "benchmark:world-light-field-webgpu": "node bench/world-light-field-webgpu-bench.mjs",
     "benchmark:webgpu-upload": "node bench/webgpu-upload-bench.mjs",
@@ -311,8 +320,6 @@
     "preprocess:sandbox:wrappers": "npm run build && node dist/cli.js wrappers build --config sandbox/shado.config.mjs",
     "preprocess:sandbox:manifest": "node dist/cli.js manifest models --config sandbox/shado.config.mjs",
     "preprocess:sandbox:models": "npm run build && node dist/cli.js pack models --config sandbox/shado.config.mjs",
-    "preprocess:qey2hh1:world": "npm run build && npm run build:world-reducer && node dist/cli.js pack worlds --config world/qey2hh1.shado.config.mjs",
-    "migrate:zones": "npm run build && npm run build:world-reducer && node dist/cli.js migrate worlds",
     "demo:live": "node demo/live-stream/server.mjs"
   },
   "dependencies": {

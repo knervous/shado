@@ -4,9 +4,7 @@ import {
   encodeShadoWorldCollision,
   collisionResidencyKeys,
   createShadoWorldAuthoring,
-  importLegacyZoneMetadata,
-  mergeLegacyZoneMetadata,
-  legacyZoneObjectTransformToBabylon,
+  upgradeShadoWorldAuthoring,
   buildShadoWorldObjectRenderBatches,
   authoringFromGltfExtras,
   shadoWorldAuthoringExtras,
@@ -444,192 +442,40 @@ describe('Shado world spatial compiler', () => {
     expect(() => validateShadoWorldPackage(world)).not.toThrow();
   });
 
-  it('promotes legacy object metadata into prototype batches and culling-ready stamp SoA', async () => {
-    const authoring = importLegacyZoneMetadata(
-      {
-        version: 2.05,
-        objects: {
-          tree: [
-            {
-              x: 0.5,
-              y: 2,
-              z: 0,
-              rotateX: 12,
-              rotateY: 90,
-              rotateZ: -7,
-              scale: 2,
-            },
-            { x: -100, y: 0, z: 0, rotateX: 0, rotateY: 0, rotateZ: 0, scale: 1 },
-          ],
-        },
-        regions: [
-          {
-            minVertex: [0, 0, 0],
-            maxVertex: [4, 2, 4],
-            center: [2, 1, 2],
-            regionType: 1,
-            zoneLineInfo: null,
-          },
-        ],
-      },
-      'legacy',
-      { objectSourcePrefix: '/objects', defaultObjectBoundsRadius: 3 }
-    );
-    expect(authoring.objects.prototypes).toEqual([
-      {
-        id: 'tree',
-        source: '/objects/tree/final.glb.gz',
-        boundsRadius: 3,
-        metadata: {
-          legacyModel: 'tree',
-          sourceCoordinateSystem: 'requiem-y-up',
-          generatedAsset: 'final.glb.gz',
-        },
-      },
-    ]);
-    expect(authoring.objects.stamps[0]).toMatchObject({
-      position: [0.5, 2, 0],
-      rotationDegrees: [12, 90, -7],
-      scale: [2, 2, 2],
-      metadata: {
-        legacyIndex: 0,
-        sourceCoordinateSystem: 'requiem-y-up',
-        transformNormalizedAtPreprocess: true,
-        transformContract: 'requiem-y-up-v2',
-      },
-    });
-    expect(authoring.regions[0].kind).toBe('water');
-    expect(authoring.regions[0].center).toEqual([2, 1, 2]);
-    expect(authoring.regions[0].metadata.transformContract).toBe('requiem-y-up-v2');
-
-    const world = compileShadoWorld([quad(0, 'stone')], {
-      name: 'legacy',
-      tileSize: 16,
-      authoring,
-    });
-    expect(world.objects?.prototypes.id).toEqual(['tree']);
-    expect(world.objects?.prototypeStampRefs).toEqual([0, 1]);
-    expect(world.objects?.stamps.radius).toEqual([6, 3]);
-    expect(world.objects?.stamps.cellId).toEqual([0, -1]);
-
-    const planes = new Float32Array([
-      1, 0, 0, 10, -1, 0, 0, 10, 0, 1, 0, 10, 0, -1, 0, 10, 0, 0, 1, 10, 0, 0, -1, 10,
-    ]);
-    const coordinator = await ShadoWorldVisibilityCoordinator.create(world);
-    const frame = coordinator.reduceWorld(planes, [0.5, 2, 0]);
-    const objects = coordinator.reduceWorldObjects(planes, frame, {
-      camera: [0.5, 2, 0],
-      outsideWorldVisible: false,
-    });
-    expect(Array.from(objects.visibleIndices)).toEqual([0]);
-    expect(Array.from(objects.byPrototype[0])).toEqual([0]);
-    const [batch] = buildShadoWorldObjectRenderBatches(world, objects.byPrototype);
-    expect(batch.source).toBe('/objects/tree/final.glb.gz');
-    expect(Array.from(batch.stampIndices)).toEqual([0]);
-    expect(Array.from(batch.matrices.slice(12, 16))).toEqual([0.5, 2, 0, 1]);
-    expect(Array.from(batch.colors)).toEqual([1, 1, 1, 1]);
-  });
-
-  it('preserves source-space placement and yaw with non-uniform scale', () => {
-    const source = {
-      x: -11,
-      y: 22,
-      z: -33,
-      rotateX: 14,
-      rotateY: -27,
-      rotateZ: 39,
-      scale: 4,
-      scaleX: 1.5,
-      scaleZ: 2.5,
-    };
-    expect(legacyZoneObjectTransformToBabylon(source)).toEqual({
-      position: [-11, 22, -33],
-      rotationDegrees: [14, -27, 39],
-      scale: [1.5, 4, 2.5],
-    });
-  });
-
-  it('merges newly discovered metadata stamps without overwriting editor changes', () => {
-    const initial = importLegacyZoneMetadata(
-      {
-        objects: {
-          tree: [{ x: -1, y: 2, z: 3, rotateY: 10, scale: 1 }],
-        },
-      },
-      'merge'
-    );
-    initial.objects.stamps[0].position = [77, 88, 99];
-    const merged = mergeLegacyZoneMetadata(
-      initial,
-      {
-        objects: {
-          tree: [
-            { x: -1, y: 2, z: 3, rotateY: 10, scale: 1 },
-            { x: -4, y: 5, z: 6, rotateY: 20, scale: 2 },
-          ],
-          rock: [{ x: -7, y: 8, z: 9, rotateY: 0, scale: 1 }],
-        },
-      },
-      'merge'
-    );
-
-    expect(merged.objects.prototypes.map(item => item.id)).toEqual(['tree', 'rock']);
-    expect(merged.objects.stamps.map(item => item.id)).toEqual(['tree-0', 'rock-0', 'tree-1']);
-    expect(merged.objects.stamps[0].position).toEqual([77, 88, 99]);
-    expect(merged.objects.stamps.find(item => item.id === 'tree-1')?.position).toEqual([-4, 5, 6]);
-    expect(merged.objects.prototypes[0].source).toBe('/eqrequiem/objects/tree/final.glb.gz');
-  });
-
-  it('keeps authored legacy-object tombstones during metadata refreshes', () => {
-    const authoring = createShadoWorldAuthoring('merge-exclusions');
-    authoring.legacyObjectExclusions = ['removed-temple'];
-    const merged = mergeLegacyZoneMetadata(
-      authoring,
-      {
-        objects: {
-          'removed-temple': [{ x: 1, y: 2, z: 3 }],
-          retained: [{ x: 4, y: 5, z: 6 }],
-        },
-      },
-      'merge-exclusions'
-    );
-
-    expect(merged.objects.prototypes.map(item => item.id)).toEqual(['retained']);
-    expect(merged.objects.stamps.map(item => item.prototype)).toEqual(['retained']);
-  });
-
   it('removes the superseded authoring reflection exactly once', () => {
-    const initial = importLegacyZoneMetadata(
-      {
-        objects: {
-          tree: [{ x: -11, y: 22, z: -33, rotateY: -27, scale: 1 }],
-        },
-        regions: [
-          {
-            minVertex: [-4, 0, 0],
-            maxVertex: [0, 2, 4],
-            center: [-2, 1, 2],
-            regionType: 1,
-          },
-        ],
-      },
-      'upgrade'
-    );
-    initial.objects.stamps[0].position[0] *= -1;
-    initial.objects.stamps[0].rotationDegrees[1] *= -1;
-    delete initial.objects.stamps[0].metadata.transformContract;
-    initial.objects.stamps[0].metadata.positionMirroredAtPreprocess = true;
-    initial.regions[0].center[0] *= -1;
-    delete initial.regions[0].metadata.transformContract;
-    initial.regions[0].metadata.positionMirroredAtPreprocess = true;
+    const initial = createShadoWorldAuthoring('upgrade');
+    initial.objects.prototypes.push({
+      id: 'tree',
+      name: 'tree',
+      source: '/eqrequiem/objects/tree/final.glb.gz',
+      boundsRadius: 4,
+      tags: [],
+      metadata: {},
+    });
+    initial.objects.stamps.push({
+      id: 'tree-0',
+      prototype: 'tree',
+      name: 'tree 0',
+      enabled: true,
+      // Already reflected, as a document written before the current
+      // source-space contract would have stored it.
+      position: [11, 22, -33],
+      rotationDegrees: [0, 27, 0],
+      scale: [1, 1, 1],
+      phaseMask: 0xffffffff,
+      tags: [],
+      metadata: { legacyIndex: 0, positionMirroredAtPreprocess: true },
+    });
 
-    const upgraded = mergeLegacyZoneMetadata(initial, {}, 'upgrade');
+    const upgraded = upgradeShadoWorldAuthoring(initial, 'upgrade');
     expect(upgraded.objects.stamps[0].position).toEqual([-11, 22, -33]);
     expect(upgraded.objects.stamps[0].rotationDegrees).toEqual([0, -27, 0]);
     expect(upgraded.objects.stamps[0].metadata.transformContract).toBe('requiem-y-up-v2');
     expect(upgraded.objects.stamps[0].metadata.positionMirroredAtPreprocess).toBeUndefined();
-    expect(upgraded.regions[0].center).toEqual([-2, 1, 2]);
-    expect(upgraded.regions[0].metadata.transformContract).toBe('requiem-y-up-v2');
+
+    // Idempotent: the marker is gone, so a second pass changes nothing.
+    expect(upgradeShadoWorldAuthoring(upgraded, 'upgrade').objects.stamps[0].position)
+      .toEqual([-11, 22, -33]);
   });
 
   it('rejects duplicate region IDs before preprocessing', () => {

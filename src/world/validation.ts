@@ -167,35 +167,51 @@ export function stampShadoWorldIntegrity(world: ShadoWorldSpatialPackage): void 
 
 /** Rejects truncated, stale, or internally inconsistent spatial packages before use. */
 export function validateShadoWorldPackage(world: ShadoWorldSpatialPackage): void {
+  const unsupported = (detail: string) =>
+    new Error(`Unsupported Shado world spatial package: ${detail}`);
+  if (world.kind !== 'shado.world.spatial')
+    throw unsupported(`kind '${world.kind}' !== 'shado.world.spatial'`);
+  if (world.version !== 5) throw unsupported(`version ${world.version} !== 5`);
+  if (world.coordinateSystem !== 'babylon-y-up')
+    throw unsupported(`coordinateSystem '${world.coordinateSystem}' !== 'babylon-y-up'`);
+  if (!['identity', 'mirror-x'].includes(world.sourceTransform))
+    throw unsupported(`invalid sourceTransform '${world.sourceTransform}'`);
   if (
-    world.kind !== 'shado.world.spatial' ||
-    world.version !== 5 ||
-    world.coordinateSystem !== 'babylon-y-up' ||
-    !['identity', 'mirror-x'].includes(world.sourceTransform) ||
-    (world.lighting !== undefined &&
-      (!['dynamic', 'hybrid', 'baked'].includes(world.lighting.mode) ||
-        !['material-tint', 'baked-irradiance'].includes(world.lighting.vertexColors) ||
-        (world.lighting.mode === 'baked' && world.lighting.vertexColors !== 'baked-irradiance'))) ||
-    world.navigation?.runtimeToRecast !== 'z-y-negative-x' ||
-    world.collision?.format !== 'shado-collision-v2' ||
-    !world.collision.source ||
-    !Number.isFinite(world.collision.chunkSize) ||
-    world.collision.chunkSize <= 0 ||
-    !Number.isInteger(world.collision.chunkCount) ||
-    world.collision.chunkCount <= 0 ||
-    !Number.isInteger(world.collision.sourceTriangleCount) ||
-    world.collision.sourceTriangleCount <= 0 ||
-    !Number.isInteger(world.collision.vertexCount) ||
-    world.collision.vertexCount <= 0 ||
-    !Number.isInteger(world.collision.triangleCount) ||
-    world.collision.triangleCount <= 0 ||
-    !/^[0-9a-f]{8}$/.test(world.collision.contentHash) ||
-    !validBounds(world.bounds) ||
-    !validBounds(world.collision.bounds) ||
-    !boundsContain(world.bounds, world.collision.bounds)
+    world.lighting !== undefined &&
+    (!['dynamic', 'hybrid', 'baked'].includes(world.lighting.mode) ||
+      !['material-tint', 'baked-irradiance'].includes(world.lighting.vertexColors) ||
+      (world.lighting.mode === 'baked' && world.lighting.vertexColors !== 'baked-irradiance'))
   ) {
-    throw new Error('Unsupported Shado world spatial package');
+    throw unsupported(`invalid lighting config: ${JSON.stringify(world.lighting)}`);
   }
+  if (world.navigation?.runtimeToRecast !== 'z-y-negative-x')
+    throw unsupported(`navigation.runtimeToRecast !== 'z-y-negative-x'`);
+  if (world.collision?.format !== 'shado-collision-v2')
+    throw unsupported(`collision.format !== 'shado-collision-v2'`);
+  if (!world.collision.source) throw unsupported(`missing collision.source`);
+  if (!Number.isFinite(world.collision.chunkSize) || world.collision.chunkSize <= 0)
+    throw unsupported(`invalid collision.chunkSize`);
+  if (!Number.isInteger(world.collision.chunkCount) || world.collision.chunkCount <= 0)
+    throw unsupported(`invalid collision.chunkCount`);
+  if (
+    !Number.isInteger(world.collision.sourceTriangleCount) ||
+    world.collision.sourceTriangleCount <= 0
+  )
+    throw unsupported(`invalid collision.sourceTriangleCount`);
+  if (!Number.isInteger(world.collision.vertexCount) || world.collision.vertexCount <= 0)
+    throw unsupported(`invalid collision.vertexCount`);
+  if (!Number.isInteger(world.collision.triangleCount) || world.collision.triangleCount <= 0)
+    throw unsupported(`invalid collision.triangleCount`);
+  if (!/^[0-9a-f]{8}$/.test(world.collision.contentHash))
+    throw unsupported(`invalid collision.contentHash '${world.collision.contentHash}'`);
+  if (!validBounds(world.bounds))
+    throw unsupported(`invalid world.bounds ${JSON.stringify(world.bounds)}`);
+  if (!validBounds(world.collision.bounds))
+    throw unsupported(`invalid world.collision.bounds ${JSON.stringify(world.collision.bounds)}`);
+  if (!boundsContain(world.bounds, world.collision.bounds))
+    throw unsupported(
+      `!boundsContain world.bounds: ${JSON.stringify(world.bounds)} vs collision.bounds: ${JSON.stringify(world.collision.bounds)}`
+    );
   const clusterCount = world.clusters.radius.length;
   if (world.terrain) {
     if (
@@ -203,21 +219,64 @@ export function validateShadoWorldPackage(world: ShadoWorldSpatialPackage): void
       !Array.isArray(world.terrain.controlMaps) ||
       !Array.isArray(world.terrain.layers) ||
       new Set(world.terrain.layers.map(layer => layer.id)).size !== world.terrain.layers.length
-    ) throw new Error('Invalid Shado world terrain material authoring');
+    )
+      throw new Error('Invalid Shado world terrain material authoring');
+    for (const layer of world.terrain.layers) {
+      // A protrusion is ground the player stands on, so a bad number here is a
+      // wall or a trench in the walkable surface rather than a shading defect.
+      // The ceiling is arbitrary but load-bearing: past a few metres a lifted
+      // mask is a landform and belongs in the terrain field, not in a layer.
+      if (
+        layer.protrusionMetres !== undefined &&
+        !(
+          Number.isFinite(layer.protrusionMetres) &&
+          layer.protrusionMetres >= 0 &&
+          layer.protrusionMetres <= 8
+        )
+      ) {
+        throw new Error(
+          `Terrain layer '${layer.id}' has protrusionMetres ${layer.protrusionMetres}; expected 0 to 8 metres.`
+        );
+      }
+      if (
+        layer.protrusionFalloffMetres !== undefined &&
+        !(Number.isFinite(layer.protrusionFalloffMetres) && layer.protrusionFalloffMetres > 0)
+      ) {
+        throw new Error(
+          `Terrain layer '${layer.id}' has protrusionFalloffMetres ${layer.protrusionFalloffMetres}; expected a positive width.`
+        );
+      }
+      if (
+        layer.protrusionMetres &&
+        !layer.control &&
+        !(layer.metadata as { authoring?: { controlChannel?: string } } | undefined)?.authoring
+          ?.controlChannel
+      ) {
+        throw new Error(
+          `Terrain layer '${layer.id}' protrudes ${layer.protrusionMetres}m but paints no control channel; there is no mask to say where the ground rises.`
+        );
+      }
+    }
   }
   if (world.geometry) {
     if (
       !Array.isArray(world.geometry.meshes) ||
       !Array.isArray(world.geometry.materials) ||
-      new Set(world.geometry.meshes.map(override => override.mesh)).size !== world.geometry.meshes.length ||
-      new Set(world.geometry.materials.map(material => material.id)).size !== world.geometry.materials.length ||
-      world.geometry.meshes.some(override =>
-        !override.mesh || typeof override.enabled !== 'boolean' ||
-        !['inherit', 'enabled', 'disabled'].includes(override.collision) ||
-        !validTuple(override.position, 3) || !validTuple(override.rotationDegrees, 3) ||
-        !validTuple(override.scale, 3, true)
+      new Set(world.geometry.meshes.map(override => override.mesh)).size !==
+        world.geometry.meshes.length ||
+      new Set(world.geometry.materials.map(material => material.id)).size !==
+        world.geometry.materials.length ||
+      world.geometry.meshes.some(
+        override =>
+          !override.mesh ||
+          typeof override.enabled !== 'boolean' ||
+          !['inherit', 'enabled', 'disabled'].includes(override.collision) ||
+          !validTuple(override.position, 3) ||
+          !validTuple(override.rotationDegrees, 3) ||
+          !validTuple(override.scale, 3, true)
       )
-    ) throw new Error('Invalid Shado world geometry authoring');
+    )
+      throw new Error('Invalid Shado world geometry authoring');
   }
   if (world.pointLights) {
     const ids = new Set<string>();
@@ -228,35 +287,60 @@ export function validateShadoWorldPackage(world: ShadoWorldSpatialPackage): void
       light.cellId ??= -1;
       light.visibilityRegion ??= -1;
       if (
-        !light.id || ids.has(light.id) || !light.name ||
+        !light.id ||
+        ids.has(light.id) ||
+        !light.name ||
         !['standalone', 'object'].includes(light.source) ||
         (light.source === 'object' && !light.ownerStamp) ||
-        typeof light.enabled !== 'boolean' || typeof light.castsShadows !== 'boolean' ||
-        typeof light.bake !== 'boolean' || typeof light.runtime !== 'boolean' ||
-        !validTuple(light.position, 3) || !validTuple(light.color, 3) ||
+        typeof light.enabled !== 'boolean' ||
+        typeof light.castsShadows !== 'boolean' ||
+        typeof light.bake !== 'boolean' ||
+        typeof light.runtime !== 'boolean' ||
+        !validTuple(light.position, 3) ||
+        !validTuple(light.color, 3) ||
         light.color.some(value => value < 0 || value > 1) ||
-        !Number.isFinite(light.intensity) || light.intensity < 0 ||
-        !Number.isFinite(light.range) || light.range <= 0 ||
-        !Number.isFinite(light.radius) || light.radius < 0 ||
-        (light.activation !== undefined && (
-          !['always', 'night', 'schedule'].includes(light.activation.mode) ||
-          !Number.isFinite(light.activation.onHour) || light.activation.onHour < 0 || light.activation.onHour > 24 ||
-          !Number.isFinite(light.activation.offHour) || light.activation.offHour < 0 || light.activation.offHour > 24 ||
-          !Number.isFinite(light.activation.transitionMinutes) || light.activation.transitionMinutes < 0 || light.activation.transitionMinutes > 180
-        )) ||
-        (light.flicker !== undefined && (
-          !['steady', 'flame', 'wisp'].includes(light.flicker.profile) ||
-          !Number.isFinite(light.flicker.amplitude) || light.flicker.amplitude < 0 || light.flicker.amplitude > 0.5 ||
-          !Number.isFinite(light.flicker.speed) || light.flicker.speed < 0 || light.flicker.speed > 30
-        )) ||
-        !Number.isInteger(light.cellId) || light.cellId < -1 || light.cellId >= world.cells.kind.length ||
-        !Number.isInteger(light.visibilityRegion) || light.visibilityRegion < -1 ||
+        !Number.isFinite(light.intensity) ||
+        light.intensity < 0 ||
+        !Number.isFinite(light.range) ||
+        light.range <= 0 ||
+        !Number.isFinite(light.radius) ||
+        light.radius < 0 ||
+        (light.activation !== undefined &&
+          (!['always', 'night', 'schedule'].includes(light.activation.mode) ||
+            !Number.isFinite(light.activation.onHour) ||
+            light.activation.onHour < 0 ||
+            light.activation.onHour > 24 ||
+            !Number.isFinite(light.activation.offHour) ||
+            light.activation.offHour < 0 ||
+            light.activation.offHour > 24 ||
+            !Number.isFinite(light.activation.transitionMinutes) ||
+            light.activation.transitionMinutes < 0 ||
+            light.activation.transitionMinutes > 180)) ||
+        (light.flicker !== undefined &&
+          (!['steady', 'flame', 'wisp'].includes(light.flicker.profile) ||
+            !Number.isFinite(light.flicker.amplitude) ||
+            light.flicker.amplitude < 0 ||
+            light.flicker.amplitude > 0.5 ||
+            !Number.isFinite(light.flicker.speed) ||
+            light.flicker.speed < 0 ||
+            light.flicker.speed > 30)) ||
+        !Number.isInteger(light.cellId) ||
+        light.cellId < -1 ||
+        light.cellId >= world.cells.kind.length ||
+        !Number.isInteger(light.visibilityRegion) ||
+        light.visibilityRegion < -1 ||
         (world.visibility !== undefined &&
           light.visibilityRegion >= world.visibility.width * world.visibility.height) ||
-        !Number.isInteger(light.phaseMask) || light.phaseMask < 0 || light.phaseMask > 0xffffffff ||
-        !Array.isArray(light.tags) || light.tags.some(tag => typeof tag !== 'string') ||
-        !light.metadata || Array.isArray(light.metadata) || typeof light.metadata !== 'object'
-      ) throw new Error(`Invalid Shado world point light '${light.id ?? ''}'`);
+        !Number.isInteger(light.phaseMask) ||
+        light.phaseMask < 0 ||
+        light.phaseMask > 0xffffffff ||
+        !Array.isArray(light.tags) ||
+        light.tags.some(tag => typeof tag !== 'string') ||
+        !light.metadata ||
+        Array.isArray(light.metadata) ||
+        typeof light.metadata !== 'object'
+      )
+        throw new Error(`Invalid Shado world point light '${light.id ?? ''}'`);
       ids.add(light.id);
     }
   }
@@ -561,8 +645,11 @@ function validBounds(bounds: ShadoWorldSpatialPackage['bounds'] | undefined): bo
 }
 
 function validTuple(value: unknown, length: number, positive = false): boolean {
-  return Array.isArray(value) && value.length === length &&
-    value.every(component => Number.isFinite(component) && (!positive || component > 0));
+  return (
+    Array.isArray(value) &&
+    value.length === length &&
+    value.every(component => Number.isFinite(component) && (!positive || component > 0))
+  );
 }
 
 function boundsContain(

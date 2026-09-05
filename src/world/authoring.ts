@@ -214,6 +214,15 @@ function validateTerrain(document: ShadoWorldAuthoringDocument): void {
     if (layer.control !== undefined && (typeof layer.control !== 'string' || !layer.control.trim())) {
       throw new Error(`Terrain layer '${layer.id}' control must be a non-empty string`);
     }
+    // A protrusion moves the ground the player walks on, so it is checked here
+    // as well as at package validation: an author saving an impossible lift
+    // should hear about it before a bake spends twenty minutes on it.
+    if (layer.protrusionMetres !== undefined && (!Number.isFinite(layer.protrusionMetres) || layer.protrusionMetres < 0 || layer.protrusionMetres > 8)) {
+      throw new Error(`Terrain layer '${layer.id}' protrusion must be 0 to 8 metres`);
+    }
+    if (layer.protrusionFalloffMetres !== undefined && (!Number.isFinite(layer.protrusionFalloffMetres) || layer.protrusionFalloffMetres <= 0)) {
+      throw new Error(`Terrain layer '${layer.id}' protrusion falloff must be a positive width in metres`);
+    }
     validateMetadata(layer.metadata, `Terrain layer '${layer.id}'`);
   });
 }
@@ -241,169 +250,6 @@ function validateRange(
   ) {
     throw new Error(`${label} must be an ordered two-number range`);
   }
-}
-
-export type LegacyZoneMetadataImportOptions = {
-  objectSourcePrefix?: string;
-  objectSourceExtension?: string;
-  defaultObjectBoundsRadius?: number;
-  /**
-   * Requiem sidecars are already Y-up. The value records provenance while
-   * both accepted inputs use the current source-space placement contract.
-   */
-  sourceCoordinateSystem?: 'requiem-y-up' | 'babylon-y-up';
-};
-
-export type LegacyZoneObjectTransform = {
-  x?: number;
-  y?: number;
-  z?: number;
-  rotateX?: number;
-  rotateY?: number;
-  rotateZ?: number;
-  scale?: number;
-  scaleX?: number;
-  scaleY?: number;
-  scaleZ?: number;
-};
-
-/**
- * Converts one imported placement into Shado's durable Y-up source-space contract.
- * Runtime consumers must use the returned values verbatim and must not repeat
- * any loader or ObjectCache axis correction.
- */
-export function legacyZoneObjectTransformToBabylon(
-  transform: LegacyZoneObjectTransform
-): Pick<ShadoWorldObjectStamp, 'position' | 'rotationDegrees' | 'scale'> {
-  const uniformScale = finite(transform.scale, 1);
-  return {
-    // Requiem sidecars already carry canonical gameplay placements. Zone
-    // geometry receives its separate canonical X reflection during scene and
-    // spatial preprocessing; reflecting placements here would be incorrect.
-    position: [
-      finite(transform.x),
-      finite(transform.y),
-      finite(transform.z),
-    ],
-    rotationDegrees: [
-      finite(transform.rotateX),
-      finite(transform.rotateY),
-      finite(transform.rotateZ),
-    ],
-    scale: [
-      finite(transform.scaleX, uniformScale),
-      finite(transform.scaleY, uniformScale),
-      finite(transform.scaleZ, uniformScale),
-    ],
-  };
-}
-
-/**
- * Promotes the original Requiem zone JSON into durable authoring data. Render
- * models stay deduplicated as prototypes; each placement becomes a stable,
- * fully Babylon-space stamp. No coordinate conversion remains for the client.
- */
-export function importLegacyZoneMetadata(
-  value: unknown,
-  world: string,
-  options: LegacyZoneMetadataImportOptions = {}
-): ShadoWorldAuthoringDocument {
-  const legacy = value as {
-    version?: number;
-    objects?: Record<string, LegacyZoneObjectTransform[]>;
-    regions?: Array<{
-      minVertex?: number[];
-      maxVertex?: number[];
-      center?: number[];
-      regionType?: number;
-      zoneLineInfo?: unknown;
-      [key: string]: unknown;
-    }>;
-    lights?: unknown[];
-    sounds?: unknown[];
-  };
-  if (!legacy || typeof legacy !== 'object' || Array.isArray(legacy)) {
-    throw new Error('Legacy zone metadata must be a JSON object');
-  }
-  const document = createShadoWorldAuthoring(world);
-  const prefix = (options.objectSourcePrefix ?? '/eqrequiem/objects').replace(/\/$/, '');
-  const extension = options.objectSourceExtension ?? '/final.glb.gz';
-  const boundsRadius = positive(
-    options.defaultObjectBoundsRadius ?? 32,
-    'default object bounds radius'
-  );
-  const sourceCoordinateSystem = options.sourceCoordinateSystem ?? 'requiem-y-up';
-  const objectEntries = Object.entries(legacy.objects ?? {})
-    .filter(([, transforms]) => Array.isArray(transforms))
-    .sort(([a], [b]) => a.localeCompare(b));
-  for (const [model, transforms] of objectEntries) {
-    const prototypeId = stableId(model, 'object');
-    document.objects.prototypes.push({
-      id: prototypeId,
-      source: `${prefix}/${model}${extension}`,
-      boundsRadius,
-      metadata: {
-        legacyModel: model,
-        sourceCoordinateSystem,
-        generatedAsset: 'final.glb.gz',
-      },
-    });
-    transforms.forEach((transform, index) => {
-      const normalized = legacyZoneObjectTransformToBabylon(transform);
-      document.objects.stamps.push({
-        id: `${prototypeId}-${index}`,
-        prototype: prototypeId,
-        enabled: true,
-        ...normalized,
-        phaseMask: 0xffffffff,
-        tags: [],
-        metadata: {
-          legacyIndex: index,
-          sourceCoordinateSystem,
-          transformNormalizedAtPreprocess: true,
-          transformContract: 'requiem-y-up-v2',
-        },
-      });
-    });
-  }
-  for (const [index, region] of (legacy.regions ?? []).entries()) {
-    const min = vec3(region.minVertex);
-    const max = vec3(region.maxVertex);
-    const sourceCenter: [number, number, number] = region.center?.length === 3
-      ? vec3(region.center)
-      : [
-          (min[0] + max[0]) * 0.5,
-          (min[1] + max[1]) * 0.5,
-          (min[2] + max[2]) * 0.5,
-        ];
-    const center: [number, number, number] = [
-      sourceCenter[0],
-      sourceCenter[1],
-      sourceCenter[2],
-    ];
-    const size: [number, number, number] = [
-      Math.max(0.01, Math.abs(max[0] - min[0])),
-      Math.max(0.01, Math.abs(max[1] - min[1])),
-      Math.max(0.01, Math.abs(max[2] - min[2])),
-    ];
-    document.regions.push({
-      id: `legacy-region-${index}`,
-      name: `Legacy region ${index}`,
-      kind: legacyRegionKind(Number(region.regionType)),
-      enabled: true,
-      center,
-      size,
-      phaseMask: 0xffffffff,
-      tags: ['legacy'],
-      metadata: {
-        legacyRegionType: Number(region.regionType) || 0,
-        zoneLineInfo: region.zoneLineInfo ?? null,
-        sourceCoordinateSystem,
-        transformContract: 'requiem-y-up-v2',
-      },
-    });
-  }
-  return validateShadoWorldAuthoring(document, world);
 }
 
 /**
@@ -453,52 +299,6 @@ export function upgradeShadoWorldAuthoring(
     }
   }
   return validateShadoWorldAuthoring(document, expectedWorld);
-}
-
-/**
- * Reconciles newly discovered legacy sidecar rows into an editable authoring
- * document. Existing stamps and regions win so editor changes are never
- * overwritten; newly added metadata rows are picked up on every conversion.
- */
-export function mergeLegacyZoneMetadata(
-  authoringValue: unknown,
-  legacyValue: unknown,
-  world: string,
-  options: LegacyZoneMetadataImportOptions = {}
-): ShadoWorldAuthoringDocument {
-  const document = upgradeShadoWorldAuthoring(authoringValue, world);
-  const promoted = importLegacyZoneMetadata(legacyValue, world, options);
-  const exclusions = new Set(document.legacyObjectExclusions ?? []);
-  const prototypeIds = new Set(document.objects.prototypes.map(item => item.id));
-  for (const prototype of promoted.objects.prototypes) {
-    if (exclusions.has(prototype.id)) continue;
-    const existing = document.objects.prototypes.find(item => item.id === prototype.id);
-    if (!existing) {
-      document.objects.prototypes.push(prototype);
-      prototypeIds.add(prototype.id);
-      continue;
-    }
-    // Asset routing is generated state and should follow the latest catalog.
-    existing.source = prototype.source;
-    existing.metadata = { ...existing.metadata, ...prototype.metadata };
-  }
-  const stampIds = new Set(document.objects.stamps.map(item => item.id));
-  for (const stamp of promoted.objects.stamps) {
-    if (
-      exclusions.has(stamp.prototype) ||
-      stampIds.has(stamp.id) ||
-      !prototypeIds.has(stamp.prototype)
-    ) continue;
-    document.objects.stamps.push(stamp);
-    stampIds.add(stamp.id);
-  }
-  const regionIds = new Set(document.regions.map(item => item.id));
-  for (const region of promoted.regions) {
-    if (regionIds.has(region.id)) continue;
-    document.regions.push(region);
-    regionIds.add(region.id);
-  }
-  return validateShadoWorldAuthoring(document, world);
 }
 
 function catalogSourceForLegacyPrototype(source: string, model: string): string {
@@ -796,13 +596,6 @@ function positive(value: number, label: string): number {
 
 function vec3(value: ArrayLike<unknown> | undefined): [number, number, number] {
   return [finite(value?.[0]), finite(value?.[1]), finite(value?.[2])];
-}
-
-function legacyRegionKind(type: number): ShadoWorldRegionKind {
-  if (type === 1 || type === 5 || type === 6) return 'water';
-  if (type === 2) return 'lava';
-  if (type === 4) return 'zone-line';
-  return 'semantic';
 }
 
 function validateVec3(value: unknown, label: string, positive: boolean): void {

@@ -35,7 +35,6 @@ function usage(): never {
       '  shado gpu build --config ./shado.config.mjs',
       '  shado pack models --config ./shado.config.mjs',
       '  shado pack worlds --config ./shado.config.mjs',
-      '  shado migrate worlds --input-dir ./zones --out-dir ./worlds [--metadata-dir ./zones] [--object-prefix /eqrequiem/objects] [--dry-run] [--overwrite]',
       '  shado manifest models --config ./shado.config.mjs',
       '  shado-preprocess-asc --config ./shado.config.mjs',
       '  shado-preprocess-wrappers --config ./shado.config.mjs',
@@ -67,10 +66,6 @@ async function loadConfig(file: string): Promise<ShadoConfig> {
 
 async function main() {
   const invocation = normalizeInvocation();
-  if (invocation.kind === 'migrate-worlds') {
-    await migrateWorldDirectory();
-    return;
-  }
   const configPath = readArg('--config') ?? readArg('-c') ?? 'shado.config.mjs';
   const config = await loadConfig(configPath);
   const configDir = path.dirname(path.resolve(process.cwd(), configPath));
@@ -156,7 +151,6 @@ function normalizeInvocation():
   | { kind: 'gpu' }
   | { kind: 'models' }
   | { kind: 'worlds' }
-  | { kind: 'migrate-worlds' }
   | { kind: 'manifest' } {
   const bin = path.basename(process.argv[1] ?? '');
   if (bin === 'shado-preprocess-asc') return { kind: 'asc' };
@@ -171,99 +165,10 @@ function normalizeInvocation():
   if (group === 'gpu' && command === 'build') return { kind: 'gpu' };
   if (group === 'pack' && (command === 'model' || command === 'models')) return { kind: 'models' };
   if (group === 'pack' && (command === 'world' || command === 'worlds')) return { kind: 'worlds' };
-  if (group === 'migrate' && (command === 'world' || command === 'worlds')) return { kind: 'migrate-worlds' };
   if (group === 'manifest' && (command === 'model' || command === 'models' || subject === 'models')) {
     return { kind: 'manifest' };
   }
   usage();
-}
-
-async function migrateWorldDirectory() {
-  const inputArg = readArg('--input-dir');
-  const outputArg = readArg('--out-dir');
-  if (!inputArg || !outputArg) {
-    throw new Error('World migration requires --input-dir and --out-dir');
-  }
-  const inputDir = path.resolve(process.cwd(), inputArg);
-  const outDir = path.resolve(process.cwd(), outputArg);
-  const dryRun = process.argv.includes('--dry-run');
-  const overwrite = process.argv.includes('--overwrite');
-  const runtimePrefix = (readArg('--runtime-prefix') ?? '/shado/worlds').replace(/\/$/, '');
-  const metadataDir = path.resolve(process.cwd(), readArg('--metadata-dir') ?? inputArg);
-  const objectSourcePrefix =
-    (readArg('--object-prefix') ?? '/eqrequiem/objects').replace(/\/$/, '');
-  const discoveredEntries = (await fs.readdir(inputDir, { withFileTypes: true }))
-    .filter(entry => entry.isFile() && /\.glb(?:\.gz)?$/i.test(entry.name))
-    .sort((a, b) => a.name.localeCompare(b.name));
-  const entriesByName = new Map<string, (typeof discoveredEntries)[number]>();
-  for (const entry of discoveredEntries) {
-    const name = entry.name.replace(/\.glb(?:\.gz)?$/i, '');
-    const existing = entriesByName.get(name);
-    if (!existing || entry.name.toLowerCase().endsWith('.glb.gz')) {
-      entriesByName.set(name, entry);
-    }
-  }
-  const entries = [...entriesByName.values()];
-  if (!entries.length) throw new Error(`No .glb or .glb.gz files found in ${inputDir}`);
-  if (!dryRun) await fs.mkdir(outDir, { recursive: true });
-  let written = 0;
-  let skipped = 0;
-  let failed = 0;
-  for (const entry of entries) {
-    const name = entry.name.replace(/\.glb(?:\.gz)?$/i, '');
-    try {
-    const spatial = path.join(outDir, `${name}.spatial.json.gz`);
-    const authoring = path.join(outDir, `${name}.authoring.json`);
-    const metadata = path.join(metadataDir, `${name}.json`);
-    const source = path.join(outDir, entry.name);
-    if (
-      !overwrite &&
-      await exists(spatial) &&
-      !await anySourceIsNewer(spatial, [
-        path.join(inputDir, entry.name),
-        metadata,
-        authoring,
-      ])
-    ) {
-      console.log(`skip ${name}: ${spatial} already exists`);
-      skipped++;
-      continue;
-    }
-    if (dryRun) {
-      console.log(`would migrate ${path.join(inputDir, entry.name)} -> ${spatial}`);
-      continue;
-    }
-    if (!await exists(authoring)) {
-      const document = createShadoWorldAuthoring(name);
-      await fs.writeFile(authoring, `${JSON.stringify(document, null, 2)}\n`);
-    }
-    const result = await packShadoWorld({
-      name,
-      input: path.join(inputDir, entry.name),
-      outFile: spatial,
-      runtimeSource: `${runtimePrefix}/${entry.name}`,
-      copyInputTo: source,
-      authoringInput: authoring,
-      metadataInput: await exists(metadata) ? metadata : undefined,
-      objectSourcePrefix,
-    });
-    console.log(
-      `migrated ${name}: ${result.triangleCount} triangles, ${result.clusterCount} clusters`
-      + `, ${result.objectPrototypeCount} object models, ${result.objectStampCount} stamps`
-      + `${await exists(metadata) ? `, metadata ${path.basename(metadata)}` : ''}`
-    );
-    written++;
-    } catch (error) {
-      failed++;
-      console.error(
-        `failed ${name}: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-  console.log(
-    `${dryRun ? 'planned' : 'completed'} ${dryRun ? entries.length : written} zone(s);`
-    + ` skipped ${skipped}; failed ${failed}`
-  );
 }
 
 async function exists(file: string) {

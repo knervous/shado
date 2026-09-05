@@ -39,6 +39,27 @@ export type ShadoWorldTerrainLayer = {
   noiseScale: number;
   /** Optional author-control channel such as `control0.r` or `control1.b`. */
   control?: string;
+  /**
+   * World metres the ground itself rises where this layer's control mask is
+   * fully painted. A causeway, a metalled street, a levee: ground that stands
+   * proud because the mask says so.
+   *
+   * This is deliberately *not* a shader displacement. The zone bake adds it to
+   * the baked height field, so the surface the player sees and the surface the
+   * player walks on are the same surface by construction, and the raised strip
+   * follows every bend of the mask exactly. A vertex displacement in the
+   * terrain material would raise only the render and leave collision flat.
+   *
+   * A layer with no control channel cannot protrude: there would be no mask to
+   * say where.
+   */
+  protrusionMetres?: number;
+  /**
+   * World metres over which the protrusion ramps from ground to full height at
+   * the mask edge. Without it a uniform lift under a hard mask edge is a
+   * vertical wall the player catches on.
+   */
+  protrusionFalloffMetres?: number;
   metadata: Record<string, unknown>;
 };
 

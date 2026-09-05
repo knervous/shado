@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import {
-  importLegacyZoneMetadata,
   validateShadoWorldAuthoring,
   type ShadoWorldObjectStamp,
   type ShadoWorldAuthoringRegion,
@@ -162,19 +161,6 @@ export function WorldEditorPanel() {
     if (!file || !regions) return;
     try {
       const document = validateShadoWorldAuthoring(
-        JSON.parse(await file.text()),
-        regions.document.world
-      );
-      command({ type: 'replace-document', document });
-      setEditError(undefined);
-    } catch (error) {
-      setEditError(error instanceof Error ? error.message : String(error));
-    }
-  };
-  const importLegacyMetadata = async (file: File | undefined) => {
-    if (!file || !regions) return;
-    try {
-      const document = importLegacyZoneMetadata(
         JSON.parse(await file.text()),
         regions.document.world
       );
@@ -490,14 +476,6 @@ export function WorldEditorPanel() {
         <label className="world-editor-import">
           Import / replace
           <input type="file" accept="application/json,.json" onChange={event => void importDocument(event.target.files?.[0])} />
-        </label>
-        <label className="world-editor-import">
-          Import legacy metadata
-          <input
-            type="file"
-            accept="application/json,.json"
-            onChange={event => void importLegacyMetadata(event.target.files?.[0])}
-          />
         </label>
         <label className="world-editor-import">
           Import GLB

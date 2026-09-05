@@ -153,6 +153,72 @@ kernel is unexpectedly unavailable, it safely falls back to one full
 affected-stream write. Enable Babylon's GPU timing measurements to read the
 last per-stream scatter duration from `getLastGPUTiming()`.
 
+## 2D sprites and MSDF text
+
+The full-Babylon render entry point includes a locked orthographic 2D path with
+compact instanced sprite records, tiled CPU visibility, exact screen picking,
+per-sprite pixel-size LOD, and optional WebGPU-owned motion and visibility.
+`ShadoSprite2DRenderer` uses an array-texture `ShadoTextureAtlas`; positions and
+sizes are two-dimensional world units.
+
+```ts
+import { ShadoSprite2DRenderer, createSolidColorAtlas } from '@knervous/shado/render';
+
+const atlas = createSolidColorAtlas(scene, {
+  hero: [0.2, 0.8, 1, 1],
+  marker: [1, 0.65, 0.1, 1],
+});
+const sprites = new ShadoSprite2DRenderer(scene, atlas, {
+  alphaMode: 'cutout',
+  alphaCutoff: 0.35,
+  tileSize: 8,
+});
+
+sprites.upsertMany([
+  {
+    id: 'hero-1',
+    textureKey: 'hero',
+    position: [4, -2],
+    size: [1, 1.6],
+    rotationDeg: 15,
+    minPixelSize: 1,
+  },
+]);
+sprites.setViewFromOrthographicCamera(camera);
+const hit = sprites.pickScreen(scene.pointerX, scene.pointerY);
+```
+
+On WebGPU, a stable population can keep position and velocity in storage
+buffers. Population or CPU position/visibility mutations return authority to
+the CPU; call `enableGpuMotion()` again after completing those changes.
+Per-sprite LOD thresholds remain active in both the compacted and all-instance
+GPU paths. GPU-owned positions intentionally disable synchronous picking;
+`readCpuPositions()` provides explicit, versioned asynchronous readback.
+
+```ts
+sprites.enableGpuMotion({
+  seed: 42,
+  speed: 0.8,
+  cadenceMs: 2_000,
+  bounds: [-50, -30, 50, 30],
+});
+scene.onBeforeRenderObservable.add(() => {
+  sprites.stepGpuMotion(performance.now(), scene.getEngine().getDeltaTime() / 1_000);
+});
+```
+
+`ShadoText2DRenderer` accepts a Babylon MSDF `FontAsset`-compatible object and
+uses the same view contract. It supports kerning, advance-only whitespace,
+newlines, width wrapping, alignment, pivots, rotation, color, layer ordering,
+LOD, and screen picking.
+
+The existing `ShadoDynamicEntityRenderer` remains the compatibility and
+world-space path. Its explicit sprite presentations are `ground`,
+`billboard-y`, `billboard-screen`, and `slab`. Omitted `alphaMode` preserves the
+1.x blended-opacity result through premultiplied blending; choose `cutout`
+explicitly for depth-writing opaque sprites. Dynamic-entity picking now follows
+the resolved presentation and pivot instead of always intersecting a box.
+
 ## Published controls
 
 `@shadoPublish` puts a friendly, validated facade in front of packed numeric
@@ -355,10 +421,10 @@ A real humanoid wardrobe (43 submeshes, 17 variants across 7 pieces) went from
 9,406 vertices skinned per actor to 3,762. p95 frame ms on the same scene:
 
 | actors | merged supermesh | module draws |
-|---:|---:|---:|
-| 1,000 | 18.25 | 18.36 |
-| 10,000 | 66.97 | 18.12 |
-| 20,000 | 134.98 | 30.03 |
+| -----: | ---------------: | -----------: |
+|  1,000 |            18.25 |        18.36 |
+| 10,000 |            66.97 |        18.12 |
+| 20,000 |           134.98 |        30.03 |
 
 Equivalent at low counts: this changes the slope, not the constant. See
 [SUPERMESH_MODULE_MIGRATION.md](./SUPERMESH_MODULE_MIGRATION.md) for the
@@ -418,7 +484,7 @@ npx shado-video --script my-scene.mts --out clip.mp4 --materials --gif
 ```
 
 The encoder is a package dependency, never something found on `PATH`, but it is
-an *optional peer* — it ships ~35MB of prebuilt binaries and video is one of
+an _optional peer_ — it ships ~35MB of prebuilt binaries and video is one of
 twenty subpaths, so installing it is a deliberate step. The tools check for it
 before doing any work and name the install command if it is missing.
 
@@ -437,12 +503,15 @@ const camera = await session.frameCamera({ zoom: 2.4 });
 
 await renderVideo({
   source: await createSessionFrameSource(session, {
-    width: 1280, height: 720, camera,
+    width: 1280,
+    height: 720,
+    camera,
     onFrame: orbitCamera(camera, { seconds: 6 }),
   }),
   encoder: createFfmpegEncoder(),
   sink: createFileSink('spin.mp4'),
-  seconds: 6, fps: 30,
+  seconds: 6,
+  fps: 30,
 });
 ```
 

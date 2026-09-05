@@ -77,8 +77,9 @@ async function createBabylonEngine(canvas: HTMLCanvasElement, backend: RenderBac
       );
     }
 
-    const wantsGpuTiming = new URLSearchParams(window.location.search).get('model') ===
-      'nm-m-supermesh';
+    const params = new URLSearchParams(window.location.search);
+    const wantsGpuTiming = params.get('model') === 'nm-m-supermesh' ||
+      params.get('loadTest') === '1';
     const engine = new WebGPUEngine(canvas, {
       antialias: true,
       enableAllFeatures: wantsGpuTiming,
@@ -121,6 +122,9 @@ async function loadBabylonPlayground(routePath: string) {
   }
   if (routePath === '/lean') {
     return (await import('./LeanPassPlayground')).LeanPassPlayground;
+  }
+  if (routePath === '/sprites-2d') {
+    return (await import('./Sprite2DPlayground')).Sprite2DPlayground;
   }
   if (routePath === '/world') {
     return (await import('./WorldPlayground')).WorldPlayground;
@@ -306,6 +310,12 @@ function App({ basePath = '' }: SandboxAppProps) {
           aria-current={routeLabel === '/world' ? 'page' : undefined}
         >
           Shado world
+        </a>
+        <a
+          href={`${routeHref('/sprites-2d', basePath)}?renderer=babylonjs`}
+          aria-current={routeLabel === '/sprites-2d' ? 'page' : undefined}
+        >
+          2D sprites
         </a>
         <a
           href={routeHref('/world-editor', basePath)}

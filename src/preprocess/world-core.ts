@@ -161,6 +161,7 @@ export async function importStampedObjectGeometry(
     authoring.objects.prototypes.map(prototype => [prototype.id, prototype])
   );
   const cache = new Map<string, ImportedWorldPrimitives>();
+  const boxProxyCache = new Map<string, ShadoWorldPrimitive[]>();
   const collision: ShadoWorldPrimitive[] = [];
   const grassBlockers: ShadoWorldPrimitive[] = [];
   const BABYLON = await import('@babylonjs/core');
@@ -175,6 +176,22 @@ export async function importStampedObjectGeometry(
     const includeCollision =
       prototype.metadata.clientPhysics !== false &&
       stamp.metadata.clientPhysics !== false;
+    /*
+     * `collisionProxy: 'box'` replaces a module's collision mesh with its own
+     * bounding box, transformed per stamp.
+     *
+     * This is the third state between solid and `clientPhysics: false`, and it
+     * exists because a flat wall panel *is* a box: Talios Lowharbor stamps 690
+     * jetty panels at 360 triangles and 72 farm walls at 2,404, and every one
+     * of those triangles describes a surface the player can only ever touch
+     * from outside. A box is 12.
+     *
+     * It is opt-in per prototype and must stay that way. A box is truthful for
+     * a wall panel, a floor slab or a road segment, and a lie for anything the
+     * player walks *through* — a gate passage, a doorway, an arch, a stair —
+     * where it would seal the opening.
+     */
+    const useBoxProxy = prototype.metadata.collisionProxy === 'box';
     const includeGrassBlocker = stampBlocksGrass(prototype, stamp);
     if (!includeCollision && !includeGrassBlocker) continue;
     let sourceGeometry = cache.get(prototype.id);
@@ -240,9 +257,20 @@ export async function importStampedObjectGeometry(
       };
     };
     if (includeCollision) {
-      const collisionSource = sourceGeometry.collision.length
-        ? sourceGeometry.collision
-        : sourceGeometry.render;
+      /*
+       * No fallback to the render mesh. `worldGlbPrimitivePolicies` selects a
+       * primitive for collision *by default* — the only way out is an explicit
+       * pass-through role or flag — so `sourceGeometry.collision` being empty
+       * cannot mean "this asset never said"; it can only mean "every primitive
+       * said no". Falling back to the render mesh there reverses the author's
+       * exclusion, and did: giving the trees their foliage role dropped them
+       * from the collision selection and the fallback handed their canopies
+       * straight back, so a 2.24M-triangle saving showed up as zero.
+       */
+      const meshSource = sourceGeometry.collision;
+      const collisionSource = useBoxProxy
+        ? boxProxyFor(prototype.id, meshSource, boxProxyCache)
+        : meshSource;
       collision.push(
         ...collisionSource.map(primitive =>
           transformPrimitive(primitive, 'collision')
@@ -258,6 +286,60 @@ export async function importStampedObjectGeometry(
     }
   }
   return { collision, grassBlockers };
+}
+
+/**
+ * One closed box over a module's whole collision extent, in its local space.
+ *
+ * Built once per prototype and then transformed per stamp like any other
+ * primitive, so a rotated stamp gets a correctly oriented box rather than an
+ * axis-aligned one that has grown to contain it.
+ */
+function boxProxyFor(
+  prototypeId: string,
+  source: readonly ShadoWorldPrimitive[],
+  cache: Map<string, ShadoWorldPrimitive[]>
+): ShadoWorldPrimitive[] {
+  const cached = cache.get(prototypeId);
+  if (cached) return cached;
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const primitive of source) {
+    for (let offset = 0; offset < primitive.positions.length; offset += 3) {
+      const x = primitive.positions[offset]!;
+      const y = primitive.positions[offset + 1]!;
+      const z = primitive.positions[offset + 2]!;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+      if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+    }
+  }
+  if (!Number.isFinite(minX)) { cache.set(prototypeId, []); return []; }
+  const corners = [
+    [minX, minY, minZ], [maxX, minY, minZ], [maxX, minY, maxZ], [minX, minY, maxZ],
+    [minX, maxY, minZ], [maxX, maxY, minZ], [maxX, maxY, maxZ], [minX, maxY, maxZ],
+  ];
+  const positions = new Float32Array(corners.flat());
+  // Outward-facing winding, twelve triangles.
+  const indices = new Uint32Array([
+    0, 2, 1, 0, 3, 2, // bottom
+    4, 5, 6, 4, 6, 7, // top
+    0, 1, 5, 0, 5, 4, // -Z
+    1, 2, 6, 1, 6, 5, // +X
+    2, 3, 7, 2, 7, 6, // +Z
+    3, 0, 4, 3, 4, 7, // -X
+  ]);
+  // The first primitive supplies material and collision flags; the lightmap UV
+  // stream is dropped because it indexes the mesh's vertices, not the box's.
+  const { lightmapUvs: _dropped, ...template } = source[0]!;
+  const proxy: ShadoWorldPrimitive[] = [{
+    ...template,
+    name: `${prototypeId}:collision-proxy`,
+    positions,
+    indices,
+  }];
+  cache.set(prototypeId, proxy);
+  return proxy;
 }
 
 type WorldPrimitivePolicy = {
@@ -428,10 +510,20 @@ export function worldGlbPrimitivePolicies(
       const pvsPriority = extras
         .map(value => stringFromExtras(value, 'requiem_pvs_priority', 'pvsPriority'))
         .find((value): value is string => Boolean(value));
+      /*
+       * The third key is the one the Libra promotion path actually stamps on
+       * every promoted object; the first two are the hand-authored ones.
+       * Omitting it left a promoted asset's declared role invisible to the
+       * collision policy: every `tcw-foliage-*` tree declares its role and
+       * nothing else, so it fell through to the solid default and contributed
+       * its whole canopy. 2.24M of Talios Lowharbor's 3.6M collision
+       * triangles were leaf cards, against a 1M budget, purely over a key name.
+       */
       const semanticRoles = extras
         .flatMap(value => [
           stringFromExtras(value, 'requiem_semantic_role', 'semanticRole'),
           stringFromExtras(value, 'requiem_material_role', 'materialRole'),
+          stringFromExtras(value, 'libra_asset_role', 'assetRole'),
         ])
         .filter((value): value is string => Boolean(value));
       const visuallyPassthrough =
@@ -448,7 +540,13 @@ export function worldGlbPrimitivePolicies(
         extras.some(value => value?.clientPhysics === false) ||
         extras.some(value => value?.requiem_client_physics === false) ||
         extras.some(value => {
-          const collision = stringFromExtras(value, 'requiem_collision')?.toLowerCase();
+          // `libra_collision` for the same reason as the role key above: it is
+          // what the promotion path writes, and it carried the same intent
+          // past this check unread.
+          const collision = (
+            stringFromExtras(value, 'requiem_collision') ??
+            stringFromExtras(value, 'libra_collision')
+          )?.toLowerCase();
           return collision === 'visual-only' || collision === 'none' || collision === 'pass-through';
         });
       const explicitlySolid = extras.some(
@@ -458,6 +556,7 @@ export function worldGlbPrimitivePolicies(
           value?.clientPhysics === true ||
           value?.requiem_client_physics === true ||
           stringFromExtras(value, 'requiem_collision')?.toLowerCase() === 'solid' ||
+          stringFromExtras(value, 'libra_collision')?.toLowerCase() === 'solid' ||
           value?.physicsMode === 'static'
       );
       const collision =

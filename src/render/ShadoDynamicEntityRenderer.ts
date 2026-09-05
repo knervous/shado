@@ -10,8 +10,12 @@ import {
 } from '../babylon';
 import type { ShadoConcreteCtor } from '../types';
 import {
+  resolveShadoDynamicEntityRenderMode,
   ShadoDynamicEntityContainer,
   type ShadoDynamicEntityGeometryMode,
+  type ShadoSpriteAlphaMode,
+  type ShadoSpritePresentation,
+  type ShadoSpriteSortMode,
 } from './ShadoDynamicEntityContainer';
 import type { ShadoTextureAtlas } from './ShadoTextureAtlas';
 import {
@@ -28,6 +32,11 @@ export interface ShadoDynamicEntityRendererOptions {
   mesh?: Mesh;
   geometry?: ShadoDynamicEntityGeometryMode;
   billboard?: boolean;
+  presentation?: ShadoSpritePresentation;
+  alphaMode?: ShadoSpriteAlphaMode;
+  alphaCutoff?: number;
+  pivot?: readonly [number, number];
+  sortMode?: ShadoSpriteSortMode;
   log?: boolean;
   sortDrawList?: boolean;
   picking?: boolean | ShadoDynamicEntityAsyncPickingOptions;
@@ -57,6 +66,7 @@ export class ShadoDynamicEntityRenderer {
   private readonly engine: AbstractEngine;
   private readonly beforeRenderObserver: any;
   private readonly fallbackMeshTexture?: Texture;
+  private readonly pickingDefaults: ShadoDynamicEntityAsyncPickingOptions;
   private pickingHandle?: ShadoPickingHandle;
   private loggedFirstDraw = false;
   /** Instances submitted by this variant's last draw, for instrumentation. */
@@ -71,8 +81,19 @@ export class ShadoDynamicEntityRenderer {
     this.scene = scene;
     this.engine = scene.getEngine();
     this.container.setAtlas(atlas);
-    const geometry = options.geometry ?? 'box';
-    const billboard = options.billboard ?? geometry === 'plane';
+    const mode = resolveShadoDynamicEntityRenderMode(options);
+    const { geometry, billboard, presentation, alphaMode } = mode;
+    const alphaCutoff = Math.max(0, Math.min(1, options.alphaCutoff ?? 0.35));
+    const pivot =
+      options.pivot ??
+      (presentation === 'billboard-y' || presentation === 'billboard-screen'
+        ? ([0.5, 0] as const)
+        : ([0.5, 0.5] as const));
+    const sortMode =
+      options.sortMode ??
+      (options.sortDrawList || alphaMode === 'premultiplied' ? 'camera-back-to-front' : 'none');
+    this.pickingDefaults = { geometry, presentation, pivot };
+    this.container.configureRenderMode(mode);
     const meshIndexInput = options.meshIndex ?? options.meshTypeId;
     const meshIndex = Number.isFinite(meshIndexInput) ? Number(meshIndexInput) : 0;
     this.fallbackMeshTexture = options.meshTexture
@@ -100,12 +121,14 @@ export class ShadoDynamicEntityRenderer {
     const useStorageWGSL =
       this.engine.isWebGPU && (container.constructor as any).backingPreference === 'storage';
     const shaderIo = (container.constructor as ShadoConcreteCtor).shaderIO(this.engine);
-    const shaderNames = container.getShaderNamesForRenderMode({ geometry, billboard });
+    const shaderNames = container.getShaderNamesForRenderMode(mode);
     const uniforms = [
       'worldViewProjection',
       'uShadoEntityMeshIndex',
       'uShadoDrawOffset',
       'uUseShadoEntityMeshTexture',
+      'uShadoAlphaCutoff',
+      ...(presentation ? ['uShadoSpritePivot'] : []),
       ...(useStorageWGSL ? [] : shaderIo.uniforms),
     ];
     if (billboard) uniforms.push('view');
@@ -115,18 +138,24 @@ export class ShadoDynamicEntityRenderer {
       uniforms,
       samplers: ['uShadoEntityAtlas', 'uShadoEntityMeshTexture', ...shaderIo.samplers],
       uniformBuffers: ['Scene'],
-      needAlphaBlending: true,
+      needAlphaBlending: alphaMode === 'premultiplied',
       shaderLanguage: useStorageWGSL ? BABYLON.ShaderLanguage.WGSL : BABYLON.ShaderLanguage.GLSL,
     });
     this.material.backFaceCulling = geometry === 'box' || geometry === 'spriteSlab';
-    this.material.forceDepthWrite =
-      geometry === 'box' || geometry === 'spriteSlab' || geometry === 'mesh';
-    this.material.alphaMode = BABYLON.Engine.ALPHA_COMBINE;
+    this.material.forceDepthWrite = alphaMode === 'cutout';
+    this.material.alphaMode =
+      alphaMode === 'premultiplied'
+        ? BABYLON.Engine.ALPHA_PREMULTIPLIED_PORTERDUFF
+        : BABYLON.Engine.ALPHA_DISABLE;
     this.material.setTexture('uShadoEntityAtlas', atlas.texture);
     this.material.setTexture('uShadoEntityMeshTexture', meshTexture);
     this.material.setFloat('uShadoEntityMeshIndex', meshIndex);
     this.material.setFloat('uUseShadoEntityMeshTexture', options.meshTexture ? 1 : 0);
+    this.material.setFloat('uShadoAlphaCutoff', alphaCutoff);
+    if (presentation) this.material.setVector2('uShadoSpritePivot', new BABYLON.Vector2(...pivot));
     this.mesh.material = this.material;
+
+    this.container.syncDrawList({ sort: sortMode === 'camera-back-to-front' });
 
     if (options.log) {
       this.material.onCompiled = (effect: Effect) => {
@@ -145,14 +174,25 @@ export class ShadoDynamicEntityRenderer {
       // The first variant in a frame performs the dirty-guarded upload; peers
       // become no-ops. Babylon owns the actual draw through its public material
       // and forced-instance-count path.
+      if (sortMode === 'camera-back-to-front') {
+        const camera = this.scene.activeCamera;
+        if (camera) {
+          const position = camera.globalPosition ?? camera.position;
+          const forward = camera.getForwardRay().direction;
+          this.container.sortDrawListByCamera(
+            [position.x, position.y, position.z],
+            [forward.x, forward.y, forward.z]
+          );
+        }
+      }
       this.container.syncGpu((this.engine as any).frameId ?? 0);
       this.container.bindMaterial(this.material);
       this.material.setTexture('uShadoEntityAtlas', this.atlas.texture);
       this.material.setTexture('uShadoEntityMeshTexture', meshTexture);
       this.material.setFloat('uShadoEntityMeshIndex', meshIndex);
       this.material.setFloat('uUseShadoEntityMeshTexture', options.meshTexture ? 1 : 0);
-      const { offset: drawOffset, count: drawCount } =
-        this.container.getMeshDrawRange(meshIndex);
+      this.material.setFloat('uShadoAlphaCutoff', alphaCutoff);
+      const { offset: drawOffset, count: drawCount } = this.container.getMeshDrawRange(meshIndex);
       this.material.setFloat('uShadoDrawOffset', drawOffset);
       this.mesh.forcedInstanceCount = Math.max(0, drawCount | 0);
       this.mesh.isVisible = this.mesh.forcedInstanceCount > 0;
@@ -194,6 +234,9 @@ export class ShadoDynamicEntityRenderer {
           meshIndex: variant.meshIndex,
           meshTexture: variant.meshTexture,
           picking: variant.picking,
+          alphaMode: options.alphaMode,
+          alphaCutoff: options.alphaCutoff,
+          sortMode: options.sortMode,
           sortDrawList: options.sortDrawList,
         })
     );
@@ -210,7 +253,7 @@ export class ShadoDynamicEntityRenderer {
       this.scene,
       this.mesh,
       this.container,
-      normalized
+      { ...this.pickingDefaults, ...normalized }
     );
   }
 
@@ -225,7 +268,7 @@ export class ShadoDynamicEntityRenderer {
       this.container,
       pointerX,
       pointerY,
-      options
+      { ...this.pickingDefaults, ...options }
     );
   }
 
@@ -233,7 +276,10 @@ export class ShadoDynamicEntityRenderer {
     ray: Ray,
     options: ShadoDynamicEntityAsyncPickingOptions = {}
   ): ShadoDynamicEntityPickResult | null {
-    return pickShadoDynamicEntityWithRay(this.mesh, this.container, ray, options);
+    return pickShadoDynamicEntityWithRay(this.mesh, this.container, ray, {
+      ...this.pickingDefaults,
+      ...options,
+    });
   }
 
   public dispose(): void {

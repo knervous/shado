@@ -1,6 +1,44 @@
 # Release notes
 
-## Unreleased
+## 1.10.0 — 2026-09-05
+
+Shado 1.10 adds a dedicated, compact 2D rendering surface while retaining the
+existing dynamic-entity renderer as the world-space compatibility path.
+
+- Added `ShadoSprite2DRenderer` under `@knervous/shado/render`, with 48-byte
+  instanced records, tiled CPU visibility, layer/order sorting, selection and
+  highlight state, cutout or premultiplied alpha, per-sprite pixel-size LOD,
+  rotation-aware visibility bounds, exact CPU screen picking, and explicit
+  mutation/statistics APIs.
+- Added optional WebGPU-owned sprite motion and visibility. Compute motion keeps
+  position and velocity resident in storage buffers, explicit versioned reads
+  expose selected CPU ranges, and opt-in compute culling compacts stable indices
+  into an indirect draw without frame-loop readback. CPU mutations now detach
+  stale indirect/culling state before rebuilding the CPU-owned draw list.
+- Added the SIMD `ShadoSprite2DMotionKernel` and the
+  `@knervous/shado/render/sprite-2d-motion` package subpath for worker-friendly
+  deterministic CPU motion.
+- Added `ShadoText2DRenderer` for MSDF text in locked 2D space, including
+  kerning, advance-only whitespace, wrapping, multiline alignment, pivots,
+  rotation, LOD, and picking.
+- Added explicit dynamic sprite presentations: `ground`, `billboard-y`,
+  `billboard-screen`, and `slab`. Billboard height now follows the declared
+  entity height, pivots are honored, cylindrical billboards remain world-up,
+  and picking intersects the chosen presentation instead of an unconditional
+  3D box.
+- Added `cutout` and `premultiplied` alpha policies. Existing callers that omit
+  the option retain the 1.x blended-opacity result through premultiplied output;
+  cutout remains the recommended explicit mode for depth-writing world sprites.
+- Added camera-relative back-to-front sorting for premultiplied dynamic sprites,
+  container-owned visibility/selection/highlight mutations, and forwarding of
+  alpha/sort settings through mesh-variant renderer factories.
+- Added the `/sprites-2d` sandbox, WebGL2/WebGPU load benchmarks, GPU culling
+  diagnostics, and focused rendering/motion tests.
+- Restored the established `Unsupported Shado world spatial package` validation
+  prefix while retaining detailed diagnostics, keeping the published error
+  contract and release suite compatible.
+- Synchronized the package manifest, lockfile, and exported `VERSION` constant
+  at 1.10.0.
 
 - Replaced `@kmamal/gpu` with the official `webgpu@0.6.0` Dawn binding for all
   Node headless rendering. `webgpu` is now a runtime dependency and supports

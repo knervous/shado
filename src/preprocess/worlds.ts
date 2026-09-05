@@ -5,8 +5,6 @@ import { runInThisContext } from 'node:vm';
 import { gunzip, gzip } from 'node:zlib';
 import { promisify } from 'node:util';
 import {
-  importLegacyZoneMetadata,
-  mergeLegacyZoneMetadata,
   upgradeShadoWorldAuthoring,
   type ShadoWorldCompileOptions,
 } from '../world';
@@ -53,7 +51,6 @@ export type ShadoWorldPackConfig = Omit<ShadoWorldCompileOptions, 'source'> & {
   /** Editable region sidecar compiled into the runtime spatial package. */
   authoringInput?: string;
   /** Original Requiem zone JSON promoted into authoring when no authored document exists. */
-  metadataInput?: string;
   objectSourcePrefix?: string;
   /** Filesystem root corresponding to runtime object URLs such as `/eqrequiem/...`. */
   objectAssetRoot?: string;
@@ -101,32 +98,14 @@ export async function packShadoWorld(config: ShadoWorldPackConfig): Promise<Shad
   const authoringPath = config.authoringInput
     ? path.resolve(process.cwd(), config.authoringInput)
     : undefined;
-  const metadataPath = config.metadataInput
-    ? path.resolve(process.cwd(), config.metadataInput)
-    : undefined;
   const authoringSource = authoringPath
     ? JSON.parse(await fs.readFile(authoringPath, 'utf8'))
     : undefined;
-  let authoring = authoringPath
+  const authoring = authoringPath
     ? upgradeShadoWorldAuthoring(authoringSource, config.name)
-    : config.metadataInput
-      ? importLegacyZoneMetadata(
-          JSON.parse(await fs.readFile(metadataPath!, 'utf8')),
-          config.name,
-          { objectSourcePrefix: config.objectSourcePrefix }
-        )
-      : config.authoring;
+    : config.authoring;
   if (authoringPath && authoring) {
-    const before = JSON.stringify(authoringSource);
-    if (metadataPath) {
-      authoring = mergeLegacyZoneMetadata(
-        authoring,
-        JSON.parse(await fs.readFile(metadataPath, 'utf8')),
-        config.name,
-        { objectSourcePrefix: config.objectSourcePrefix }
-      );
-    }
-    if (JSON.stringify(authoring) !== before) {
+    if (JSON.stringify(authoring) !== JSON.stringify(authoringSource)) {
       authoring.revision++;
       await fs.writeFile(authoringPath, `${JSON.stringify(authoring, null, 2)}\n`);
     }

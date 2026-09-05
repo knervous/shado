@@ -11,7 +11,11 @@ import {
 } from '../babylon';
 import type { ShadoActor } from '../extensions/ShadoActor';
 import type { ShadoInstanceContainer } from '../extensions/ShadoInstanceContainer/ShadoInstanceContainer';
-import type { ShadoDynamicEntityContainer } from './ShadoDynamicEntityContainer';
+import type {
+  ShadoDynamicEntityContainer,
+  ShadoDynamicEntityGeometryMode,
+  ShadoSpritePresentation,
+} from './ShadoDynamicEntityContainer';
 import { SHADO_ENTITY_VISIBLE, type ShadoEntity2D } from './ShadoEntity2D';
 
 export type ShadoPickingSchedule = 'microtask' | 'next-frame';
@@ -54,8 +58,9 @@ export interface ShadoDynamicEntityPickResult {
   pickingInfo: PickingInfo;
 }
 
-export interface ShadoInstanceAsyncPickingOptions<T extends ShadoActor = ShadoActor>
-  extends ShadoAsyncPickingBaseOptions<ShadoInstancePickResult<T>> {
+export interface ShadoInstanceAsyncPickingOptions<
+  T extends ShadoActor = ShadoActor,
+> extends ShadoAsyncPickingBaseOptions<ShadoInstancePickResult<T>> {
   /**
    * Optional local-space sphere radius centered on the actor pivot.
    * When omitted, picking follows the source mesh's complete bounding sphere.
@@ -64,9 +69,14 @@ export interface ShadoInstanceAsyncPickingOptions<T extends ShadoActor = ShadoAc
   predicate?: (instance: T, index: number) => boolean;
 }
 
-export interface ShadoDynamicEntityAsyncPickingOptions
-  extends ShadoAsyncPickingBaseOptions<ShadoDynamicEntityPickResult> {
+export interface ShadoDynamicEntityAsyncPickingOptions extends ShadoAsyncPickingBaseOptions<ShadoDynamicEntityPickResult> {
   padding?: number;
+  /** Resolved renderer geometry used when no sprite presentation is active. */
+  geometry?: ShadoDynamicEntityGeometryMode;
+  /** Match ray intersection to the quad/slab presentation used for drawing. */
+  presentation?: ShadoSpritePresentation;
+  /** Normalized sprite pivot; defaults to the presentation's renderer default. */
+  pivot?: readonly [number, number];
   predicate?: (entity: ShadoEntity2D, index: number, id: string | undefined) => boolean;
 }
 
@@ -254,6 +264,7 @@ export function pickShadoDynamicEntityWithRay(
 ): ShadoDynamicEntityPickResult | null {
   let best: ShadoDynamicEntityPickResult | null = null;
   const padding = Math.max(0, options.padding ?? 0);
+  const camera = options.camera ?? mesh.getScene().activeCamera;
   const ids = container.ids;
 
   for (let index = 0; index < ids.length; index++) {
@@ -265,7 +276,7 @@ export function pickShadoDynamicEntityWithRay(
     const id = ids[index];
     if (options.predicate && !options.predicate(entity, index, id)) continue;
 
-    const distance = intersectRayEntityBox(ray, entity, padding);
+    const distance = intersectRayDynamicEntity(ray, entity, padding, options, camera);
     if (distance === null || distance < 0 || distance > ray.length) continue;
     if (best && distance >= best.distance) continue;
 
@@ -458,6 +469,107 @@ function intersectRayEntityBox(ray: Ray, entity: ShadoEntity2D, padding: number)
     y: height * 0.5,
     z: depth * 0.5,
   });
+}
+
+function intersectRayDynamicEntity(
+  ray: Ray,
+  entity: ShadoEntity2D,
+  padding: number,
+  options: ShadoDynamicEntityAsyncPickingOptions,
+  camera: Camera | null
+): number | null {
+  const presentation = options.presentation;
+  if (!presentation || presentation === 'slab' || options.geometry === 'mesh') {
+    return intersectRayEntityBox(ray, entity, padding);
+  }
+
+  const width = Math.max(0.0001, entity.positionSize[2]);
+  const height = Math.max(0.0001, entity.render[1]);
+  const pivot =
+    options.pivot ??
+    (presentation === 'billboard-y' || presentation === 'billboard-screen'
+      ? ([0.5, 0] as const)
+      : ([0.5, 0.5] as const));
+  const anchor = {
+    x: entity.positionSize[0],
+    y: entity.render[0] ?? 0,
+    z: entity.positionSize[1],
+  };
+  let right: { x: number; y: number; z: number };
+  let up: { x: number; y: number; z: number };
+
+  if (presentation === 'ground') {
+    const rotation = entity.render[2] ?? 0;
+    const cos = Math.cos(rotation);
+    const sin = Math.sin(rotation);
+    right = { x: cos, y: 0, z: sin };
+    up = { x: -sin, y: 0, z: cos };
+  } else {
+    if (!camera) return intersectRayEntityBox(ray, entity, padding);
+    const view = camera.getViewMatrix().m;
+    right = normalizeAxis({ x: view[0], y: view[4], z: view[8] });
+    if (presentation === 'billboard-y') {
+      right = normalizeAxis({ x: right.x, y: 0, z: right.z });
+      up = { x: 0, y: 1, z: 0 };
+    } else {
+      up = normalizeAxis({ x: view[1], y: view[5], z: view[9] });
+    }
+  }
+
+  return intersectRayQuad(
+    ray,
+    anchor,
+    right,
+    up,
+    -pivot[0] * width - padding,
+    (1 - pivot[0]) * width + padding,
+    -pivot[1] * height - padding,
+    (1 - pivot[1]) * height + padding
+  );
+}
+
+function intersectRayQuad(
+  ray: Ray,
+  anchor: { x: number; y: number; z: number },
+  right: { x: number; y: number; z: number },
+  up: { x: number; y: number; z: number },
+  minRight: number,
+  maxRight: number,
+  minUp: number,
+  maxUp: number
+): number | null {
+  const normal = {
+    x: right.y * up.z - right.z * up.y,
+    y: right.z * up.x - right.x * up.z,
+    z: right.x * up.y - right.y * up.x,
+  };
+  const denominator =
+    ray.direction.x * normal.x + ray.direction.y * normal.y + ray.direction.z * normal.z;
+  if (Math.abs(denominator) < 1e-8) return null;
+  const t =
+    ((anchor.x - ray.origin.x) * normal.x +
+      (anchor.y - ray.origin.y) * normal.y +
+      (anchor.z - ray.origin.z) * normal.z) /
+    denominator;
+  if (t < 0 || t > ray.length) return null;
+  const dx = ray.origin.x + ray.direction.x * t - anchor.x;
+  const dy = ray.origin.y + ray.direction.y * t - anchor.y;
+  const dz = ray.origin.z + ray.direction.z * t - anchor.z;
+  const localRight = dx * right.x + dy * right.y + dz * right.z;
+  const localUp = dx * up.x + dy * up.y + dz * up.z;
+  return localRight >= minRight && localRight <= maxRight && localUp >= minUp && localUp <= maxUp
+    ? t
+    : null;
+}
+
+function normalizeAxis(axis: { x: number; y: number; z: number }): {
+  x: number;
+  y: number;
+  z: number;
+} {
+  const length = Math.hypot(axis.x, axis.y, axis.z);
+  if (length < 1e-8) return { x: 1, y: 0, z: 0 };
+  return { x: axis.x / length, y: axis.y / length, z: axis.z / length };
 }
 
 function intersectRayAabb(

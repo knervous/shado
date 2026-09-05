@@ -16,6 +16,66 @@ are consumed directly without running `npm run dev` or `npm run build` in the
 parent package first. Symlink preservation ensures both projects resolve the
 same Babylon.js installation.
 
+## Locked 2D renderer
+
+Open `/sprites-2d?renderer=babylonjs` for the optimized locked-camera 2D path.
+It uses `ShadoSprite2DRenderer` with 48-byte instance records, stable logical
+layers, a direct orthographic camera transform, cached spatial tiles, zoom LOD,
+and exact 2D picking. Add `&path=legacy` to run the same scene through the
+existing `ShadoDynamicEntityRenderer` compatibility path. The in-scene button
+switches between both implementations.
+
+`ShadoText2DRenderer` adds arbitrary MSDF text to the same locked coordinate
+space. Text blocks support runtime replacement, multiline layout, width limits,
+alignment, pivot, rotation, color, layers, zoom LOD, tiled culling, and exact
+block picking. Each visible glyph is a compact 64-byte instanced record; font
+fallback is reported through `getStats().unsupportedCharacters`.
+
+The right-side control overlay starts with a 13-object silhouette demo and its
+numbered buttons add to the resident population cumulatively. It can switch
+field/dense layouts and render paths, adjust tile size and zoom LOD, configure
+deterministic motion by seed, speed, and vector-change cadence, hide the grid,
+edit live MSDF text, change font size/alignment, and reset the locked camera.
+
+On WebGPU, animated cutout sprites can additionally opt into GPU visibility
+compaction. A compute pass tests the current motion positions against the locked
+orthographic view and pixel-size LOD, writes compact instance indices, and feeds
+the resulting instance count to Babylon's indirect draw path without a CPU
+readback. The controls expose a `GPU culling` switch; it defaults off because
+four-vertex sprites are cheap enough that compaction can cost more GPU time at
+some scales. The all-instance path still performs pixel-LOD rejection directly
+in the vertex shader. Premultiplied sprites retain stable ordered
+submission because atomic compaction would not preserve blend order.
+
+The load benchmark accepts `--backend webgpu --gpu-motion`. In that mode it
+measures optimized GPU culling, GPU motion without culling, and the full backup
+path as separate rows.
+On WebGPU, motion vector generation, scheduled changes, integration, and
+wrapping execute in a compute shader. Each sprite owns one GPU `vec4` containing
+XY and velocity; the vertex shader consumes that same storage directly by stable
+instance index, with no per-frame CPU copies or readback. While that mode is
+active the renderer submits the stable batch instead of using stale CPU tile
+positions, and CPU picking is disabled explicitly. WebGL2 and the full legacy
+path retain the SIMD-only `ShadoSprite2DMotionKernel` WASM modules sharded across
+up to eight workers. Each worker owns private memory and exchanges only
+transferable packed XY copies—there is no shared buffer, atomics, locking, or
+cross-shard mutation.
+Call `readCpuPositions()` only when CPU state is actually needed. It supports
+`all`, submitted `visible`, contiguous `range`, arbitrary `ids`, and `selected`
+tiers. GPU results include population generation and dispatch boundaries so an
+asynchronous result can be discarded after an authority change or recognized
+as having completed out of band with continued simulation.
+Zoom-out has no artificial ceiling; culling switches from viewport tile scans
+to populated-tile scans at extreme scales. Renderer-affecting settings are
+retained in the URL, and the overlay can collapse over the canvas.
+
+Run `npm run benchmark:sprite-2d` from the package root to compare both paths
+at 10K and 100K sprites. The `field` case measures tiled viewport culling; the
+`dense` case keeps the whole population visible for raw draw throughput. Use
+`-- --backend webgpu`, `--counts 10000,50000`, or `--scenarios dense` to change
+the sweep. Results include setup, submitted sprites, frame and GPU p50/p95,
+effective FPS, and record memory.
+
 ## What It Shows
 
 - Babylon.js 9 scene setup

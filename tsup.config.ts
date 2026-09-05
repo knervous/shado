@@ -388,6 +388,7 @@ export default defineConfig({
     'asc/index': 'src/asc/index.ts',
     'msdf/index': 'src/msdf/index.ts',
     'render/index': 'src/render/index.ts',
+    'render/sprite-2d-motion': 'src/render/ShadoSprite2DMotionKernel.ts',
     'svat/index': 'src/svat/index.ts',
     // Node-only: pulls in node:zlib for bake-side compression.
     'svat/node': 'src/svat/node.ts',

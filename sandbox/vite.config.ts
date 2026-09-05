@@ -83,6 +83,10 @@ export default defineConfig(({ command }) => ({
       ? []
       : [
           {
+            find: '@knervous/shado/render/sprite-2d-motion',
+            replacement: path.resolve(__dirname, '../src/render/ShadoSprite2DMotionKernel.ts'),
+          },
+          {
             find: '@knervous/shado/preprocess/runtime',
             replacement: path.resolve(__dirname, '../src/preprocess/runtime.ts'),
           },
@@ -132,6 +136,9 @@ export default defineConfig(({ command }) => ({
   },
   optimizeDeps: {
     exclude: ['@knervous/shado', '@babylonjs/lite'],
+  },
+  worker: {
+    format: 'es',
   },
   server: {
     headers: {

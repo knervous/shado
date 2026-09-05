@@ -218,7 +218,9 @@ export function compileShadoWorld(
     options.maxRenderChunkExtent ?? bake?.maxRenderChunkExtent ?? Math.max(256, tileSize * 8),
     'maxRenderChunkExtent'
   );
-  const worldBounds = boundsOfPrimitives(primitives);
+  const worldBounds = options.collisionPrimitives?.length
+    ? unionBounds([boundsOfPrimitives(primitives), boundsOfPrimitives(options.collisionPrimitives)])
+    : boundsOfPrimitives(primitives);
   const originX = Math.floor(worldBounds.min[0] / tileSize) * tileSize;
   const originZ = Math.floor(worldBounds.min[2] / tileSize) * tileSize;
   const materials = [

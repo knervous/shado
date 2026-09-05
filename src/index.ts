@@ -42,4 +42,4 @@ export * from './showcase/ShadoSupermeshModuleDemo';
 export * from './showcase/ShadoVatShowcaseUi';
 export * from './showcase/ShadoShowcaseEnvironment';
 
-export const VERSION = '1.5.0';
+export const VERSION = '1.10.0';
