@@ -33,7 +33,9 @@ describe('ShadoFoliageContainer', () => {
     // The block is emitted once and each plugin contributes into it, rather
     // than each plugin writing its own clip position.
     expect(vs.match(/vec3 shadoFoliageWorld = p;/g)).toHaveLength(1);
-    expect(vs.match(/gl_Position = worldViewProjection \* vec4\(shadoFoliageWorld/g)).toHaveLength(1);
+    expect(vs.match(/gl_Position = worldViewProjection \* vec4\(shadoFoliageWorld/g)).toHaveLength(
+      1
+    );
 
     expect(vs).toContain('uniform vec4 uShadoFoliageWind;');
     expect(vs).toContain('uniform vec4 uShadoFoliageBend;');
@@ -157,15 +159,55 @@ describe('foliage plugin configuration', () => {
   });
 
   it('validates plugin parameters at configuration time', () => {
-    expect(() => resolveShadoFoliagePlugins([{ plugin: 'proximityFade', fadeStart: 80, fadeEnd: 40 }]))
-      .toThrow(/fadeEnd must exceed/);
-    expect(() => resolveShadoFoliagePlugins([{ plugin: 'wind', direction: [0, 0] }]))
-      .toThrow(/must not be zero-length/);
-    expect(() => resolveShadoFoliagePlugins([{ plugin: 'playerBend', radius: 0, strength: 1 }]))
-      .toThrow(/radius must be positive/);
+    expect(() =>
+      resolveShadoFoliagePlugins([{ plugin: 'proximityFade', fadeStart: 80, fadeEnd: 40 }])
+    ).toThrow(/fadeEnd must exceed/);
+    expect(() => resolveShadoFoliagePlugins([{ plugin: 'wind', direction: [0, 0] }])).toThrow(
+      /must not be zero-length/
+    );
+    expect(() =>
+      resolveShadoFoliagePlugins([{ plugin: 'playerBend', radius: 0, strength: 1 }])
+    ).toThrow(/radius must be positive/);
     expect(() =>
       resolveShadoFoliagePlugins([{ plugin: 'tint', variationColor: [1.4, 0, 0] }])
     ).toThrow(/variationColor.r must be between zero and one/);
+  });
+
+  it('supports an inner fade so a lower-detail population is an annulus', async () => {
+    const { engine, container } = await makeContainer([
+      {
+        plugin: 'proximityFade',
+        fadeInStart: 42,
+        fadeInEnd: 58,
+        fadeStart: 130,
+        fadeEnd: 180,
+      },
+    ]);
+    const glsl = container.generateGLSLPair().vs;
+    const wgsl = container.generateWGSLPair().vs;
+    expect(glsl).toContain('smoothstep(uShadoFoliageFade.z, uShadoFoliageFade.w, fadeDistance)');
+    expect(wgsl).toContain('uniforms.uShadoFoliageFade.z');
+    container.dispose();
+    engine.dispose();
+  });
+
+  it('rejects incomplete or overlapping annulus fades', () => {
+    expect(() =>
+      resolveShadoFoliagePlugins([
+        { plugin: 'proximityFade', fadeInStart: 10, fadeStart: 30, fadeEnd: 40 },
+      ])
+    ).toThrow(/must be provided together/);
+    expect(() =>
+      resolveShadoFoliagePlugins([
+        {
+          plugin: 'proximityFade',
+          fadeInStart: 20,
+          fadeInEnd: 35,
+          fadeStart: 30,
+          fadeEnd: 40,
+        },
+      ])
+    ).toThrow(/must not exceed/);
   });
 });
 

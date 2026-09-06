@@ -235,7 +235,10 @@ ${collect('fragmentDeclarations')}`,
   float shadoFoliagePhase = inst.foliageParams.x;
   float shadoFoliageStiffness = inst.foliageParams.y;
   float shadoFoliageVariation = inst.foliageParams.z;
+  vec3 shadoFoliageTangent = vec3(0.0, 1.0, 0.0);
+  vec3 shadoFoliageAcross = vec3(1.0, 0.0, 0.0);
 ${collect('displace')}
+${collect('afterDisplace')}
   gl_Position = worldViewProjection * vec4(shadoFoliageWorld, 1.0);
   // Reject the whole instance outside clip space rather than paying for its
   // fragments. Vertex work is still spent, which is why cell-level residency
@@ -285,7 +288,10 @@ ${collect('fragmentDeclarations')}`,
   var shadoFoliagePhase = inst.foliageParams.x;
   var shadoFoliageStiffness = inst.foliageParams.y;
   var shadoFoliageVariation = inst.foliageParams.z;
+  var shadoFoliageTangent = vec3f(0.0, 1.0, 0.0);
+  var shadoFoliageAcross = vec3f(1.0, 0.0, 0.0);
 ${collect('displace')}
+${collect('afterDisplace')}
   vertexOutputs.position = uniforms.worldViewProjection * vec4f(shadoFoliageWorld, 1.0);
   if (shadoFoliageFade <= 0.0) {
     vertexOutputs.position = vec4f(2.0, 2.0, 2.0, 1.0);

@@ -90,10 +90,23 @@ describe('shadoGrassBlades', () => {
       wgsl.vs.indexOf('uniforms.uShadoFoliageWind.z')
     );
 
+    // Lighting is finalized only after wind has updated the procedural surface
+    // tangent, so moving geometry and its normal cannot disagree.
+    expect(glsl.vs.indexOf('shadoFoliageTangent.x +=')).toBeLessThan(
+      glsl.vs.indexOf('vec3 bladeNormal = normalize(cross(shadoFoliageAcross')
+    );
+    expect(wgsl.vs.indexOf('shadoFoliageTangent = shadoFoliageTangent +')).toBeLessThan(
+      wgsl.vs.indexOf('var bladeNormal = normalize(cross(shadoFoliageAcross')
+    );
+
     // Wind and tint must read the per-blade locals the plugin overwrote, not
     // the per-cell actor header, or a whole cell sways as one object.
     expect(glsl.vs).toContain('shadoFoliagePhase * 6.2831853');
-    expect(glsl.vs).toContain('shadoFoliagePhase = randomU');
+    expect(glsl.vs).toContain('shadoFoliagePhase = randomPhase');
+    expect(glsl.vs).toContain('shadoFoliageStiffness = randomStiffness');
+    expect(glsl.vs).toContain('shadoFoliageVariation = randomVariation');
+    expect(glsl.vs).toContain('float widthVariation = mix(0.65, 1.25, randomWidth)');
+    expect(glsl.vs).toContain('vec2 leanDirection = vec2(cos(leanYaw), sin(leanYaw))');
     expect(glsl.vs).not.toContain('inst.foliageParams.x * 6.2831853');
 
     for (const name of materialUniforms) {

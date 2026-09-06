@@ -202,8 +202,13 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     float bladeHighPart = floor(blade / 256.0);
     vec2 bladeUV = vec2(blade - bladeHighPart * 256.0, bladeHighPart) * 0.00390625;
     float randomYaw = Shado_grassHash(bladeUV + cellRand * 7.31);
+    float randomLeanYaw = Shado_grassHash(bladeUV.yx + cellRand * 12.41);
     float randomSize = Shado_grassHash(bladeUV.yx + cellRand.yx * 3.97);
+    float randomWidth = Shado_grassHash(bladeUV + cellRand.yx * 15.19);
     float randomLean = Shado_grassHash(bladeUV + cellRand.yx * 11.73);
+    float randomStiffness = Shado_grassHash(bladeUV.yx + cellRand * 18.17);
+    float randomVariation = Shado_grassHash(bladeUV + cellRand * 21.23);
+    float randomPhase = Shado_grassHash(bladeUV.yx + cellRand.yx * 24.29);
 
     // R2 low-discrepancy roots. Every prefix of this sequence is evenly spread,
     // so raising density adds blades into the gaps instead of reshuffling the
@@ -262,17 +267,22 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
 
     // Cubic bezier from root to tip. The control points trail the bend so the
     // blade leaves the ground near-vertical and curls over toward the tip.
-    vec2 bend = facing * (randomLean * 2.0 - 1.0) * uShadoGrassSize.w * bladeHeight;
+    float leanYaw = randomLeanYaw * 6.2831853;
+    vec2 leanDirection = vec2(cos(leanYaw), sin(leanYaw));
+    vec2 bend = leanDirection * mix(0.2, 1.0, randomLean)
+      * uShadoGrassSize.w * bladeHeight;
     vec3 p0 = vec3(0.0);
     vec3 p1 = vec3(bend.x * 0.10, bladeHeight * 0.34, bend.y * 0.10);
     vec3 p2 = vec3(bend.x * 0.42, bladeHeight * 0.72, bend.y * 0.42);
     vec3 p3 = vec3(bend.x, bladeHeight, bend.y);
     float t = shadoFoliageUp;
     vec3 centre = Shado_grassBezier(p0, p1, p2, p3, t);
-    vec3 tangent = normalize(Shado_grassBezierTangent(p0, p1, p2, p3, t));
+    vec3 curveTangent = Shado_grassBezierTangent(p0, p1, p2, p3, t);
+    vec3 tangent = normalize(curveTangent);
 
     float taper = 1.0 - smoothstep(0.55, 1.0, t);
-    float halfWidth = uShadoGrassSize.z * 0.5 * taper;
+    float widthVariation = mix(0.65, 1.25, randomWidth);
+    float halfWidth = uShadoGrassSize.z * widthVariation * 0.5 * taper;
     vec3 bladeAcross = vec3(across.x, 0.0, across.y);
     vec3 bladePosition = root + centre + bladeAcross * side * halfWidth;
 
@@ -294,19 +304,26 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     // Later plugins measure distance from the blade, not the cell corner.
     shadoFoliageAnchor = root;
     shadoFoliageFade *= covered;
-    shadoFoliagePhase = randomU;
-    shadoFoliageStiffness = randomSize;
-    shadoFoliageVariation = randomV;
-
-    // Foliage lighting, from the curve normal. Wrapped diffuse keeps the
-    // shadowed side of a blade from going black, and backscatter brightens
-    // blades seen against the sun the way a real sward does.
+    shadoFoliagePhase = randomPhase;
+    shadoFoliageStiffness = randomStiffness;
+    shadoFoliageVariation = randomVariation;
+    shadoFoliageTangent = curveTangent;
+    shadoFoliageAcross = bladeAcross;
+  }`,
+      afterDisplace: `
+  {
+    // Wind and interaction plugins have now added their derivatives to the
+    // rest curve, so the light rotates with the blade instead of lagging on
+    // its undeformed orientation.
+    vec3 viewDirection = normalize(uShadoFoliageCamera - shadoFoliageAnchor);
+    vec3 bladeNormal = normalize(cross(shadoFoliageAcross, shadoFoliageTangent));
+    if (dot(bladeNormal, viewDirection) < 0.0) bladeNormal = -bladeNormal;
     if (inst.padding1 > 0.5) {
       float wrapped = clamp((dot(bladeNormal, uShadoLightDirection) + 0.45) / 1.45, 0.0, 1.0);
       float backscatter =
         pow(max(dot(viewDirection, -uShadoLightDirection), 0.0), 3.0) * 0.35;
-      vShadoLighting = uShadoAmbientColor
-        + uShadoLightColor * (wrapped + backscatter * smoothstep(0.25, 1.0, t));
+      vShadoLighting = uShadoAmbientColor + uShadoLightColor
+        * (wrapped + backscatter * smoothstep(0.25, 1.0, shadoFoliageUp));
     }
   }`,
     },
@@ -330,8 +347,13 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     let bladeHighPart = floor(blade / 256.0);
     let bladeUV = vec2f(blade - bladeHighPart * 256.0, bladeHighPart) * 0.00390625;
     let randomYaw = Shado_grassHash(bladeUV + cellRand * 7.31);
+    let randomLeanYaw = Shado_grassHash(bladeUV.yx + cellRand * 12.41);
     let randomSize = Shado_grassHash(bladeUV.yx + cellRand.yx * 3.97);
+    let randomWidth = Shado_grassHash(bladeUV + cellRand.yx * 15.19);
     let randomLean = Shado_grassHash(bladeUV + cellRand.yx * 11.73);
+    let randomStiffness = Shado_grassHash(bladeUV.yx + cellRand * 18.17);
+    let randomVariation = Shado_grassHash(bladeUV + cellRand * 21.23);
+    let randomPhase = Shado_grassHash(bladeUV.yx + cellRand.yx * 24.29);
 
     let stratum = 0.62 / sqrt(max(uniforms.uShadoGrassShape.w, 1.0));
     let randomU = fract(
@@ -374,17 +396,22 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     let facing = vec2f(cos(yaw), sin(yaw));
     let across = vec2f(-facing.y, facing.x);
 
-    let bend = facing * (randomLean * 2.0 - 1.0) * uniforms.uShadoGrassSize.w * bladeHeight;
+    let leanYaw = randomLeanYaw * 6.2831853;
+    let leanDirection = vec2f(cos(leanYaw), sin(leanYaw));
+    let bend = leanDirection * mix(0.2, 1.0, randomLean)
+      * uniforms.uShadoGrassSize.w * bladeHeight;
     let p0 = vec3f(0.0);
     let p1 = vec3f(bend.x * 0.10, bladeHeight * 0.34, bend.y * 0.10);
     let p2 = vec3f(bend.x * 0.42, bladeHeight * 0.72, bend.y * 0.42);
     let p3 = vec3f(bend.x, bladeHeight, bend.y);
     let t = shadoFoliageUp;
     let centre = Shado_grassBezier(p0, p1, p2, p3, t);
-    let tangent = normalize(Shado_grassBezierTangent(p0, p1, p2, p3, t));
+    let curveTangent = Shado_grassBezierTangent(p0, p1, p2, p3, t);
+    let tangent = normalize(curveTangent);
 
     let taper = 1.0 - smoothstep(0.55, 1.0, t);
-    let halfWidth = uniforms.uShadoGrassSize.z * 0.5 * taper;
+    let widthVariation = mix(0.65, 1.25, randomWidth);
+    let halfWidth = uniforms.uShadoGrassSize.z * widthVariation * 0.5 * taper;
     let bladeAcross = vec3f(across.x, 0.0, across.y);
     var bladePosition = root + centre + bladeAcross * side * halfWidth;
 
@@ -404,10 +431,17 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     // Later plugins measure distance from the blade, not the cell corner.
     shadoFoliageAnchor = root;
     shadoFoliageFade = shadoFoliageFade * covered;
-    shadoFoliagePhase = randomU;
-    shadoFoliageStiffness = randomSize;
-    shadoFoliageVariation = randomV;
-
+    shadoFoliagePhase = randomPhase;
+    shadoFoliageStiffness = randomStiffness;
+    shadoFoliageVariation = randomVariation;
+    shadoFoliageTangent = curveTangent;
+    shadoFoliageAcross = bladeAcross;
+  }`,
+      afterDisplace: `
+  {
+    let viewDirection = normalize(uniforms.uShadoFoliageCamera - shadoFoliageAnchor);
+    var bladeNormal = normalize(cross(shadoFoliageAcross, shadoFoliageTangent));
+    bladeNormal = select(-bladeNormal, bladeNormal, dot(bladeNormal, viewDirection) >= 0.0);
     if (inst.padding1 > 0.5) {
       let wrapped = clamp(
         (dot(bladeNormal, uniforms.uShadoLightDirection) + 0.45) / 1.45,
@@ -417,7 +451,8 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
       let backscatter =
         pow(max(dot(viewDirection, -uniforms.uShadoLightDirection), 0.0), 3.0) * 0.35;
       vertexOutputs.vShadoLighting = uniforms.uShadoAmbientColor
-        + uniforms.uShadoLightColor * (wrapped + backscatter * smoothstep(0.25, 1.0, t));
+        + uniforms.uShadoLightColor
+          * (wrapped + backscatter * smoothstep(0.25, 1.0, shadoFoliageUp));
     }
   }`,
     },

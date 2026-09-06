@@ -32,6 +32,9 @@ export type ShadoFoliageFrame = {
  * - `shadoFoliagePhase`, `shadoFoliageStiffness`, `shadoFoliageVariation` —
  *   mutable per-instance character, seeded from `inst.foliageParams`. A plugin
  *   that derives many plants from one instance overwrites these per plant.
+ * - `shadoFoliageTangent`, `shadoFoliageAcross` — mutable surface frame. A
+ *   procedural foliage plugin may establish it and deformation plugins update
+ *   the tangent so lighting can be finalized after every displacement.
  * - `shadoColor`        — mutable instance color, written to `vColor` afterwards.
  * - `inst`              — the actor header, including `foliageParams`.
  *
@@ -43,6 +46,8 @@ export type ShadoFoliageShaderFragments = {
   fragmentDeclarations?: string;
   vertexInstance?: string;
   displace?: string;
+  /** Runs after every plugin's displacement has composed. */
+  afterDisplace?: string;
   fragmentSurface?: string;
 };
 
@@ -75,6 +80,10 @@ export type ShadoFoliageWindConfig = {
 };
 
 export type ShadoFoliageProximityFadeConfig = {
+  /** Optional inner distance at which this annulus starts fading in. */
+  fadeInStart?: number;
+  /** Distance at which the inner fade is fully visible. */
+  fadeInEnd?: number;
   /** Distance from the focus at which fading begins. */
   fadeStart: number;
   /** Distance at which the instance is fully gone. Must exceed `fadeStart`. */
@@ -143,10 +152,13 @@ uniform vec4 uShadoFoliageGust;`,
     float gustTravel = dot(shadoFoliageAnchor.xz, windDirection) / uShadoFoliageGust.z;
     float windGust = sin(uShadoFoliageTime * uShadoFoliageGust.y - gustTravel) * 0.5 + 0.5;
     float windResistance = 1.0 - shadoFoliageStiffness * uShadoFoliageGust.w;
-    float windBend = shadoFoliageUp * shadoFoliageUp * shadoFoliageScale * windResistance
+    float windCoefficient = shadoFoliageScale * windResistance
       * (windSway * uShadoFoliageWind.z + windGust * uShadoFoliageGust.x);
+    float windBend = shadoFoliageUp * shadoFoliageUp * windCoefficient;
     shadoFoliageWorld.x += windDirection.x * windBend;
     shadoFoliageWorld.z += windDirection.y * windBend;
+    shadoFoliageTangent.x += windDirection.x * 2.0 * shadoFoliageUp * windCoefficient;
+    shadoFoliageTangent.z += windDirection.y * 2.0 * shadoFoliageUp * windCoefficient;
   }`,
     },
     wgsl: {
@@ -161,12 +173,18 @@ uniform uShadoFoliageGust: vec4f;`,
     let gustTravel = dot(shadoFoliageAnchor.xz, windDirection) / uniforms.uShadoFoliageGust.z;
     let windGust = sin(uniforms.uShadoFoliageTime * uniforms.uShadoFoliageGust.y - gustTravel) * 0.5 + 0.5;
     let windResistance = 1.0 - shadoFoliageStiffness * uniforms.uShadoFoliageGust.w;
-    let windBend = shadoFoliageUp * shadoFoliageUp * shadoFoliageScale * windResistance
+    let windCoefficient = shadoFoliageScale * windResistance
       * (windSway * uniforms.uShadoFoliageWind.z + windGust * uniforms.uShadoFoliageGust.x);
+    let windBend = shadoFoliageUp * shadoFoliageUp * windCoefficient;
     shadoFoliageWorld = shadoFoliageWorld + vec3f(
       windDirection.x * windBend,
       0.0,
       windDirection.y * windBend
+    );
+    shadoFoliageTangent = shadoFoliageTangent + vec3f(
+      windDirection.x * 2.0 * shadoFoliageUp * windCoefficient,
+      0.0,
+      windDirection.y * 2.0 * shadoFoliageUp * windCoefficient
     );
   }`,
     },
@@ -187,8 +205,34 @@ export function shadoFoliageProximityFade(
   if (fadeEnd <= fadeStart) {
     throw new Error('foliage proximityFade.fadeEnd must exceed proximityFade.fadeStart');
   }
+  const hasInnerFade = config.fadeInStart !== undefined || config.fadeInEnd !== undefined;
+  if (hasInnerFade && (config.fadeInStart === undefined || config.fadeInEnd === undefined)) {
+    throw new Error(
+      'foliage proximityFade.fadeInStart and proximityFade.fadeInEnd must be provided together'
+    );
+  }
+  const fadeInStart = hasInnerFade
+    ? nonNegative(config.fadeInStart!, 'proximityFade.fadeInStart')
+    : 0;
+  const fadeInEnd = hasInnerFade ? positive(config.fadeInEnd!, 'proximityFade.fadeInEnd') : 0;
+  if (hasInnerFade && fadeInEnd <= fadeInStart) {
+    throw new Error('foliage proximityFade.fadeInEnd must exceed proximityFade.fadeInStart');
+  }
+  if (hasInnerFade && fadeInEnd > fadeStart) {
+    throw new Error('foliage proximityFade.fadeInEnd must not exceed proximityFade.fadeStart');
+  }
   const mode = config.mode ?? 'dither';
   const fade = scratch();
+  const glslInnerFade = hasInnerFade
+    ? `smoothstep(uShadoFoliageFade.z, uShadoFoliageFade.w, fadeDistance) * `
+    : '';
+  const wgslInnerFade = hasInnerFade
+    ? `smoothstep(
+      uniforms.uShadoFoliageFade.z,
+      uniforms.uShadoFoliageFade.w,
+      fadeDistance
+    ) * `
+    : '';
 
   const glslShrink =
     mode === 'shrink'
@@ -231,7 +275,11 @@ export function shadoFoliageProximityFade(
       displace: `
   {
     float fadeDistance = length(shadoFoliageAnchor.xz - uShadoFoliageFocus.xz);
-    float fadeWeight = 1.0 - smoothstep(uShadoFoliageFade.x, uShadoFoliageFade.y, fadeDistance);
+    float fadeWeight = ${glslInnerFade}(1.0 - smoothstep(
+      uShadoFoliageFade.x,
+      uShadoFoliageFade.y,
+      fadeDistance
+    ));
     shadoFoliageFade *= fadeWeight;${glslShrink}
   }`,
       fragmentSurface: glslFragment,
@@ -241,25 +289,23 @@ export function shadoFoliageProximityFade(
       displace: `
   {
     let fadeDistance = length(shadoFoliageAnchor.xz - uniforms.uShadoFoliageFocus.xz);
-    let fadeWeight = 1.0 - smoothstep(
+    let fadeWeight = ${wgslInnerFade}(1.0 - smoothstep(
       uniforms.uShadoFoliageFade.x,
       uniforms.uShadoFoliageFade.y,
       fadeDistance
-    );
+    ));
     shadoFoliageFade = shadoFoliageFade * fadeWeight;${wgslShrink}
   }`,
       fragmentSurface: wgslFragment,
     },
     bind(material) {
-      fade.set(fadeStart, fadeEnd, mode === 'dither' ? 1 : 0, 0);
+      fade.set(fadeStart, fadeEnd, fadeInStart, fadeInEnd);
       material.setVector4('uShadoFoliageFade', fade);
     },
   };
 }
 
-export function shadoFoliagePlayerBend(
-  config: ShadoFoliagePlayerBendConfig
-): ShadoFoliagePlugin {
+export function shadoFoliagePlayerBend(config: ShadoFoliagePlayerBendConfig): ShadoFoliagePlugin {
   const radius = positive(config.radius, 'playerBend.radius');
   const strength = positive(config.strength, 'playerBend.strength');
   const bend = scratch();
@@ -276,11 +322,18 @@ export function shadoFoliagePlayerBend(
     float bendFalloff = 1.0 - smoothstep(0.0, uShadoFoliageBend.x, bendDistance);
     vec2 bendDirection = bendDistance > 0.0001 ? bendOffset / bendDistance : vec2(1.0, 0.0);
     float bendAmount = bendFalloff * uShadoFoliageBend.y * shadoFoliageUp * shadoFoliageScale;
+    float bendCoefficient = bendFalloff * uShadoFoliageBend.y * shadoFoliageScale;
     shadoFoliageWorld.x += bendDirection.x * bendAmount;
     shadoFoliageWorld.z += bendDirection.y * bendAmount;
     // Bending is a rotation, not a stretch: give back the height the tip lost
     // travelling along its arc, so a pushed blade does not also grow taller.
     shadoFoliageWorld.y -= bendAmount * bendAmount * 0.5 / max(shadoFoliageScale, 0.0001);
+    shadoFoliageTangent += vec3(
+      bendDirection.x * bendCoefficient,
+      -bendCoefficient * bendCoefficient * shadoFoliageUp
+        / max(shadoFoliageScale, 0.0001),
+      bendDirection.y * bendCoefficient
+    );
   }`,
     },
     wgsl: {
@@ -296,10 +349,17 @@ export function shadoFoliagePlayerBend(
       bendDistance > 0.0001
     );
     let bendAmount = bendFalloff * uniforms.uShadoFoliageBend.y * shadoFoliageUp * shadoFoliageScale;
+    let bendCoefficient = bendFalloff * uniforms.uShadoFoliageBend.y * shadoFoliageScale;
     shadoFoliageWorld = shadoFoliageWorld + vec3f(
       bendDirection.x * bendAmount,
       -bendAmount * bendAmount * 0.5 / max(shadoFoliageScale, 0.0001),
       bendDirection.y * bendAmount
+    );
+    shadoFoliageTangent = shadoFoliageTangent + vec3f(
+      bendDirection.x * bendCoefficient,
+      -bendCoefficient * bendCoefficient * shadoFoliageUp
+        / max(shadoFoliageScale, 0.0001),
+      bendDirection.y * bendCoefficient
     );
   }`,
     },
