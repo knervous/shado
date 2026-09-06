@@ -1,6 +1,6 @@
 {
   "name": "@knervous/shado",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "description": "Packed GPU struct schemas + Babylon include emitters with optional AssemblyScript kernels",
   "license": "MIT",
   "keywords": [
@@ -214,9 +214,9 @@
     "@babylonjs/lite": "^1.14.0",
     "@babylonjs/loaders": "^9.5.0",
     "@babylonjs/serializers": "^9.5.0",
+    "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "assemblyscript": "^0.28.8",
     "binaryen": "^124.0.0",
-    "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "mp4-muxer": "^5.2.2"
   },
   "peerDependenciesMeta": {
@@ -259,7 +259,9 @@
     "assemblyscript": "^0.28.8",
     "binaryen": "^124.0.0",
     "cross-env": "^10.1.0",
+    "fantasy-name-generator": "^2.0.0",
     "jest": "^30.2.0",
+    "maxrects-packer": "^2.7.3",
     "mp4-muxer": "^5.2.2",
     "oxlint": "^1.75.0",
     "prettier": "^3.6.2",
@@ -323,8 +325,6 @@
     "demo:live": "node demo/live-stream/server.mjs"
   },
   "dependencies": {
-    "fantasy-name-generator": "^2.0.0",
-    "maxrects-packer": "^2.7.3",
     "webgpu": "0.6.0"
   }
 }
