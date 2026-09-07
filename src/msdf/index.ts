@@ -772,3 +772,15 @@ export {
   type FloatingTextSpawn,
   type FloatingTextStyle,
 } from "./floatingText.js";
+
+export {
+  DEFAULT_SPEECH_BUBBLE_STYLES,
+  SpeechBubblePool,
+  wrapSpeechText,
+  type SpeechBubbleAnchor,
+  type SpeechBubbleInstance,
+  type SpeechBubbleOptions,
+  type SpeechBubbleSpawn,
+  type SpeechBubbleStyle,
+  type SpeechBubbleTone,
+} from "./speechBubble.js";

@@ -104,8 +104,12 @@ describe('shadoGrassBlades', () => {
     expect(glsl.vs).toContain('shadoFoliagePhase * 6.2831853');
     expect(glsl.vs).toContain('shadoFoliagePhase = randomPhase');
     expect(glsl.vs).toContain('shadoFoliageStiffness = randomStiffness');
-    expect(glsl.vs).toContain('shadoFoliageVariation = randomVariation');
-    expect(glsl.vs).toContain('float widthVariation = mix(0.65, 1.25, randomWidth)');
+    expect(glsl.vs).toContain('shadoFoliageVariation = clamp(randomVariation * 0.52');
+    expect(glsl.vs).toContain('float widthVariation = mix(0.52, 1.18, randomWidth)');
+    expect(glsl.vs).toContain('float macroPatch = clamp(');
+    expect(glsl.vs).toContain('float understory = mix(0.62, 1.0');
+    expect(wgsl.vs).toContain('let colorPatch = clamp(');
+    expect(wgsl.vs).toContain('shadoColor.rgb * mix(0.86, 1.12, randomTone)');
     expect(glsl.vs).toContain('vec2 leanDirection = vec2(cos(leanYaw), sin(leanYaw))');
     expect(glsl.vs).not.toContain('inst.foliageParams.x * 6.2831853');
 
@@ -135,9 +139,8 @@ describe('createShadoGrassPatch firstBlade', () => {
     const { NullEngine, Scene } = await import('@babylonjs/core');
     const engine = new NullEngine();
     const scene = new Scene(engine);
-    const { createShadoGrassPatch } = await import(
-      '../src/extensions/ShadoFoliageContainer/grass-blades'
-    );
+    const { createShadoGrassPatch } =
+      await import('../src/extensions/ShadoFoliageContainer/grass-blades');
     const patch = createShadoGrassPatch(scene, 'far', 4, 1, 12288);
     const bladeData = patch.getVerticesData('aGrassBlade')!;
     // First component of every vertex is the global blade index.
@@ -182,7 +185,6 @@ describe('packShadoGrassFieldData', () => {
     );
   });
 });
-
 
 /**
  * The shader's ground lookup, in TypeScript.
@@ -231,7 +233,7 @@ describe('grass ground continuity across cell borders', () => {
 
     const data = packShadoGrassFieldData(field, pairs.flat());
     let worst = 0;
-    pairs.forEach(([, ], pair) => {
+    pairs.forEach(([,], pair) => {
       for (let step = 0; step <= 8; step++) {
         const v = step / 8;
         // The same world point, reached as the right edge of the left cell and
@@ -256,7 +258,8 @@ describe('grass ground continuity across cell borders', () => {
       for (let row = 0; row < resolution; row++) {
         const leftEdge =
           field.heightField.minimumY[left]! +
-          (field.heightField.samples[left * perCell + row * resolution + resolution - 1]! / 0xffff) *
+          (field.heightField.samples[left * perCell + row * resolution + resolution - 1]! /
+            0xffff) *
             field.heightField.heightRange[left]!;
         const rightEdge =
           field.heightField.minimumY[right]! +

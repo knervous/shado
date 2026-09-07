@@ -209,6 +209,8 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     float randomStiffness = Shado_grassHash(bladeUV.yx + cellRand * 18.17);
     float randomVariation = Shado_grassHash(bladeUV + cellRand * 21.23);
     float randomPhase = Shado_grassHash(bladeUV.yx + cellRand.yx * 24.29);
+    float randomFamily = Shado_grassHash(bladeUV + cellRand.yx * 27.61);
+    float randomTone = Shado_grassHash(bladeUV.yx + cellRand * 31.37);
 
     // R2 low-discrepancy roots. Every prefix of this sequence is evenly spread,
     // so raising density adds blades into the gaps instead of reshuffling the
@@ -260,7 +262,19 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
       shadoFoliageRoot.z + randomV * cellSize
     );
 
-    float bladeHeight = uShadoGrassSize.x + randomSize * uShadoGrassSize.y;
+    // Smooth, world-space patches change stature and color across many roots
+    // without exposing the 24 m instance cells. A minority family stays short
+    // beneath the canopy, breaking the field's old single-height silhouette.
+    float macroPatch = clamp(
+      0.5
+        + sin(dot(root.xz, vec2(0.037, 0.021)) + 0.9) * 0.26
+        + sin(dot(root.xz, vec2(-0.019, 0.043)) - 1.7) * 0.24,
+      0.0,
+      1.0
+    );
+    float understory = mix(0.62, 1.0, smoothstep(0.08, 0.30, randomFamily));
+    float bladeHeight = (uShadoGrassSize.x + randomSize * uShadoGrassSize.y)
+      * mix(0.86, 1.12, macroPatch) * understory;
     float yaw = randomYaw * 6.2831853;
     vec2 facing = vec2(cos(yaw), sin(yaw));
     vec2 across = vec2(-facing.y, facing.x);
@@ -270,7 +284,7 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     float leanYaw = randomLeanYaw * 6.2831853;
     vec2 leanDirection = vec2(cos(leanYaw), sin(leanYaw));
     vec2 bend = leanDirection * mix(0.2, 1.0, randomLean)
-      * uShadoGrassSize.w * bladeHeight;
+      * mix(0.78, 1.18, macroPatch) * uShadoGrassSize.w * bladeHeight;
     vec3 p0 = vec3(0.0);
     vec3 p1 = vec3(bend.x * 0.10, bladeHeight * 0.34, bend.y * 0.10);
     vec3 p2 = vec3(bend.x * 0.42, bladeHeight * 0.72, bend.y * 0.42);
@@ -281,7 +295,8 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     vec3 tangent = normalize(curveTangent);
 
     float taper = 1.0 - smoothstep(0.55, 1.0, t);
-    float widthVariation = mix(0.65, 1.25, randomWidth);
+    float widthVariation = mix(0.52, 1.18, randomWidth)
+      * mix(1.08, 0.80, randomSize);
     float halfWidth = uShadoGrassSize.z * widthVariation * 0.5 * taper;
     vec3 bladeAcross = vec3(across.x, 0.0, across.y);
     vec3 bladePosition = root + centre + bladeAcross * side * halfWidth;
@@ -306,7 +321,15 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     shadoFoliageFade *= covered;
     shadoFoliagePhase = randomPhase;
     shadoFoliageStiffness = randomStiffness;
-    shadoFoliageVariation = randomVariation;
+    float colorPatch = clamp(
+      0.5
+        + sin(dot(root.xz, vec2(0.026, -0.033)) + 2.1) * 0.28
+        + sin(dot(root.xz, vec2(0.051, 0.017)) - 0.6) * 0.22,
+      0.0,
+      1.0
+    );
+    shadoFoliageVariation = clamp(randomVariation * 0.52 + colorPatch * 0.48, 0.0, 1.0);
+    shadoColor.rgb *= mix(0.86, 1.12, randomTone) * mix(0.94, 1.06, macroPatch);
     shadoFoliageTangent = curveTangent;
     shadoFoliageAcross = bladeAcross;
   }`,
@@ -354,6 +377,8 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     let randomStiffness = Shado_grassHash(bladeUV.yx + cellRand * 18.17);
     let randomVariation = Shado_grassHash(bladeUV + cellRand * 21.23);
     let randomPhase = Shado_grassHash(bladeUV.yx + cellRand.yx * 24.29);
+    let randomFamily = Shado_grassHash(bladeUV + cellRand.yx * 27.61);
+    let randomTone = Shado_grassHash(bladeUV.yx + cellRand * 31.37);
 
     let stratum = 0.62 / sqrt(max(uniforms.uShadoGrassShape.w, 1.0));
     let randomU = fract(
@@ -391,7 +416,16 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
       shadoFoliageRoot.z + randomV * cellSize
     );
 
-    let bladeHeight = uniforms.uShadoGrassSize.x + randomSize * uniforms.uShadoGrassSize.y;
+    let macroPatch = clamp(
+      0.5
+        + sin(dot(root.xz, vec2f(0.037, 0.021)) + 0.9) * 0.26
+        + sin(dot(root.xz, vec2f(-0.019, 0.043)) - 1.7) * 0.24,
+      0.0,
+      1.0
+    );
+    let understory = mix(0.62, 1.0, smoothstep(0.08, 0.30, randomFamily));
+    let bladeHeight = (uniforms.uShadoGrassSize.x + randomSize * uniforms.uShadoGrassSize.y)
+      * mix(0.86, 1.12, macroPatch) * understory;
     let yaw = randomYaw * 6.2831853;
     let facing = vec2f(cos(yaw), sin(yaw));
     let across = vec2f(-facing.y, facing.x);
@@ -399,7 +433,7 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     let leanYaw = randomLeanYaw * 6.2831853;
     let leanDirection = vec2f(cos(leanYaw), sin(leanYaw));
     let bend = leanDirection * mix(0.2, 1.0, randomLean)
-      * uniforms.uShadoGrassSize.w * bladeHeight;
+      * mix(0.78, 1.18, macroPatch) * uniforms.uShadoGrassSize.w * bladeHeight;
     let p0 = vec3f(0.0);
     let p1 = vec3f(bend.x * 0.10, bladeHeight * 0.34, bend.y * 0.10);
     let p2 = vec3f(bend.x * 0.42, bladeHeight * 0.72, bend.y * 0.42);
@@ -410,7 +444,8 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     let tangent = normalize(curveTangent);
 
     let taper = 1.0 - smoothstep(0.55, 1.0, t);
-    let widthVariation = mix(0.65, 1.25, randomWidth);
+    let widthVariation = mix(0.52, 1.18, randomWidth)
+      * mix(1.08, 0.80, randomSize);
     let halfWidth = uniforms.uShadoGrassSize.z * widthVariation * 0.5 * taper;
     let bladeAcross = vec3f(across.x, 0.0, across.y);
     var bladePosition = root + centre + bladeAcross * side * halfWidth;
@@ -433,7 +468,18 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     shadoFoliageFade = shadoFoliageFade * covered;
     shadoFoliagePhase = randomPhase;
     shadoFoliageStiffness = randomStiffness;
-    shadoFoliageVariation = randomVariation;
+    let colorPatch = clamp(
+      0.5
+        + sin(dot(root.xz, vec2f(0.026, -0.033)) + 2.1) * 0.28
+        + sin(dot(root.xz, vec2f(0.051, 0.017)) - 0.6) * 0.22,
+      0.0,
+      1.0
+    );
+    shadoFoliageVariation = clamp(randomVariation * 0.52 + colorPatch * 0.48, 0.0, 1.0);
+    shadoColor = vec4f(
+      shadoColor.rgb * mix(0.86, 1.12, randomTone) * mix(0.94, 1.06, macroPatch),
+      shadoColor.a
+    );
     shadoFoliageTangent = curveTangent;
     shadoFoliageAcross = bladeAcross;
   }`,
@@ -629,9 +675,7 @@ export function packShadoGrassFieldData(
   const width = GRASS_FIELD_TEXELS_PER_CELL;
   const height = Math.max(1, cellIndices.length);
   if (out && out.length < width * height * 4) {
-    throw new Error(
-      `Grass field buffer holds ${out.length / (width * 4)} rows, needs ${height}`
-    );
+    throw new Error(`Grass field buffer holds ${out.length / (width * 4)} rows, needs ${height}`);
   }
   const data = out ?? new Float32Array(width * height * 4);
   const coverageWords = field.coverage.wordsPerCell;
