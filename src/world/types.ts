@@ -391,6 +391,68 @@ export type ShadoWorldGeometryAuthoring = {
   patches: ShadoWorldGeometryPatch[];
 };
 
+/**
+ * An authored region of participating media: a fog bank with bounds.
+ *
+ * The runtime medium was one global set of parameters per zone, which is the
+ * right default for an outdoor world under one sky and useless for "thick fog
+ * on the church grounds and nowhere else". A volume raises (or lowers) the
+ * medium inside its shape plus its feather, and leaves the rest of the zone at
+ * the zone default -- which stays the volume of last resort, so a world with
+ * no `mediaVolumes` renders exactly as it did before this existed.
+ *
+ * Composition is by `priority` ascending, then by `id`, so overlapping volumes
+ * produce the same result whatever order they were authored in. Each volume in
+ * turn blends the medium toward its own parameters by its coverage weight;
+ * within its solid interior the weight is 1 and it simply wins.
+ *
+ * Two runtime limits bound what a volume can promise, and neither is a
+ * property of the volume: the froxel grid reaches about 400 world units from
+ * the camera, and generated `ShadoMaterial` surfaces -- foliage, grass blades,
+ * actors -- do not sample it. See M02/M03 in `docs/astra-audit.md`.
+ */
+export type ShadoWorldMediaVolume = {
+  id: string;
+  /** Author-facing label; never read by the runtime. */
+  label?: string;
+  enabled?: boolean;
+  shape: 'box' | 'sphere';
+  /** Centre in final Babylon world space, the same frame as a point light. */
+  position: WorldVec3;
+  /** Box half-extents. A sphere uses `size[0]` as its radius. */
+  size: WorldVec3;
+  /** Rotation about Y, degrees. Boxes only. */
+  yaw?: number;
+  /** Extinction per world unit at `heightReference`, inside the volume. */
+  density: number;
+  /** Fraction of extinction that scatters rather than absorbs. */
+  albedo?: number;
+  /** Henyey-Greenstein anisotropy; positive is forward scattering. */
+  anisotropy?: number;
+  /**
+   * Scattering colour. Omitted means inherit the zone's fog colour, which is
+   * what keeps an unauthored tint moving with the hour instead of freezing a
+   * midday blue into a dusk scene.
+   */
+  color?: WorldVec3;
+  /** e-folding height above `heightReference` inside the volume. */
+  heightFalloff?: number;
+  /** World Y the density is quoted at. Defaults to the volume's floor. */
+  heightReference?: number;
+  /** Distance outside the shape over which coverage falls 1 -> 0. */
+  feather?: number;
+  /** Higher composes later, and therefore wins where volumes overlap. */
+  priority?: number;
+  /**
+   * Hours the volume is active, `[from, to]` on a 24-hour clock; `from > to`
+   * wraps through midnight. Omitted is always. Edges cross-fade over
+   * `hoursFeather`.
+   */
+  hours?: [number, number];
+  hoursFeather?: number;
+  metadata?: Record<string, unknown>;
+};
+
 export type ShadoWorldEnvironmentAuthoring = {
   sky: {
     mode: 'solid' | 'procedural' | 'texture';
@@ -412,6 +474,8 @@ export type ShadoWorldEnvironmentAuthoring = {
   water: { enabled: boolean; level: number; material?: string; reflections: boolean };
   audioEmitters: Array<{ id: string; source: string; position: WorldVec3; range: number; volume: number; loop: boolean; metadata: Record<string, unknown> }>;
   reflectionProbes: Array<{ id: string; position: WorldVec3; size: WorldVec3; resolution: number; refresh: 'bake' | 'once' | 'runtime'; metadata: Record<string, unknown> }>;
+  /** Authored participating-media volumes. Absent or empty is the zone default alone. */
+  mediaVolumes?: ShadoWorldMediaVolume[];
 };
 
 export type ShadoWorldPerformanceBudgets = {

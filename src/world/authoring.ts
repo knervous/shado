@@ -33,6 +33,7 @@ export const DEFAULT_SHADO_WORLD_ENVIRONMENT: ShadoWorldEnvironmentAuthoring = {
   water: { enabled: false, level: 0, reflections: true },
   audioEmitters: [],
   reflectionProbes: [],
+  mediaVolumes: [],
 };
 
 export const DEFAULT_SHADO_WORLD_PERFORMANCE_BUDGETS = {
@@ -151,7 +152,48 @@ function validateEnvironment(document: ShadoWorldAuthoringDocument): void {
   const ids = new Set<string>();
   for (const emitter of environment.audioEmitters) { if (!emitter.id?.trim() || ids.has(emitter.id) || !emitter.source?.trim()) throw new Error('World audio emitters require unique IDs and sources'); ids.add(emitter.id); validateVec3(emitter.position, `Audio emitter '${emitter.id}' position`, false); positive(emitter.range, `Audio emitter '${emitter.id}' range`); if (!Number.isFinite(emitter.volume) || emitter.volume < 0) throw new Error(`Audio emitter '${emitter.id}' volume must be non-negative`); validateMetadata(emitter.metadata, `Audio emitter '${emitter.id}'`); }
   ids.clear();
+  validateMediaVolumes(environment);
+  ids.clear();
   for (const probe of environment.reflectionProbes) { if (!probe.id?.trim() || ids.has(probe.id)) throw new Error('World reflection probes require unique IDs'); ids.add(probe.id); validateVec3(probe.position, `Reflection probe '${probe.id}' position`, false); validateVec3(probe.size, `Reflection probe '${probe.id}' size`, true); positive(probe.resolution, `Reflection probe '${probe.id}' resolution`); validateMetadata(probe.metadata, `Reflection probe '${probe.id}'`); }
+}
+
+/**
+ * Authored fog banks.
+ *
+ * Validated here rather than trusted at the runtime, because a volume with a
+ * non-finite density does not fail loudly on the GPU -- it makes the froxel
+ * grid NaN and the world renders black with no error anywhere.
+ */
+function validateMediaVolumes(environment: ShadoWorldEnvironmentAuthoring): void {
+  const volumes = environment.mediaVolumes;
+  if (volumes === undefined) return;
+  if (!Array.isArray(volumes)) throw new Error('World media volumes must be an array');
+  const seen = new Set<string>();
+  for (const volume of volumes) {
+    if (!volume?.id?.trim() || seen.has(volume.id)) throw new Error('World media volumes require unique IDs');
+    seen.add(volume.id);
+    if (volume.shape !== 'box' && volume.shape !== 'sphere') throw new Error(`Media volume '${volume.id}' shape must be box or sphere`);
+    validateVec3(volume.position, `Media volume '${volume.id}' position`, false);
+    validateVec3(volume.size, `Media volume '${volume.id}' size`, true);
+    if (volume.color !== undefined) validateVec3(volume.color, `Media volume '${volume.id}' color`, false);
+    if (!Number.isFinite(volume.density) || volume.density < 0) throw new Error(`Media volume '${volume.id}' density must be non-negative`);
+    for (const [name, value] of Object.entries({
+      yaw: volume.yaw, albedo: volume.albedo, anisotropy: volume.anisotropy,
+      heightFalloff: volume.heightFalloff, heightReference: volume.heightReference,
+      feather: volume.feather, priority: volume.priority, hoursFeather: volume.hoursFeather,
+    })) {
+      if (value !== undefined && !Number.isFinite(value)) throw new Error(`Media volume '${volume.id}' ${name} must be finite`);
+    }
+    if (volume.albedo !== undefined && (volume.albedo < 0 || volume.albedo > 1)) throw new Error(`Media volume '${volume.id}' albedo must be within 0..1`);
+    if (volume.anisotropy !== undefined && Math.abs(volume.anisotropy) >= 1) throw new Error(`Media volume '${volume.id}' anisotropy must be within -1..1`);
+    if (volume.feather !== undefined && volume.feather < 0) throw new Error(`Media volume '${volume.id}' feather must be non-negative`);
+    if (volume.hours !== undefined) {
+      if (!Array.isArray(volume.hours) || volume.hours.length !== 2 || volume.hours.some(hour => !Number.isFinite(hour) || hour < 0 || hour > 24)) {
+        throw new Error(`Media volume '${volume.id}' hours must be two hours within 0..24`);
+      }
+    }
+    if (volume.metadata !== undefined) validateMetadata(volume.metadata, `Media volume '${volume.id}'`);
+  }
 }
 
 function validatePerformanceBudgets(document: ShadoWorldAuthoringDocument): void {
