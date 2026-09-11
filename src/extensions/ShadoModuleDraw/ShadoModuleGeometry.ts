@@ -23,6 +23,8 @@ export type ShadoModuleMesh = {
   flipFaces(flipNormals?: boolean): void;
   thinInstanceRegisterAttribute(kind: string, stride: number): void;
   thinInstanceAdd(matrix: any, refresh?: boolean): number;
+  /** Read back for `ShadoModuleDrawSet.addModule`, which has to catch a late module up. */
+  thinInstanceGetWorldMatrices(): any[];
   thinInstanceSetMatrixAt(index: number, matrix: any, refresh?: boolean): void;
   dispose(): void;
 };

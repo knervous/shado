@@ -58,12 +58,16 @@ export class ShadoModuleDrawSet {
   private committed: Uint32Array[] = [];
   private committedCounts: number[] = [];
   private stats: ShadoModuleDrawStats;
+  private readonly engine: any;
+  /** Replayed onto a module added after construction. */
+  private readonly attributes: { kind: string; stride: number }[] = [];
 
   /**
    * @param engine  Babylon engine, for the selections' GPU mirrors.
    * @param modules Geometry from `splitMeshesIntoModules`, or any equivalent.
    */
   constructor(engine: any, modules: readonly ShadoModuleGeometry[]) {
+    this.engine = engine;
     // A single module owns the whole model, so every visible actor draws it and
     // there is no subset to publish. Skipping the selection keeps that case
     // byte-for-byte the supermesh path it replaces.
@@ -110,9 +114,72 @@ export class ShadoModuleDrawSet {
 
   /** Registers a thin-instance attribute on every module mesh. */
   public registerThinInstanceAttribute(kind: string, stride: number): void {
+    this.attributes.push({ kind, stride });
     for (const module of this._modules) {
       module.mesh.thinInstanceRegisterAttribute(kind, stride);
     }
+  }
+
+  /**
+   * Adds a module to a set that is already running, and catches it up.
+   *
+   * For a module whose actors are rare — a variant most of a population never
+   * wears — building it with everything else means paying for its material, its
+   * shader compile and its buckets in every world, including the ones it never
+   * appears in. Added here instead, it costs nothing until something asks.
+   *
+   * Two things have to be trued up, and both are easy to miss. The new mesh
+   * needs every thin instance the set has already handed out, because the
+   * instance span is the draw-count adapter and GPU picking assigns ids over
+   * it; and the attributes registered before it existed have to be replayed
+   * onto it.
+   *
+   * **A set that was unsplit becomes split.** Its one module had no selection,
+   * because a lone module owns everything and draws every visible actor — which
+   * is exactly wrong once a second module can claim some of them. It is given
+   * one here, and the caller must bind that selection into the module's
+   * material and wherever it reads `selection` per draw, or the original module
+   * will go on drawing the actors this new one just took. `wasSplit` on the
+   * result says whether that retrofit happened.
+   */
+  public addModule(geometry: ShadoModuleGeometry): {
+    module: ShadoModuleDraw;
+    index: number;
+    wasSplit: boolean;
+  } {
+    const wasSplit = this.isSplit;
+    for (const attribute of this.attributes) {
+      geometry.mesh.thinInstanceRegisterAttribute(attribute.kind, attribute.stride);
+    }
+    const existing = this._modules[0];
+    if (existing) {
+      for (const matrix of existing.mesh.thinInstanceGetWorldMatrices()) {
+        geometry.mesh.thinInstanceAdd(matrix, false);
+      }
+    }
+    const module: ShadoModuleDraw = {
+      key: geometry.key,
+      mesh: geometry.mesh,
+      sourceIndices: geometry.sourceIndices,
+      vertexCount: geometry.mesh.getTotalVertices() || 0,
+      selection: new ShadoInstanceDrawSelection(this.engine),
+      drawnCount: 0,
+    };
+    // Nothing has claimed it yet, and an unseeded bucket must not draw the
+    // whole crowd for one frame before the next refresh empties it.
+    module.mesh.isVisible = false;
+    module.selection!.commit();
+    this._modules.push(module);
+    this.scratch.push(new Uint32Array(0));
+    this.committed.push(new Uint32Array(0));
+    this.committedCounts.push(-1);
+    if (!wasSplit && existing && !existing.selection) {
+      existing.selection = new ShadoInstanceDrawSelection(this.engine);
+      existing.selection.commit();
+      this.committedCounts[0] = -1;
+    }
+    this.stats.moduleCount = this._modules.length;
+    return { module, index: this._modules.length - 1, wasSplit };
   }
 
   /**
