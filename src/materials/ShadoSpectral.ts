@@ -3,40 +3,46 @@
  *
  * A hand-written fragment transform rather than a generated one, paired
  * GLSL/WGSL, in the same shape as the world light field beside it — an
- * application splices these chunks into its own shader and calls the two
- * entry points. It lives in Shado because both halves must stay identical and
- * because nothing about it is specific to one game's material: given a world
- * position, a normal, a height up the body and a colour, it decides how much of
- * this pixel survives and what is left of it.
+ * application splices these chunks into its own shader and calls the entry
+ * points. It lives in Shado because both halves must stay identical and because
+ * nothing about it is specific to one game's material: given a world position,
+ * a height up the body and a colour, it decides how solid this pixel is and
+ * what is left of it.
  *
- * WHY A DISSOLVE AND NOT ALPHA. A model drawn as thin instances is one batch
- * through one material, so transparency cannot be a per-instance property:
- * turning blending on turns it on for every instance, moves the whole batch into
- * the transparent pass, and thin instances cannot sort against each other inside
- * it. Presence is therefore spent as a dissolve the fragment discards against,
- * which keeps a spectral body in the opaque pass with depth writes intact —
- * nameplates, outlines and picking all keep working, and nothing needs sorting.
+ * `shadoSpectralDensity` returns a coverage, and a host spends it one of two
+ * ways:
  *
- * WHAT MAKES IT READ AS A GHOST RATHER THAN AS A BROKEN MESH. Three things, and
- * the first version of this had none of them:
+ *  - **As alpha**, if it can afford a second blended draw for its spectral
+ *    instances. This is the good one, and it is what Eltania does: blending and
+ *    depth writing are pipeline state rather than per-instance state, so the
+ *    dead are submitted as their own draw over the same geometry, with blending
+ *    on and depth writes off, while the living keep the solid pipeline they
+ *    always had. Nothing is duplicated but a mesh and a matrix buffer.
+ *  - **Against `shadoSpectralDither`**, if it cannot. A stochastic screen-door
+ *    keeps a spectral body in the opaque pass with depth writes intact, which
+ *    costs nothing to sort — but it is visibly grain, and at low coverage it is
+ *    visibly *patterned* grain, which reads as a rendering fault rather than as
+ *    a ghost. Reach for it only when a second draw is genuinely out of reach.
  *
- *  1. **The threshold is fine grain, not a grid.** An ordered Bayer matrix is
- *     the cheapest dither and the worst-looking one here: its 4x4 lattice is
- *     visible as blocks, and blocks read as a rendering fault rather than as
- *     mist. Interleaved gradient noise costs two multiplies and scatters the
- *     same density as film grain.
- *  2. **The density moves, in world space.** A static threshold makes a body
- *     look stencilled. A drifting three-dimensional noise field makes the same
- *     body look like it is being carried off in wisps, and because the field is
- *     in world space rather than screen space, the wisps stay on the body as the
- *     camera moves and flow through it as it walks.
- *  3. **It dissolves from the feet up.** Almost every convincing ghost is solid
- *     at the head and gone at the hem. This also removes the single worst
- *     artefact of a uniform dissolve: thin geometry — fingers, boots, a nose —
- *     keeps just enough coverage to read as spiky, pointed fragments.
+ * WHAT MAKES IT READ AS A GHOST RATHER THAN AS A BROKEN MESH. The coverage
+ * itself, however it is spent:
+ *
+ *  1. **It moves, in world space.** A static coverage makes a body look
+ *     stencilled. A drifting three-dimensional noise field, stretched tall and
+ *     narrow so its features are vertical streaks, makes the same body look
+ *     like it is being carried off in wisps — and because the field is in world
+ *     space rather than screen space, the wisps stay on the body as the camera
+ *     moves and flow through it as it walks.
+ *  2. **It thins from the hem upward.** Almost every convincing ghost is solid
+ *     at the head and gone at the feet. This also removes the worst artefact of
+ *     an even fade: thin geometry — fingers, boots, a nose — keeping just
+ *     enough coverage to read as spiky, pointed fragments.
+ *  3. **The same field shades what survives.** One sample decides both how
+ *     solid a pixel is and how bright it is, so a spectral body has internal
+ *     structure instead of reading as one flat wash.
  *
  * The silhouette is only *slightly* firmed up. Adding a strong edge term is the
- * obvious way to keep a dissolving body legible and it is what makes it look
+ * obvious way to keep a fading body legible and it is what makes it look
  * pointy, because the term peaks exactly on the thin geometry that is already
  * over-represented. It is kept low and multiplied by presence so a faint body
  * does not get a hard outline it has not earned.
@@ -58,9 +64,11 @@ export const SHADO_SPECTRAL_UNIFORMS = ['uShadoSpectralTime'] as const;
  * the surviving pixels are bright exactly where the body is densest.
  */
 export const SHADO_SPECTRAL_WGSL = /* wgsl */ `
+/** Screen-door threshold, for a host with no blended draw to spend alpha in. */
 fn shadoSpectralDither(fragment: vec2f) -> f32 {
-  // Interleaved gradient noise. Low-discrepancy, so a given density lands as an
-  // even scatter, and fine enough to read as grain instead of as a pattern.
+  // Interleaved gradient noise: low-discrepancy, so a coverage lands as an even
+  // scatter rather than as the 4x4 lattice an ordered Bayer matrix leaves. It
+  // is still visibly a pattern at low coverage — see the header.
   return fract(52.9829189 * fract(dot(fragment, vec2f(0.06711056, 0.00583715))));
 }
 
@@ -101,6 +109,7 @@ fn shadoSpectralWisp(worldPosition: vec3f, time: f32) -> f32 {
   return clamp(coarse * 0.7 + fine * 0.3, 0.0, 1.0);
 }
 
+/** How solid this pixel is, 0..1: an alpha, or a screen-door threshold. */
 fn shadoSpectralDensity(
   presence: f32,
   bodyHeight: f32,
@@ -144,6 +153,7 @@ fn shadoSpectralSurface(
 
 /** The fragment transform, WebGL2. Mirrors the WGSL above line for line. */
 export const SHADO_SPECTRAL_GLSL = /* glsl */ `
+/** Screen-door threshold — see the WGSL twin. */
 float shadoSpectralDither(vec2 fragment) {
   return fract(52.9829189 * fract(dot(fragment, vec2(0.06711056, 0.00583715))));
 }
