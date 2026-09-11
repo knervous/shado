@@ -577,6 +577,20 @@ export type ShadoWorldEnvironmentAuthoring = {
     end: number;
   };
   ambient: { color: WorldVec3; intensity: number };
+  /**
+   * The zone has no sky over it, so nothing may light it as though it had.
+   *
+   * The sky rig gives every zone a hemispheric fill and a directional sun with
+   * a 6% floor, which is right outdoors at night and wrong four storeys
+   * underground: a fill from above lights vertical walls and leaves
+   * downward-facing vaults dark, so a sealed crypt rendered with pale cold
+   * walls under black vaults and read as a film set rather than a tomb. The
+   * authored ambient could not counteract it — taking that to 0.02 changed
+   * nothing, which is how the sky rig was found to be the source.
+   *
+   * Absent means outdoor, so every existing zone keeps the sky it has.
+   */
+  interior?: boolean;
   weather: { preset: string; intensity: number; wind: WorldVec3 };
   timeOfDay: { hour: number; cycleSeconds: number; running: boolean };
   water: { enabled: boolean; level: number; material?: string; reflections: boolean };
