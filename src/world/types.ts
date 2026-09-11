@@ -392,6 +392,55 @@ export type ShadoWorldGeometryAuthoring = {
 };
 
 /**
+ * The zone's global participating medium — the air everywhere a
+ * {@link ShadoWorldMediaVolume} does not override.
+ *
+ * Every field is optional and falls back to the renderer's own default, so a
+ * world that authors none behaves exactly as it did before this existed. Grid
+ * dimensions are deliberately absent: they are a performance budget the
+ * runtime owns, not a look.
+ */
+export type ShadoWorldVolumetricMedium = {
+  /** False disables the froxel volume for this zone entirely. */
+  enabled?: boolean;
+  /** Extinction per world unit at `heightReference`. */
+  density?: number;
+  /** e-folding height of the medium above `heightReference`. */
+  heightFalloff?: number;
+  /** World Y the density is quoted at. */
+  heightReference?: number;
+  /** Fraction of extinction that scatters rather than absorbs. */
+  albedo?: number;
+  /** Henyey-Greenstein anisotropy; positive is forward scattering. */
+  anisotropy?: number;
+  /** Depth of the animated density variation; 0 is a homogeneous medium. */
+  noiseAmount?: number;
+  /**
+   * World-space frequency of that variation.
+   *
+   * This is the dial between fog that *drifts* and fog that *pulses*. At a
+   * low frequency one noise cell is wider than the view, so the whole medium
+   * brightens and dims together and reads as breathing; features small
+   * enough to pass through the frame read as movement.
+   */
+  noiseScale?: number;
+  /** How fast the variation drifts, world units per second. */
+  windSpeed?: number;
+  /** Sky/multiscatter in-scatter, in units of the medium's own colour. */
+  ambientMultiplier?: number;
+  /** Nearest view depth the volume covers. */
+  near?: number;
+  /** Farthest view depth the volume covers. */
+  far?: number;
+  /** Depth distribution exponent; 1 is uniform. */
+  depthPower?: number;
+  /** Weight of the new frame in the temporal blend; 1 disables reprojection. */
+  temporalBlend?: number;
+  /** Overall dial on the composite. 0 disables the whole system. */
+  strength?: number;
+};
+
+/**
  * An authored region of participating media: a fog bank with bounds.
  *
  * The runtime medium was one global set of parameters per zone, which is the
@@ -476,6 +525,8 @@ export type ShadoWorldEnvironmentAuthoring = {
   reflectionProbes: Array<{ id: string; position: WorldVec3; size: WorldVec3; resolution: number; refresh: 'bake' | 'once' | 'runtime'; metadata: Record<string, unknown> }>;
   /** Authored participating-media volumes. Absent or empty is the zone default alone. */
   mediaVolumes?: ShadoWorldMediaVolume[];
+  /** The zone's global medium. Absent leaves every renderer default in place. */
+  volumetric?: ShadoWorldVolumetricMedium;
 };
 
 export type ShadoWorldPerformanceBudgets = {

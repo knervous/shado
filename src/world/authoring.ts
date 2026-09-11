@@ -153,6 +153,7 @@ function validateEnvironment(document: ShadoWorldAuthoringDocument): void {
   for (const emitter of environment.audioEmitters) { if (!emitter.id?.trim() || ids.has(emitter.id) || !emitter.source?.trim()) throw new Error('World audio emitters require unique IDs and sources'); ids.add(emitter.id); validateVec3(emitter.position, `Audio emitter '${emitter.id}' position`, false); positive(emitter.range, `Audio emitter '${emitter.id}' range`); if (!Number.isFinite(emitter.volume) || emitter.volume < 0) throw new Error(`Audio emitter '${emitter.id}' volume must be non-negative`); validateMetadata(emitter.metadata, `Audio emitter '${emitter.id}'`); }
   ids.clear();
   validateMediaVolumes(environment);
+  validateVolumetricMedium(environment);
   ids.clear();
   for (const probe of environment.reflectionProbes) { if (!probe.id?.trim() || ids.has(probe.id)) throw new Error('World reflection probes require unique IDs'); ids.add(probe.id); validateVec3(probe.position, `Reflection probe '${probe.id}' position`, false); validateVec3(probe.size, `Reflection probe '${probe.id}' size`, true); positive(probe.resolution, `Reflection probe '${probe.id}' resolution`); validateMetadata(probe.metadata, `Reflection probe '${probe.id}'`); }
 }
@@ -193,6 +194,45 @@ function validateMediaVolumes(environment: ShadoWorldEnvironmentAuthoring): void
       }
     }
     if (volume.metadata !== undefined) validateMetadata(volume.metadata, `Media volume '${volume.id}'`);
+  }
+}
+
+/**
+ * The zone's global medium.
+ *
+ * Bounded rather than merely finite, because these are the values a tuning
+ * UI writes: a slider that can reach an albedo of 400 or a negative density
+ * is a slider that can black out a zone, and the failure arrives as a NaN in
+ * a compute pass with no name on it.
+ */
+function validateVolumetricMedium(environment: ShadoWorldEnvironmentAuthoring): void {
+  const medium = environment.volumetric;
+  if (medium === undefined) return;
+  if (!medium || typeof medium !== 'object' || Array.isArray(medium)) throw new Error('World volumetric medium must be an object');
+  const range = (name: keyof typeof medium, low: number, high: number): void => {
+    const value = medium[name];
+    if (value === undefined) return;
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < low || value > high) {
+      throw new Error(`World volumetric ${String(name)} must be a number within ${low}..${high}`);
+    }
+  };
+  if (medium.enabled !== undefined && typeof medium.enabled !== 'boolean') throw new Error('World volumetric enabled must be a boolean');
+  range('density', 0, 1);
+  range('heightFalloff', 0, 1);
+  range('heightReference', -100_000, 100_000);
+  range('albedo', 0, 1);
+  range('anisotropy', -0.95, 0.95);
+  range('noiseAmount', 0, 1);
+  range('noiseScale', 0, 1);
+  range('windSpeed', 0, 1_000);
+  range('ambientMultiplier', 0, 16);
+  range('near', 0.01, 1_000);
+  range('far', 1, 20_000);
+  range('depthPower', 1, 8);
+  range('temporalBlend', 0.01, 1);
+  range('strength', 0, 1);
+  if (medium.near !== undefined && medium.far !== undefined && medium.far <= medium.near) {
+    throw new Error('World volumetric far must be beyond near');
   }
 }
 
