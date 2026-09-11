@@ -1,6 +1,8 @@
 import type { EltaniaTerrainSurfaceSpec } from './terrain-compile';
 
 export type WorldVec3 = [number, number, number];
+/** Linear RGBA, for anything that carries an alpha alongside a colour. */
+export type WorldVec4 = [number, number, number, number];
 
 export const SHADO_WORLD_AUTHORING_EXTRAS_KEY = 'EXT_shado_world_authoring';
 
@@ -392,6 +394,63 @@ export type ShadoWorldGeometryAuthoring = {
 };
 
 /**
+ * An authored ambient particle emitter: motes, embers, drifting ash.
+ *
+ * Deliberately close to what a Babylon `ParticleSystem` wants, because the
+ * runtime's job here is to place and gate one, not to invent a second
+ * animation language on top of it. What is NOT a passthrough is the gating:
+ * `range`, `hours` and the viewer's own particle setting decide whether a
+ * system exists at all, and an author who cannot see those in the schema will
+ * write a zone that runs forty emitters in a town nobody is standing in.
+ *
+ * Sizes and distances are world units, times are seconds.
+ */
+export type ShadoWorldParticleEmitter = {
+  id: string;
+  label?: string;
+  enabled?: boolean;
+  /** Centre of the emission box, in final Babylon world space. */
+  position: WorldVec3;
+  /** Half extents of the box particles are born in. */
+  size: WorldVec3;
+  /** Texture URL. Omitted uses the shared flare the rest of the game uses. */
+  texture?: string;
+  /** Live particles at once. The runtime clamps this; see the fx module. */
+  capacity: number;
+  /** Particles born per second. */
+  emitRate: number;
+  /** rgba at birth, at birth for the second colour, and at death. */
+  color1: WorldVec4;
+  color2: WorldVec4;
+  colorDead: WorldVec4;
+  minSize: number;
+  maxSize: number;
+  minLifeTime: number;
+  maxLifeTime: number;
+  /** The two corners of the initial velocity cone. */
+  direction1: WorldVec3;
+  direction2: WorldVec3;
+  minEmitPower: number;
+  maxEmitPower: number;
+  /** Constant acceleration; the dial between motes and falling ash. */
+  gravity?: WorldVec3;
+  /** Simulation rate. Lower is slower and smoother. */
+  updateSpeed?: number;
+  /** Additive reads as light, standard as matter. */
+  blendMode?: 'add' | 'standard';
+  /**
+   * How far away the emitter still runs.
+   *
+   * Ambient particles are a near-field effect and a zone may author many, so
+   * each one sleeps until the camera is inside this radius of its box.
+   */
+  range: number;
+  /** Active hours, `[from, to]`, wrapping through midnight. Omitted is always. */
+  hours?: [number, number];
+  metadata?: Record<string, unknown>;
+};
+
+/**
  * The zone's global participating medium — the air everywhere a
  * {@link ShadoWorldMediaVolume} does not override.
  *
@@ -527,6 +586,8 @@ export type ShadoWorldEnvironmentAuthoring = {
   mediaVolumes?: ShadoWorldMediaVolume[];
   /** The zone's global medium. Absent leaves every renderer default in place. */
   volumetric?: ShadoWorldVolumetricMedium;
+  /** Authored ambient particle emitters. */
+  particleEmitters?: ShadoWorldParticleEmitter[];
 };
 
 export type ShadoWorldPerformanceBudgets = {

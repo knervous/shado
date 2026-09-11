@@ -34,6 +34,7 @@ export const DEFAULT_SHADO_WORLD_ENVIRONMENT: ShadoWorldEnvironmentAuthoring = {
   audioEmitters: [],
   reflectionProbes: [],
   mediaVolumes: [],
+  particleEmitters: [],
 };
 
 export const DEFAULT_SHADO_WORLD_PERFORMANCE_BUDGETS = {
@@ -154,6 +155,7 @@ function validateEnvironment(document: ShadoWorldAuthoringDocument): void {
   ids.clear();
   validateMediaVolumes(environment);
   validateVolumetricMedium(environment);
+  validateParticleEmitters(environment);
   ids.clear();
   for (const probe of environment.reflectionProbes) { if (!probe.id?.trim() || ids.has(probe.id)) throw new Error('World reflection probes require unique IDs'); ids.add(probe.id); validateVec3(probe.position, `Reflection probe '${probe.id}' position`, false); validateVec3(probe.size, `Reflection probe '${probe.id}' size`, true); positive(probe.resolution, `Reflection probe '${probe.id}' resolution`); validateMetadata(probe.metadata, `Reflection probe '${probe.id}'`); }
 }
@@ -233,6 +235,66 @@ function validateVolumetricMedium(environment: ShadoWorldEnvironmentAuthoring): 
   range('strength', 0, 1);
   if (medium.near !== undefined && medium.far !== undefined && medium.far <= medium.near) {
     throw new Error('World volumetric far must be beyond near');
+  }
+}
+
+/**
+ * Ambient particle emitters.
+ *
+ * The caps are the point. A particle system is the one authored thing that
+ * costs frame time in proportion to a number someone typed, and the numbers
+ * that hurt -- capacity and emit rate -- are exactly the ones that look
+ * harmless in a field. Bounded here so a zone cannot be published with a
+ * hundred thousand live particles in it, and bounded again at the runtime,
+ * which is the half that protects a player from a zone already shipped.
+ */
+function validateParticleEmitters(environment: ShadoWorldEnvironmentAuthoring): void {
+  const emitters = environment.particleEmitters;
+  if (emitters === undefined) return;
+  if (!Array.isArray(emitters)) throw new Error('World particle emitters must be an array');
+  const seen = new Set<string>();
+  for (const emitter of emitters) {
+    if (!emitter?.id?.trim() || seen.has(emitter.id)) throw new Error('World particle emitters require unique IDs');
+    seen.add(emitter.id);
+    const label = `Particle emitter '${emitter.id}'`;
+    validateVec3(emitter.position, `${label} position`, false);
+    validateVec3(emitter.size, `${label} size`, false);
+    validateVec3(emitter.direction1, `${label} direction1`, false);
+    validateVec3(emitter.direction2, `${label} direction2`, false);
+    if (emitter.gravity !== undefined) validateVec3(emitter.gravity, `${label} gravity`, false);
+    for (const channel of ['color1', 'color2', 'colorDead'] as const) {
+      const value = emitter[channel];
+      if (!Array.isArray(value) || value.length !== 4 || value.some(component => !Number.isFinite(component) || component < 0 || component > 1)) {
+        throw new Error(`${label} ${channel} must be four channels within 0..1`);
+      }
+    }
+    const bounded = (name: string, value: unknown, low: number, high: number): void => {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < low || value > high) {
+        throw new Error(`${label} ${name} must be a number within ${low}..${high}`);
+      }
+    };
+    bounded('capacity', emitter.capacity, 1, 20_000);
+    bounded('emitRate', emitter.emitRate, 0, 10_000);
+    bounded('minSize', emitter.minSize, 0, 1_000);
+    bounded('maxSize', emitter.maxSize, 0, 1_000);
+    bounded('minLifeTime', emitter.minLifeTime, 0.01, 600);
+    bounded('maxLifeTime', emitter.maxLifeTime, 0.01, 600);
+    bounded('minEmitPower', emitter.minEmitPower, -1_000, 1_000);
+    bounded('maxEmitPower', emitter.maxEmitPower, -1_000, 1_000);
+    bounded('range', emitter.range, 1, 20_000);
+    if (emitter.updateSpeed !== undefined) bounded('updateSpeed', emitter.updateSpeed, 0.0001, 1);
+    if (emitter.maxSize < emitter.minSize) throw new Error(`${label} maxSize must be at least minSize`);
+    if (emitter.maxLifeTime < emitter.minLifeTime) throw new Error(`${label} maxLifeTime must be at least minLifeTime`);
+    if (emitter.blendMode !== undefined && emitter.blendMode !== 'add' && emitter.blendMode !== 'standard') {
+      throw new Error(`${label} blendMode must be add or standard`);
+    }
+    if (emitter.texture !== undefined && !emitter.texture.trim()) throw new Error(`${label} texture must be a non-empty URL`);
+    if (emitter.hours !== undefined) {
+      if (!Array.isArray(emitter.hours) || emitter.hours.length !== 2 || emitter.hours.some(hour => !Number.isFinite(hour) || hour < 0 || hour > 24)) {
+        throw new Error(`${label} hours must be two hours within 0..24`);
+      }
+    }
+    if (emitter.metadata !== undefined) validateMetadata(emitter.metadata, label);
   }
 }
 
