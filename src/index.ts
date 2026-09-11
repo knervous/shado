@@ -34,6 +34,7 @@ export * from './extensions';
 // Materials
 export * from './materials/ShadoMaterial';
 export * from './materials/ShadoWorldLightBuffer';
+export * from './materials/ShadoSpectral';
 
 export * from './babylon';
 export * from './render';
