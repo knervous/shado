@@ -5,6 +5,7 @@ import {
   type ShadoWorldAuthoringRegion,
   type ShadoWorldRegionKind,
   type ShadoWorldEnvironmentAuthoring,
+  type ShadoWorldZoneAmbience,
 } from './types';
 
 const REGION_KINDS = new Set([
@@ -148,10 +149,11 @@ function validateEnvironment(document: ShadoWorldAuthoringDocument): void {
   validateVec3(environment.fog.color, 'World fog color', false);
   validateVec3(environment.ambient.color, 'World ambient color', false);
   validateVec3(environment.weather.wind, 'World weather wind', false);
+  validateZoneAmbience(environment.ambience);
   if (environment.sky.texture !== undefined && !environment.sky.texture.trim()) throw new Error('World sky texture must be a non-empty URL');
   for (const [name, value] of Object.entries({ skyIntensity: environment.sky.intensity, fogDensity: environment.fog.density, fogStart: environment.fog.start, fogEnd: environment.fog.end, ambientIntensity: environment.ambient.intensity, weatherIntensity: environment.weather.intensity, hour: environment.timeOfDay.hour, cycleSeconds: environment.timeOfDay.cycleSeconds, waterLevel: environment.water.level })) if (!Number.isFinite(value)) throw new Error(`World environment ${name} must be finite`);
   const ids = new Set<string>();
-  for (const emitter of environment.audioEmitters) { if (!emitter.id?.trim() || ids.has(emitter.id) || !emitter.source?.trim()) throw new Error('World audio emitters require unique IDs and sources'); ids.add(emitter.id); validateVec3(emitter.position, `Audio emitter '${emitter.id}' position`, false); positive(emitter.range, `Audio emitter '${emitter.id}' range`); if (!Number.isFinite(emitter.volume) || emitter.volume < 0) throw new Error(`Audio emitter '${emitter.id}' volume must be non-negative`); validateMetadata(emitter.metadata, `Audio emitter '${emitter.id}'`); }
+  for (const emitter of environment.audioEmitters) { if (!emitter.id?.trim() || ids.has(emitter.id) || !emitter.source?.trim()) throw new Error('World audio emitters require unique IDs and sources'); validateComponentSource(emitter.source, `Audio emitter '${emitter.id}'`); ids.add(emitter.id); validateVec3(emitter.position, `Audio emitter '${emitter.id}' position`, false); positive(emitter.range, `Audio emitter '${emitter.id}' range`); if (!Number.isFinite(emitter.volume) || emitter.volume < 0) throw new Error(`Audio emitter '${emitter.id}' volume must be non-negative`); validateMetadata(emitter.metadata, `Audio emitter '${emitter.id}'`); }
   ids.clear();
   validateMediaVolumes(environment);
   validateVolumetricMedium(environment);
@@ -740,6 +742,46 @@ function positive(value: number, label: string): number {
 
 function vec3(value: ArrayLike<unknown> | undefined): [number, number, number] {
   return [finite(value?.[0]), finite(value?.[1]), finite(value?.[2])];
+}
+
+/**
+ * An audio source names a component, `family/element`, not a file.
+ *
+ * Checked at authoring time because the failure mode otherwise is silence: a
+ * source the bank cannot resolve returns no buffer, the layer never starts, and
+ * nothing anywhere reports it -- the zone is simply quiet, which looks exactly
+ * like an ambience system that does not work.
+ */
+function validateComponentSource(source: string, label: string): void {
+  if (!/^[a-z][a-z0-9-]*\/[a-z][a-z0-9_=,-]*$/.test(source)) {
+    throw new Error(
+      `${label} source must be a component reference like 'env-water/river', not '${source}'`
+    );
+  }
+}
+
+/** Doc §32's layers. Validated together because they share the source format. */
+function validateZoneAmbience(ambience: ShadoWorldZoneAmbience | undefined): void {
+  if (!ambience) return;
+  if (ambience.bed) validateComponentSource(ambience.bed, 'Zone ambience bed');
+  if (ambience.bedNight) validateComponentSource(ambience.bedNight, 'Zone ambience night bed');
+  for (const loop of ambience.loops ?? []) validateComponentSource(loop, 'Zone ambience loop');
+  for (const oneshot of ambience.oneshots ?? []) {
+    validateComponentSource(oneshot.source, 'Zone ambience one-shot');
+    if (!Number.isFinite(oneshot.perMinute) || oneshot.perMinute <= 0) {
+      throw new Error(`Zone ambience one-shot '${oneshot.source}' needs a positive perMinute`);
+    }
+    if (oneshot.hours) {
+      for (const hour of oneshot.hours) {
+        if (!Number.isFinite(hour) || hour < 0 || hour >= 24) {
+          throw new Error(`Zone ambience one-shot '${oneshot.source}' hours must be 0-24`);
+        }
+      }
+    }
+  }
+  if (ambience.gain !== undefined && (!Number.isFinite(ambience.gain) || ambience.gain < 0)) {
+    throw new Error('Zone ambience gain must be non-negative');
+  }
 }
 
 function validateVec3(value: unknown, label: string, positive: boolean): void {

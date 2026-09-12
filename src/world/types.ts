@@ -602,6 +602,36 @@ export type ShadoWorldEnvironmentAuthoring = {
   volumetric?: ShadoWorldVolumetricMedium;
   /** Authored ambient particle emitters. */
   particleEmitters?: ShadoWorldParticleEmitter[];
+  /** How the zone sounds when nothing is happening in it. */
+  ambience?: ShadoWorldZoneAmbience;
+};
+
+/**
+ * The zone's ambience, in the layers doc §32 asks for: a continuous bed, medium
+ * loops under it, and sparse one-shots over the top. The positional layer is
+ * `audioEmitters`, which already existed.
+ *
+ * Every field names a **component**, `family/element`, never a file. A zone that
+ * names `river_02.ogg` breaks the next time the library is promoted, and the
+ * library is promoted every time the corpus changes.
+ */
+export type ShadoWorldZoneAmbience = {
+  /** The continuous bed, e.g. `env-bed/field`, `env-bed/cave`. */
+  bed?: string;
+  /** Swapped in between dusk and dawn. Omitted keeps `bed` all night. */
+  bedNight?: string;
+  /** Medium loops under the bed everywhere in the zone, e.g. `env-wind/leaves`. */
+  loops?: string[];
+  /** Sparse one-shots: a bird, a branch, an insect. */
+  oneshots?: Array<{
+    source: string;
+    /** Expected occurrences per minute. */
+    perMinute: number;
+    /** `[from, to]` on a 24-hour clock; `from > to` wraps through midnight. */
+    hours?: [number, number];
+  }>;
+  /** Scales every ambience layer in this zone. Omitted is 1. */
+  gain?: number;
 };
 
 export type ShadoWorldPerformanceBudgets = {
