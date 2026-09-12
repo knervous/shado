@@ -6,6 +6,7 @@ import {
   type ShadoWorldRegionKind,
   type ShadoWorldEnvironmentAuthoring,
   type ShadoWorldZoneAmbience,
+  type ShadoWorldRegionAmbience,
 } from './types';
 
 const REGION_KINDS = new Set([
@@ -493,6 +494,7 @@ function validateRegion(region: ShadoWorldAuthoringRegion, index: number, ids: S
   if (!region.metadata || Array.isArray(region.metadata) || typeof region.metadata !== 'object') {
     throw new Error(`Region '${region.id}' metadata must be an object`);
   }
+  validateRegionAmbience(region);
 }
 
 function validateObjects(document: ShadoWorldAuthoringDocument): void {
@@ -753,10 +755,66 @@ function vec3(value: ArrayLike<unknown> | undefined): [number, number, number] {
  * like an ambience system that does not work.
  */
 function validateComponentSource(source: string, label: string): void {
-  if (!/^[a-z][a-z0-9-]*\/[a-z][a-z0-9_=,-]*$/.test(source)) {
-    throw new Error(
-      `${label} source must be a component reference like 'env-water/river', not '${source}'`
-    );
+  if (/^[a-z][a-z0-9-]*\/[a-z][a-z0-9_=,-]*$/.test(source)) return;
+  // Emitters authored before the library was addressable by component name point
+  // at a promoted file. Those are accepted rather than rejected, because the
+  // alternative is that every zone holding one cannot be *opened* for authoring
+  // -- the validator runs on load -- and the runtime recovers the component from
+  // the filename anyway. New authoring should not produce this form.
+  if (/(?:^|\/)[a-z][a-z0-9-]*-[a-z_]+-\d+\.[a-z0-9]+$/.test(source)) return;
+  throw new Error(
+    `${label} source must be a component reference like 'env-water/river', not '${source}'`
+  );
+}
+
+/**
+ * A region's ambience override, which lives in its metadata.
+ *
+ * Validated here even though metadata is otherwise opaque, for the same reason
+ * the zone's is: an unresolvable source makes no sound and reports nothing, so
+ * the only place a typo can be caught is where it is written. A region that is
+ * quieter than it should be is a bug someone might notice; a region that is
+ * silent is a region that looks like it was never authored.
+ */
+function validateRegionAmbience(region: ShadoWorldAuthoringRegion): void {
+  const ambience = region.metadata.ambience as ShadoWorldRegionAmbience | undefined;
+  if (ambience === undefined) return;
+  if (!ambience || typeof ambience !== 'object' || Array.isArray(ambience)) {
+    throw new Error(`Region '${region.id}' ambience must be an object`);
+  }
+  const label = `Region '${region.id}' ambience`;
+  if (ambience.bed) validateComponentSource(ambience.bed, `${label} bed`);
+  if (ambience.bedNight) validateComponentSource(ambience.bedNight, `${label} night bed`);
+  for (const loop of ambience.loops ?? []) validateComponentSource(loop, `${label} loop`);
+  for (const oneshot of ambience.oneshots ?? []) {
+    validateComponentSource(oneshot.source, `${label} one-shot`);
+    if (!Number.isFinite(oneshot.perMinute) || oneshot.perMinute <= 0) {
+      throw new Error(`${label} one-shot '${oneshot.source}' needs a positive perMinute`);
+    }
+  }
+  for (const [name, value] of Object.entries({
+    fadeSeconds: ambience.fadeSeconds,
+    gain: ambience.gain,
+    priority: ambience.priority,
+  })) {
+    if (value !== undefined && (!Number.isFinite(value) || (value as number) < 0)) {
+      throw new Error(`${label} ${name} must be a non-negative number`);
+    }
+  }
+  if (ambience.interior !== undefined && typeof ambience.interior !== 'boolean') {
+    throw new Error(`${label} interior must be a boolean`);
+  }
+  // A region that declares nothing is almost certainly a half-finished edit, and
+  // it would silently behave as though it had no ambience at all.
+  const declares =
+    ambience.bed ||
+    ambience.bedNight ||
+    ambience.loops?.length ||
+    ambience.oneshots?.length ||
+    ambience.interior !== undefined ||
+    ambience.space;
+  if (!declares) {
+    throw new Error(`${label} declares nothing; remove it or give it a layer`);
   }
 }
 
