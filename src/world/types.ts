@@ -634,6 +634,48 @@ export type ShadoWorldZoneAmbience = {
   gain?: number;
 };
 
+/**
+ * Ambience for one region, which overrides the zone's while the listener is
+ * inside it. Lives in `region.metadata.ambience`, because region metadata is
+ * where tool and game payload belongs and the hot columnar planes are not.
+ *
+ * This is the layer that makes movement through a zone mean something (doc §32).
+ * A zone-wide bed sounds identical in a market, a cloister and a burial yard; a
+ * district that names its own is the difference between a place and a backdrop.
+ *
+ * Overrides are per field. A region that declares only `loops` keeps the zone's
+ * bed under them, and a region that declares only `interior` changes nothing but
+ * the acoustics -- which is usually all a doorway needs to do.
+ */
+export type ShadoWorldRegionAmbience = {
+  /** Replaces the zone bed while inside. */
+  bed?: string;
+  bedNight?: string;
+  /** Replaces the zone's medium loops while inside. */
+  loops?: string[];
+  /** Replaces the zone's stochastic layer while inside. */
+  oneshots?: Array<{ source: string; perMinute: number; hours?: [number, number] }>;
+  /** Scales the zone gain rather than replacing it. */
+  gain?: number;
+  /**
+   * Under cover: rain is heard from beneath a roof rather than on the ground,
+   * and the acoustic space becomes a room.
+   */
+  interior?: boolean;
+  /**
+   * The acoustic space to enter, when `interior` is too blunt a word for it --
+   * a cathedral and a cellar are both indoors and share no tail.
+   */
+  space?: string;
+  /**
+   * Larger wins where regions overlap. Omitted means the smallest region wins,
+   * which is what makes a shrine inside a market behave the way it reads.
+   */
+  priority?: number;
+  /** Crossfade on crossing the boundary, seconds. Omitted is a doorway's length. */
+  fadeSeconds?: number;
+};
+
 export type ShadoWorldPerformanceBudgets = {
   maxVisibleTriangles: number;
   maxDrawCalls: number;
