@@ -161,6 +161,8 @@ class FontGlyphLUT {
   private gidByCode = new Map<number, number>();
   private advanceByCode = new Map<number, number>();
   private fallbackAdvanceEM = 0.5;
+  /** Baseline-to-baseline distance, in EM, for multi-line plates. */
+  public readonly lineHeightEM: number;
   private kerningPx: (a: number, b: number) => number;
 
   constructor(fontAsset: any) {
@@ -181,6 +183,7 @@ class FontGlyphLUT {
     };
 
     this.emPx = f.info.size;
+    this.lineHeightEM = (f.common.lineHeight || this.emPx * 1.2) / this.emPx;
     this.fallbackAdvanceEM = (fontAsset._getChar?.(0xfffc)?.xadvance ?? this.emPx * 0.5) / this.emPx;
 
     const texW = f.common.scaleW;
@@ -267,45 +270,51 @@ class NameplateStreams {
       if (owner < 0 || owner >= children.length) continue;
       const name = this.pool.get(children[owner].nameIndex);
 
-      const localGids: number[] = [];
-      const localOfsX: number[] = [];
-      let penX_EM = 0;
-      let prevCP: number | null = null;
-
-      for (const ch of [...name]) {
-        const cp = ch.codePointAt(0)!;
-        const gid = this.font.codePointToGid(cp);
-        if (prevCP != null) penX_EM += this.font.kerningEM(prevCP, cp);
-        if (gid !== undefined) {
-          localGids.push(gid);
-          localOfsX.push(penX_EM);
-        }
-        penX_EM += this.font.advanceEM(cp, gid);
-        prevCP = cp;
-      }
-
-      // Center the visible glyph planes, not the typographic advance width.
-      // Advance includes trailing side-bearing, which pushed every label to
-      // the right and read visually as extra padding on the left.
-      let visibleMin = Infinity;
-      let visibleMax = -Infinity;
-      for (let i = 0; i < localGids.length; i++) {
-        const [xmin, xmax] = this.font.planeBoundsEM(localGids[i]);
-        visibleMin = Math.min(visibleMin, localOfsX[i] + xmin);
-        visibleMax = Math.max(visibleMax, localOfsX[i] + xmax);
-      }
-      const shift = Number.isFinite(visibleMin) && Number.isFinite(visibleMax)
-        ? -0.5 * (visibleMin + visibleMax)
-        : -0.5 * penX_EM;
-
+      // One centred run per line. The last line sits on the anchor and earlier
+      // lines stack upward, so adding a second line (a zone under a name) grows
+      // the plate away from the head instead of pushing it down into it.
+      const lines = name.split('\n');
       const base = gidList.length;
-      const count = localGids.length;
+      for (let lineIndex = 0; lineIndex < lines.length; lineIndex++) {
+        const localGids: number[] = [];
+        const localOfsX: number[] = [];
+        let penX_EM = 0;
+        let prevCP: number | null = null;
 
-      for (let i = 0; i < count; i++) {
-        gidList.push(localGids[i] >>> 0);
-        ownerList.push(owner >>> 0);
-        ofsList.push(localOfsX[i] + shift, 0.0);
+        for (const ch of [...lines[lineIndex]]) {
+          const cp = ch.codePointAt(0)!;
+          const gid = this.font.codePointToGid(cp);
+          if (prevCP != null) penX_EM += this.font.kerningEM(prevCP, cp);
+          if (gid !== undefined) {
+            localGids.push(gid);
+            localOfsX.push(penX_EM);
+          }
+          penX_EM += this.font.advanceEM(cp, gid);
+          prevCP = cp;
+        }
+
+        // Center the visible glyph planes, not the typographic advance width.
+        // Advance includes trailing side-bearing, which pushed every label to
+        // the right and read visually as extra padding on the left.
+        let visibleMin = Infinity;
+        let visibleMax = -Infinity;
+        for (let i = 0; i < localGids.length; i++) {
+          const [xmin, xmax] = this.font.planeBoundsEM(localGids[i]);
+          visibleMin = Math.min(visibleMin, localOfsX[i] + xmin);
+          visibleMax = Math.max(visibleMax, localOfsX[i] + xmax);
+        }
+        const shift = Number.isFinite(visibleMin) && Number.isFinite(visibleMax)
+          ? -0.5 * (visibleMin + visibleMax)
+          : -0.5 * penX_EM;
+        const lineY = (lines.length - 1 - lineIndex) * this.font.lineHeightEM;
+
+        for (let i = 0; i < localGids.length; i++) {
+          gidList.push(localGids[i] >>> 0);
+          ownerList.push(owner >>> 0);
+          ofsList.push(localOfsX[i] + shift, lineY);
+        }
       }
+      const count = gidList.length - base;
 
       const child: any = children[owner];
       if (child) {
