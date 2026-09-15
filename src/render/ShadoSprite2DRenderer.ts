@@ -103,8 +103,20 @@ export interface ShadoSprite2DCpuSnapshot {
 }
 
 type SpriteRecord = {
-  input: ShadoSprite2DInput;
+  /** Normalized and owned by the renderer; `position` is updated in place. */
+  input: ShadoSprite2DInput & { position: [number, number] };
   insertionOrder: number;
+  tileKey: string;
+  tileX: number;
+  tileY: number;
+  /** Index in its tile's record list, for O(1) removal. */
+  tileIndex: number;
+  /** Index in the draw list, or -1 when not drawn. */
+  slot: number;
+  /** The sort key the record was placed in the draw list with. */
+  slotLayer: number;
+  slotOrder: number;
+  removed: boolean;
 };
 
 /**
@@ -120,7 +132,21 @@ export class ShadoSprite2DRenderer {
 
   private readonly engine: AbstractEngine;
   private readonly records = new Map<string, SpriteRecord>();
-  private readonly tileCache = new Map<string, string[]>();
+  private readonly tileCache = new Map<string, SpriteRecord[]>();
+  /**
+   * The packed instance order: drawable records in the intersecting tiles,
+   * sorted by layer, order and insertion. Kept across frames. A position change
+   * repacks one slot; an arrival or departure is merged in place; only a change
+   * of tile bounds or LOD bucket (or a mutation touching much of the list)
+   * rebuilds it.
+   */
+  private drawList: SpriteRecord[] = [];
+  private drawTileBounds: readonly number[] = [0, 0, -1, -1];
+  private drawBoundsSignature = '';
+  private membershipDirty = true;
+  private readonly pendingMembership = new Set<SpriteRecord>();
+  private dirtySlotStart = Number.POSITIVE_INFINITY;
+  private dirtySlotEnd = -1;
   private readonly tileSize: number;
   private defaultMinPixelSize: number;
   private readonly alphaMode: ShadoSpriteAlphaMode;
@@ -139,7 +165,6 @@ export class ShadoSprite2DRenderer {
   private maxHalfExtent = 0;
   private drawSignature = '';
   private drawListRebuilds = 0;
-  private visibleIds: string[] = [];
   private gpuMotion?: ShadoSprite2DGpuMotion;
   private gpuVisibility?: ShadoSprite2DGpuVisibility;
   private gpuMotionActive = false;
@@ -185,7 +210,7 @@ export class ShadoSprite2DRenderer {
         'uCameraHalfExtent',
         new BABYLON.Vector2(this.view.halfExtent[0], this.view.halfExtent[1])
       );
-      this.material.setFloat('uInstanceCount', Math.max(1, this.visibleIds.length));
+      this.material.setFloat('uInstanceCount', Math.max(1, this.drawList.length));
       this.material.setFloat('uUseGpuMotion', this.gpuMotionActive ? 1 : 0);
       this.material.setFloat('uUseGpuCulling', this.gpuCullingActive ? 1 : 0);
       this.material.setFloat('uViewportHeight', this.view.viewportPixels[1]);
@@ -203,28 +228,65 @@ export class ShadoSprite2DRenderer {
   }
 
   public upsert(input: ShadoSprite2DInput): void {
-    const current = this.records.get(input.id);
-    this.records.set(input.id, {
-      input: normalizeSprite(input),
-      insertionOrder: current?.insertionOrder ?? this.insertionCounter++,
-    });
-    this.rebuildTileCache();
+    this.upsertMany([input]);
   }
 
   public upsertMany(inputs: readonly ShadoSprite2DInput[]): void {
+    if (!inputs.length) return;
+    this.restoreCpuAuthority();
     for (const input of inputs) {
+      const next = normalizeSprite(input) as SpriteRecord['input'];
       const current = this.records.get(input.id);
-      this.records.set(input.id, {
-        input: normalizeSprite(input),
-        insertionOrder: current?.insertionOrder ?? this.insertionCounter++,
-      });
+      this.maxHalfExtent = Math.max(
+        this.maxHalfExtent,
+        Math.hypot(next.size[0] * 0.5, next.size[1] * 0.5)
+      );
+      if (!current) {
+        const record: SpriteRecord = {
+          input: next,
+          insertionOrder: this.insertionCounter++,
+          tileKey: '',
+          tileX: 0,
+          tileY: 0,
+          tileIndex: -1,
+          slot: -1,
+          slotLayer: 0,
+          slotOrder: 0,
+          removed: false,
+        };
+        this.records.set(input.id, record);
+        this.placeInTile(record);
+        this.pendingMembership.add(record);
+        continue;
+      }
+      const previous = current.input;
+      current.input = next;
+      if (
+        previous.visible !== next.visible ||
+        previous.layer !== next.layer ||
+        previous.order !== next.order ||
+        previous.minPixelSize !== next.minPixelSize ||
+        previous.size[0] !== next.size[0] ||
+        previous.size[1] !== next.size[1]
+      ) {
+        this.pendingMembership.add(current);
+      }
+      this.moveTileIfNeeded(current);
+      this.repackSlot(current);
     }
-    this.rebuildTileCache();
+    this.revision++;
   }
 
   public remove(id: string): boolean {
-    if (!this.records.delete(id)) return false;
-    this.rebuildTileCache();
+    const record = this.records.get(id);
+    if (!record) return false;
+    this.restoreCpuAuthority();
+    this.records.delete(id);
+    this.removeFromTile(record);
+    record.removed = true;
+    if (record.slot >= 0) this.pendingMembership.add(record);
+    else this.pendingMembership.delete(record);
+    this.revision++;
     return true;
   }
 
@@ -238,16 +300,17 @@ export class ShadoSprite2DRenderer {
     const next = Math.max(0, value);
     if (Math.abs(next - this.defaultMinPixelSize) < 0.0001) return;
     this.defaultMinPixelSize = next;
+    this.membershipDirty = true;
     this.drawSignature = '';
   }
 
   public setVisible(id: string, visible: boolean): boolean {
     const record = this.records.get(id);
     if (!record || record.input.visible === visible) return false;
-    record.input = { ...record.input, visible };
+    record.input.visible = visible;
     this.restoreCpuAuthority();
+    this.pendingMembership.add(record);
     this.revision++;
-    this.drawSignature = '';
     return true;
   }
 
@@ -257,50 +320,27 @@ export class ShadoSprite2DRenderer {
 
   /** Apply a simulation tick with one tile-cache revision and one GPU repack. */
   public setPositions(updates: readonly ShadoSprite2DPositionUpdate[]): number {
-    const crossed: Array<{ id: string; previousKey: string; nextKey: string }> = [];
     let changed = 0;
     for (const update of updates) {
       const record = this.records.get(update.id);
       if (!record) continue;
-      const previous = record.input.position;
-      if (previous[0] === update.position[0] && previous[1] === update.position[1]) continue;
-      const previousKey = this.tileKey(previous[0], previous[1]);
-      const nextKey = this.tileKey(update.position[0], update.position[1]);
-      record.input = { ...record.input, position: [update.position[0], update.position[1]] };
-      if (previousKey !== nextKey) crossed.push({ id: update.id, previousKey, nextKey });
+      const position = record.input.position;
+      const x = update.position[0];
+      const y = update.position[1];
+      if (position[0] === x && position[1] === y) continue;
+      if (!changed) this.restoreCpuAuthority();
+      position[0] = x;
+      position[1] = y;
+      this.moveTileIfNeeded(record);
+      if (record.slot >= 0) {
+        const offset = record.slot * FLOATS_PER_SPRITE;
+        this.packed[offset] = x;
+        this.packed[offset + 1] = y;
+        this.markSlotDirty(record.slot);
+      }
       changed++;
     }
-    if (!changed) return 0;
-
-    // Sparse crossings are cheaper to patch. A broad simulation step is
-    // cheaper to rebuild linearly than repeatedly splice large dense tiles.
-    if (crossed.length > Math.min(1_024, Math.max(16, this.records.size / 50))) {
-      this.rebuildTileCache();
-      return changed;
-    }
-    this.restoreCpuAuthority();
-    const affected = new Set<string>();
-    for (const move of crossed) {
-      const previous = this.tileCache.get(move.previousKey);
-      const index = previous?.indexOf(move.id) ?? -1;
-      if (previous && index >= 0) {
-        previous[index] = previous[previous.length - 1];
-        previous.pop();
-        if (!previous.length) this.tileCache.delete(move.previousKey);
-      }
-      let next = this.tileCache.get(move.nextKey);
-      if (!next) this.tileCache.set(move.nextKey, (next = []));
-      next.push(move.id);
-      affected.add(move.previousKey);
-      affected.add(move.nextKey);
-    }
-    for (const key of affected) {
-      this.tileCache
-        .get(key)
-        ?.sort((a, b) => compareSpriteRecords(this.records.get(a)!, this.records.get(b)!));
-    }
-    this.revision++;
-    this.drawSignature = '';
+    if (changed) this.revision++;
     return changed;
   }
 
@@ -384,7 +424,7 @@ export class ShadoSprite2DRenderer {
       const ids = selectCpuAccessIds(
         access,
         allIds,
-        this.visibleIds,
+        this.drawList.map(record => record.input.id),
         id => this.records.get(id)?.input.selected === true
       );
       const indexById = new Map(allIds.map((id, index) => [id, index]));
@@ -409,7 +449,7 @@ export class ShadoSprite2DRenderer {
     const ids = selectCpuAccessIds(
       access,
       this.gpuIndexIds,
-      this.visibleIds,
+      this.drawList.map(record => record.input.id),
       id => this.records.get(id)?.input.selected === true
     );
     const indexById = new Map(this.gpuIndexIds.map((id, index) => [id, index]));
@@ -475,9 +515,7 @@ export class ShadoSprite2DRenderer {
       worldY - this.maxHalfExtent,
       worldX + this.maxHalfExtent,
       worldY + this.maxHalfExtent
-    )
-      .map(id => this.records.get(id))
-      .filter((value): value is SpriteRecord => !!value);
+    ).filter(record => !record.removed);
     candidates.sort(compareSpriteRecords).reverse();
 
     for (const record of candidates) {
@@ -506,7 +544,7 @@ export class ShadoSprite2DRenderer {
   public getStats(): ShadoSprite2DStats {
     return {
       total: this.records.size,
-      visible: this.visibleIds.length,
+      visible: this.drawList.length,
       tileCount: this.tileCache.size,
       recordBytes: BYTES_PER_SPRITE,
       gpuCapacityBytes: this.capacity * BYTES_PER_SPRITE,
@@ -542,25 +580,98 @@ export class ShadoSprite2DRenderer {
     this.restoreCpuAuthority();
     this.tileCache.clear();
     this.maxHalfExtent = 0;
-    for (const [id, record] of this.records) {
+    for (const record of this.drawList) record.slot = -1;
+    this.drawList = [];
+    this.pendingMembership.clear();
+    for (const record of this.records.values()) {
       const sprite = record.input;
       this.maxHalfExtent = Math.max(
         this.maxHalfExtent,
         Math.hypot(sprite.size[0] * 0.5, sprite.size[1] * 0.5)
       );
-      const key = this.tileKey(sprite.position[0], sprite.position[1]);
-      let tile = this.tileCache.get(key);
-      if (!tile) this.tileCache.set(key, (tile = []));
-      tile.push(id);
+      record.slot = -1;
+      this.placeInTile(record);
     }
-    for (const ids of this.tileCache.values()) {
-      ids.sort((a, b) => compareSpriteRecords(this.records.get(a)!, this.records.get(b)!));
-    }
+    this.membershipDirty = true;
     this.revision++;
     this.drawSignature = '';
   }
 
+  private placeInTile(record: SpriteRecord): void {
+    const tileX = Math.floor(record.input.position[0] / this.tileSize);
+    const tileY = Math.floor(record.input.position[1] / this.tileSize);
+    const key = `${tileX}:${tileY}`;
+    let tile = this.tileCache.get(key);
+    if (!tile) this.tileCache.set(key, (tile = []));
+    record.tileKey = key;
+    record.tileX = tileX;
+    record.tileY = tileY;
+    record.tileIndex = tile.length;
+    tile.push(record);
+  }
+
+  private removeFromTile(record: SpriteRecord): void {
+    const tile = this.tileCache.get(record.tileKey);
+    if (!tile || tile[record.tileIndex] !== record) return;
+    const last = tile.pop()!;
+    if (last !== record) {
+      tile[record.tileIndex] = last;
+      last.tileIndex = record.tileIndex;
+    }
+    if (!tile.length) this.tileCache.delete(record.tileKey);
+    record.tileIndex = -1;
+  }
+
+  /** Re-files a record whose position left its tile; a change of drawn-ness is queued. */
+  private moveTileIfNeeded(record: SpriteRecord): void {
+    const tileX = Math.floor(record.input.position[0] / this.tileSize);
+    const tileY = Math.floor(record.input.position[1] / this.tileSize);
+    if (tileX === record.tileX && tileY === record.tileY) return;
+    const wasInBounds = this.tileInDrawBounds(record.tileX, record.tileY);
+    this.removeFromTile(record);
+    this.placeInTile(record);
+    if (wasInBounds !== this.tileInDrawBounds(tileX, tileY)) {
+      this.pendingMembership.add(record);
+    }
+  }
+
+  private tileInDrawBounds(tileX: number, tileY: number): boolean {
+    const bounds = this.drawTileBounds;
+    return tileX >= bounds[0] && tileX <= bounds[2] && tileY >= bounds[1] && tileY <= bounds[3];
+  }
+
+  private repackSlot(record: SpriteRecord): void {
+    if (record.slot < 0) return;
+    this.packSprite(record.slot, record.input);
+    this.markSlotDirty(record.slot);
+  }
+
+  private markSlotDirty(slot: number): void {
+    if (slot < this.dirtySlotStart) this.dirtySlotStart = slot;
+    if (slot + 1 > this.dirtySlotEnd) this.dirtySlotEnd = slot + 1;
+  }
+
+  private shouldDraw(record: SpriteRecord, pixelsPerUnit: number): boolean {
+    const sprite = record.input;
+    return (
+      !record.removed &&
+      sprite.visible !== false &&
+      this.tileInDrawBounds(record.tileX, record.tileY) &&
+      Math.max(sprite.size[0], sprite.size[1]) * pixelsPerUnit >=
+        (sprite.minPixelSize ?? this.defaultMinPixelSize)
+    );
+  }
+
   private rebuildVisibleDrawList(): void {
+    if (this.gpuMotionActive) {
+      const signature = `gpu:${this.revision}`;
+      if (signature === this.drawSignature) return;
+      this.drawSignature = signature;
+      // The GPU owns motion: every drawable sprite is in the list, in stable order.
+      this.replaceDrawList(this.sortedDrawableRecords());
+      this.membershipDirty = true;
+      return;
+    }
     const minX = this.view.center[0] - this.view.halfExtent[0] - this.maxHalfExtent;
     const maxX = this.view.center[0] + this.view.halfExtent[0] + this.maxHalfExtent;
     const minY = this.view.center[1] - this.view.halfExtent[1] - this.maxHalfExtent;
@@ -568,43 +679,140 @@ export class ShadoSprite2DRenderer {
     const pixelsPerUnit = this.view.viewportPixels[1] / (this.view.halfExtent[1] * 2);
     const lodBucket = Math.round(Math.log2(Math.max(0.0001, pixelsPerUnit)) * 8);
     const tileBounds = this.tileBounds(minX, minY, maxX, maxY);
-    const signature = this.gpuMotionActive
-      ? `gpu:${this.revision}`
-      : `${tileBounds.join(':')}:${lodBucket}:${this.revision}`;
-    if (signature === this.drawSignature) return;
-    this.drawSignature = signature;
+    // Every sprite in the intersecting cached tiles is kept: this deliberate
+    // one-tile overdraw lets sub-cell camera pans reuse the exact GPU list, and
+    // the list is rebuilt only when a tile boundary or LOD bucket changes.
+    const boundsSignature = `${tileBounds.join(':')}:${lodBucket}`;
+    if (boundsSignature !== this.drawBoundsSignature || this.membershipDirty) {
+      this.drawBoundsSignature = boundsSignature;
+      this.drawTileBounds = tileBounds;
+      this.drawSignature = '';
+      this.replaceDrawList(
+        this.candidatesForTileBounds(tileBounds).filter(record =>
+          this.shouldDraw(record, pixelsPerUnit)
+        ).sort(compareSpriteRecords)
+      );
+      this.membershipDirty = false;
+      return;
+    }
+    if (this.pendingMembership.size) {
+      this.mergeMembershipChanges(pixelsPerUnit);
+    }
+    this.uploadDirtySlots();
+  }
 
-    const visible = (
-      this.gpuMotionActive
-        ? this.sortedDrawableRecords()
-        : this.candidatesForTileBounds(tileBounds).map(id => this.records.get(id))
-    ).filter((record): record is SpriteRecord => {
-      if (!record || record.input.visible === false) return false;
-      const sprite = record.input;
-      if (
-        !this.gpuMotionActive &&
-        Math.max(sprite.size[0], sprite.size[1]) * pixelsPerUnit <
-          (sprite.minPixelSize ?? this.defaultMinPixelSize)
-      )
-        return false;
-      // Keep every sprite in the intersecting cached tiles. This deliberate
-      // one-tile overdraw lets sub-cell camera pans reuse the exact GPU list;
-      // visibility is rebuilt only when a tile boundary or LOD bucket changes.
-      return true;
-    });
-    visible.sort(compareSpriteRecords);
-    this.visibleIds = visible.map(record => record.input.id);
-    this.ensureCapacity(Math.max(1, visible.length));
-    this.packed.fill(0);
-    for (let index = 0; index < visible.length; index++) {
-      this.packSprite(index, visible[index].input);
+  /** Replaces the whole draw list: every slot repacked and uploaded. */
+  private replaceDrawList(records: SpriteRecord[]): void {
+    for (const record of this.drawList) record.slot = -1;
+    this.drawList = records;
+    this.pendingMembership.clear();
+    this.ensureCapacity(Math.max(1, records.length));
+    for (let index = 0; index < records.length; index++) {
+      const record = records[index];
+      record.slot = index;
+      record.slotLayer = record.input.layer ?? 0;
+      record.slotOrder = record.input.order ?? 0;
+      this.packSprite(index, record.input);
     }
     this.instanceBuffer!.update(this.packed);
+    this.dirtySlotStart = Number.POSITIVE_INFINITY;
+    this.dirtySlotEnd = -1;
+    this.finishDrawList();
+    this.drawListRebuilds++;
+  }
+
+  /**
+   * Applies queued arrivals, departures and re-sorts to the existing list: one
+   * compacting pass, a merge of the sorted arrivals, and a repack from the first
+   * slot that moved. A change touching much of the list rebuilds it instead.
+   */
+  private mergeMembershipChanges(pixelsPerUnit: number): void {
+    const pending = this.pendingMembership;
+    if (pending.size > 64 + this.drawList.length / 4) {
+      this.membershipDirty = true;
+      pending.clear();
+      this.drawSignature = '';
+      this.rebuildVisibleDrawList();
+      return;
+    }
+    const arrivals: SpriteRecord[] = [];
+    let firstChanged = this.drawList.length;
+    for (const record of pending) {
+      const draw = this.shouldDraw(record, pixelsPerUnit);
+      const resorted =
+        record.slot >= 0 &&
+        (record.slotLayer !== (record.input.layer ?? 0) ||
+          record.slotOrder !== (record.input.order ?? 0));
+      if (record.slot >= 0 && (!draw || resorted)) {
+        firstChanged = Math.min(firstChanged, record.slot);
+        this.drawList[record.slot] = undefined as unknown as SpriteRecord;
+        record.slot = -1;
+      }
+      if (draw && record.slot < 0) arrivals.push(record);
+    }
+    pending.clear();
+    if (firstChanged === this.drawList.length && !arrivals.length) return;
+
+    let write = firstChanged;
+    for (let read = firstChanged; read < this.drawList.length; read++) {
+      const record = this.drawList[read];
+      if (record) this.drawList[write++] = record;
+    }
+    this.drawList.length = write;
+    if (arrivals.length) {
+      arrivals.sort(compareSpriteRecords);
+      const firstArrivalSlot = lowerBound(this.drawList, arrivals[0]);
+      firstChanged = Math.min(firstChanged, firstArrivalSlot);
+      const tail = this.drawList.splice(firstArrivalSlot);
+      let a = 0;
+      let t = 0;
+      while (a < arrivals.length || t < tail.length) {
+        if (t >= tail.length || (a < arrivals.length && compareSpriteRecords(arrivals[a], tail[t]) < 0)) {
+          this.drawList.push(arrivals[a++]);
+        } else {
+          this.drawList.push(tail[t++]);
+        }
+      }
+    }
+    const grew = this.drawList.length > this.capacity;
+    this.ensureCapacity(Math.max(1, this.drawList.length));
+    for (let index = firstChanged; index < this.drawList.length; index++) {
+      const record = this.drawList[index];
+      record.slot = index;
+      record.slotLayer = record.input.layer ?? 0;
+      record.slotOrder = record.input.order ?? 0;
+      this.packSprite(index, record.input);
+    }
+    if (grew) {
+      this.instanceBuffer!.update(this.packed);
+      this.dirtySlotStart = Number.POSITIVE_INFINITY;
+      this.dirtySlotEnd = -1;
+    } else if (this.drawList.length > firstChanged) {
+      this.markSlotDirty(firstChanged);
+      this.markSlotDirty(this.drawList.length - 1);
+    }
+    this.finishDrawList();
+  }
+
+  private uploadDirtySlots(): void {
+    if (this.dirtySlotEnd <= this.dirtySlotStart) return;
+    const start = this.dirtySlotStart;
+    const end = Math.min(this.dirtySlotEnd, this.drawList.length);
+    this.dirtySlotStart = Number.POSITIVE_INFINITY;
+    this.dirtySlotEnd = -1;
+    if (end <= start) return;
+    this.instanceBuffer!.updateDirectly(
+      this.packed.subarray(start * FLOATS_PER_SPRITE, end * FLOATS_PER_SPRITE),
+      start * FLOATS_PER_SPRITE,
+      end - start
+    );
+  }
+
+  private finishDrawList(): void {
     this.mesh.forcedInstanceCount = this.gpuCullingActive
       ? Math.max(1, this.gpuIndexIds.length)
-      : visible.length;
-    this.mesh.isVisible = visible.length > 0;
-    this.drawListRebuilds++;
+      : this.drawList.length;
+    this.mesh.isVisible = this.drawList.length > 0;
   }
 
   private sortedDrawableRecords(): SpriteRecord[] {
@@ -652,6 +860,7 @@ export class ShadoSprite2DRenderer {
   }
 
   private restoreCpuAuthority(): void {
+    if (this.gpuMotionActive) this.membershipDirty = true;
     this.gpuMotionActive = false;
     this.gpuCullingActive = false;
     this.detachIndirectDraw();
@@ -698,7 +907,9 @@ export class ShadoSprite2DRenderer {
     }
     this.instanceBuffer?.dispose();
     this.capacity = capacity;
+    const previous = this.packed;
     this.packed = new Float32Array(capacity * FLOATS_PER_SPRITE);
+    this.packed.set(previous.subarray(0, Math.min(previous.length, this.packed.length)));
     this.instanceBuffer = new BABYLON.Buffer(
       this.engine,
       this.packed,
@@ -721,44 +932,45 @@ export class ShadoSprite2DRenderer {
     );
   }
 
-  private candidatesForBounds(minX: number, minY: number, maxX: number, maxY: number): string[] {
+  private candidatesForBounds(
+    minX: number,
+    minY: number,
+    maxX: number,
+    maxY: number
+  ): SpriteRecord[] {
     return this.candidatesForTileBounds(this.tileBounds(minX, minY, maxX, maxY));
   }
 
-  private candidatesForTileBounds(bounds: readonly number[]): string[] {
-    const ids: string[] = [];
-    const seen = new Set<string>();
+  private candidatesForTileBounds(bounds: readonly number[]): SpriteRecord[] {
+    // Each record lives in exactly one tile, so no de-duplication is needed.
+    const records: SpriteRecord[] = [];
     const columns = bounds[2] - bounds[0] + 1;
     const rows = bounds[3] - bounds[1] + 1;
     // At extreme zoom-out, walking every coordinate in a mostly empty tile
     // rectangle can dwarf the actual scene. Flip the lookup around and scan
     // the populated cache instead, keeping zoom range independent of density.
     if (!Number.isFinite(columns * rows) || columns * rows > this.tileCache.size * 4) {
-      for (const [key, tile] of this.tileCache) {
-        const separator = key.indexOf(':');
-        const x = Number(key.slice(0, separator));
-        const y = Number(key.slice(separator + 1));
-        if (x < bounds[0] || x > bounds[2] || y < bounds[1] || y > bounds[3]) continue;
-        for (const id of tile) {
-          if (!seen.has(id)) {
-            seen.add(id);
-            ids.push(id);
-          }
-        }
+      for (const tile of this.tileCache.values()) {
+        const first = tile[0];
+        if (
+          !first ||
+          first.tileX < bounds[0] ||
+          first.tileX > bounds[2] ||
+          first.tileY < bounds[1] ||
+          first.tileY > bounds[3]
+        )
+          continue;
+        for (const record of tile) records.push(record);
       }
-      return ids;
+      return records;
     }
     for (let y = bounds[1]; y <= bounds[3]; y++) {
       for (let x = bounds[0]; x <= bounds[2]; x++) {
-        for (const id of this.tileCache.get(`${x}:${y}`) ?? []) {
-          if (!seen.has(id)) {
-            seen.add(id);
-            ids.push(id);
-          }
-        }
+        const tile = this.tileCache.get(`${x}:${y}`);
+        if (tile) for (const record of tile) records.push(record);
       }
     }
-    return ids;
+    return records;
   }
 
   private tileBounds(
@@ -844,6 +1056,18 @@ function normalizeSprite(input: ShadoSprite2DInput): ShadoSprite2DInput {
     layer: Math.round(input.layer ?? 0),
     order: Math.round(input.order ?? 0),
   };
+}
+
+/** First index whose record sorts at or after `record`. */
+function lowerBound(records: readonly SpriteRecord[], record: SpriteRecord): number {
+  let low = 0;
+  let high = records.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (compareSpriteRecords(records[middle], record) < 0) low = middle + 1;
+    else high = middle;
+  }
+  return low;
 }
 
 function compareSpriteRecords(a: SpriteRecord, b: SpriteRecord): number {

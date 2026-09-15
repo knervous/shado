@@ -249,6 +249,97 @@ describe('Shado 2D rendering baseline', () => {
     scene.dispose();
   });
 
+  it('keeps an incrementally maintained draw list identical to a full rebuild', () => {
+    const scene = new Scene(engine);
+    const texture = RawTexture.CreateRGBATexture(
+      new Uint8Array([255, 255, 255, 255]),
+      1,
+      1,
+      scene,
+      false,
+      false,
+      Texture.NEAREST_SAMPLINGMODE
+    );
+    const atlas = {
+      texture: texture as any,
+      entries: { default: { layer: 0, rect: { u0: 0, v0: 0, u1: 1, v1: 1 } } },
+      get() {
+        return this.entries.default;
+      },
+      dispose() {
+        texture.dispose();
+      },
+    };
+    const incremental = new ShadoSprite2DRenderer(scene, atlas, { tileSize: 4, minPixelSize: 0.5 });
+    const rebuilt = new ShadoSprite2DRenderer(scene, atlas, { tileSize: 4, minPixelSize: 0.5 });
+    const renderers = [incremental, rebuilt];
+    let seed = 99;
+    const next = () => {
+      seed = (seed * 1664525 + 1013904223) >>> 0;
+      return seed / 0x100000000;
+    };
+    const live = new Set<string>();
+    let nextId = 0;
+    const view = { center: [0, 0] as [number, number], halfExtent: [20, 20] as [number, number], viewportPixels: [400, 400] as [number, number] };
+    const drawState = (renderer: ShadoSprite2DRenderer) => {
+      const list = (renderer as any).drawList as Array<{ input: { id: string }; slot: number }>;
+      list.forEach((record, index) => expect(record.slot).toBe(index));
+      const packed = (renderer as any).packed as Float32Array;
+      return {
+        ids: list.map(record => record.input.id),
+        packed: Array.from(packed.subarray(0, list.length * 12)),
+      };
+    };
+
+    let incrementalRebuilds = 0;
+    for (let frame = 0; frame < 300; frame++) {
+      const upserts: any[] = [];
+      for (let arrivals = Math.floor(next() * 5); arrivals > 0; arrivals--) {
+        const id = `s${nextId++}`;
+        live.add(id);
+        upserts.push({
+          id,
+          position: [next() * 60 - 30, next() * 60 - 30],
+          size: [0.5 + next(), 0.5 + next()],
+          layer: Math.floor(next() * 3),
+          order: Math.floor(next() * 50),
+        });
+      }
+      const moves: Array<{ id: string; position: [number, number] }> = [];
+      const removals: string[] = [];
+      const visibility: Array<[string, boolean]> = [];
+      for (const id of live) {
+        const roll = next();
+        if (roll < 0.03) removals.push(id);
+        else if (roll < 0.3) moves.push({ id, position: [next() * 60 - 30, next() * 60 - 30] });
+        else if (roll < 0.33) visibility.push([id, next() < 0.5]);
+        else if (roll < 0.35) upserts.push({ id, position: [next() * 60 - 30, next() * 60 - 30], size: [1, 1], layer: Math.floor(next() * 3) });
+      }
+      if (next() < 0.05) view.center = [next() * 20 - 10, next() * 20 - 10];
+      for (const renderer of renderers) {
+        renderer.upsertMany(upserts);
+        renderer.setPositions(moves);
+        for (const [id, visible] of visibility) renderer.setVisible(id, visible);
+        for (const id of removals) renderer.remove(id);
+        renderer.setView(view);
+      }
+      for (const id of removals) live.delete(id);
+      const before = incremental.getStats().drawListRebuilds;
+      (incremental as any).rebuildVisibleDrawList();
+      incrementalRebuilds += incremental.getStats().drawListRebuilds - before;
+      (rebuilt as any).membershipDirty = true;
+      (rebuilt as any).rebuildVisibleDrawList();
+      expect(drawState(incremental)).toEqual(drawState(rebuilt));
+    }
+    expect(nextId).toBeGreaterThan(400);
+    // Most frames were patched, not rebuilt.
+    expect(incrementalRebuilds).toBeLessThan(100);
+
+    for (const renderer of renderers) renderer.dispose();
+    atlas.dispose();
+    scene.dispose();
+  });
+
   it('lays out, wraps, culls, updates, and picks arbitrary MSDF text in 2D', () => {
     const scene = new Scene(engine);
     const texture = RawTexture.CreateRGBATexture(

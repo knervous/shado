@@ -1,5 +1,19 @@
 # Release notes
 
+## 1.10.1 — unreleased
+
+- `ShadoSprite2DRenderer` scales with what changes, not with what exists:
+  - `upsert`/`upsertMany`/`remove` patch the tile cache in O(1) per sprite
+    instead of rebuilding and re-sorting every tile.
+  - The draw list persists across frames. A position change repacks one slot
+    and uploads only the dirty range (`Buffer.updateDirectly`); arrivals,
+    departures, visibility and layer/order changes are merged into the sorted
+    list; a full rebuild happens only when the visible tile bounds or LOD
+    bucket change, or a batch touches a large share of the list.
+  - `setPositions` updates positions in place with no per-sprite allocation.
+  - Draw order, packed records and picking are unchanged; a test drives random
+    mutations and checks the incremental list against a full rebuild.
+
 ## 1.10.0 — 2026-09-05
 
 Shado 1.10 adds a dedicated, compact 2D rendering surface while retaining the
