@@ -226,6 +226,11 @@ export function wrapShadoDynamicEntityReducerExports(
   reducerExports: WebAssembly.Exports | ShadoDynamicEntityReducerExports
 ): ShadoDynamicEntityReducer {
   const exports = assertReducerExports(reducerExports as WebAssembly.Exports);
+  // The kernel allocator only ever bumps, so `applyDelta` reuses one growable
+  // buffer instead of allocating per call. A fresh allocation per call leaked
+  // every delta a long-running host ever applied.
+  let deltaScratchPtr = 0;
+  let deltaScratchBytes = 0;
   const reducer: ShadoDynamicEntityReducer = {
     exports,
     memory: exports.memory,
@@ -260,8 +265,17 @@ export function wrapShadoDynamicEntityReducerExports(
       return { ptr: outPtr, byteLength: bytes.byteLength };
     },
     applyDelta(records) {
-      const delta = reducer.writeDelta(records);
-      return exports.applyDelta(delta.ptr, delta.byteLength);
+      const byteLength = shadoDynamicEntityReducerDeltaByteLength(records.length);
+      if (byteLength > deltaScratchBytes) {
+        deltaScratchBytes = Math.max(byteLength, deltaScratchBytes * 2, 4096);
+        deltaScratchPtr = exports.alloc(deltaScratchBytes);
+      }
+      // After any growth: `alloc` may replace the memory's buffer.
+      writeShadoDynamicEntityReducerDelta(
+        records,
+        new DataView(exports.memory.buffer, deltaScratchPtr, byteLength)
+      );
+      return exports.applyDelta(deltaScratchPtr, byteLength);
     },
     changedIndices() {
       const count = exports.getChangedIndexCount();
@@ -297,11 +311,20 @@ export async function defaultShadoDynamicEntityReducerDebugWasmBytes(): Promise<
 export function encodeShadoDynamicEntityReducerDelta(
   records: readonly ShadoDynamicEntityReducerDeltaRecord[]
 ): Uint8Array {
-  const bytes = new Uint8Array(
-    SHADO_DYNAMIC_ENTITY_DELTA_HEADER_BYTES +
-      records.length * SHADO_DYNAMIC_ENTITY_DELTA_RECORD_BYTES
-  );
-  const view = new DataView(bytes.buffer);
+  const bytes = new Uint8Array(shadoDynamicEntityReducerDeltaByteLength(records.length));
+  writeShadoDynamicEntityReducerDelta(records, new DataView(bytes.buffer));
+  return bytes;
+}
+
+export function shadoDynamicEntityReducerDeltaByteLength(recordCount: number): number {
+  return SHADO_DYNAMIC_ENTITY_DELTA_HEADER_BYTES + recordCount * SHADO_DYNAMIC_ENTITY_DELTA_RECORD_BYTES;
+}
+
+/** Encodes a delta into `view`, which must be at least `shadoDynamicEntityReducerDeltaByteLength` long. */
+export function writeShadoDynamicEntityReducerDelta(
+  records: readonly ShadoDynamicEntityReducerDeltaRecord[],
+  view: DataView
+): void {
   view.setUint32(0, SHADO_DYNAMIC_ENTITY_REDUCER_MAGIC, true);
   view.setUint32(4, SHADO_DYNAMIC_ENTITY_REDUCER_VERSION, true);
   view.setInt32(8, records.length, true);
@@ -322,8 +345,6 @@ export function encodeShadoDynamicEntityReducerDelta(
     view.setInt32(offset + 36, record.removeAfterFrame ?? 0, true);
     view.setFloat64(offset + 40, record.removeAfterSimulationTime ?? 0, true);
   }
-
-  return bytes;
 }
 
 function resolveInitConfig(
