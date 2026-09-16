@@ -224,6 +224,11 @@ export class ShadoDynamicEntityNameplateLayer {
   private readonly engine: AbstractEngine;
   private enabled: boolean;
   private readyPromise: Promise<void> | null = null;
+  /**
+   * Set once the font and the Shado streams exist, so a later `sync` can write
+   * straight through instead of waiting a microtask. See `sync`.
+   */
+  private ready = false;
   private fontAsset: MSDFNameplateFontAsset | null = null;
   private ownsFontAsset = false;
   private container: ShadoDynamicNameplateContainer | null = null;
@@ -260,9 +265,28 @@ export class ShadoDynamicEntityNameplateLayer {
     this.mesh?.setEnabled(enabled);
   }
 
+  /**
+   * Places the labels for this frame.
+   *
+   * Synchronous once the layer is ready, which matters more than it looks.
+   * Deferring the write through `.then()` -- even on an already-resolved
+   * promise -- lands it in a microtask, and the microtask queue is not drained
+   * until the task that called `render()` finishes. Every plate was therefore
+   * written *after* the frame that was supposed to show it and drawn one frame
+   * behind the body it names. Along the view axis, while running forward, that
+   * is invisible; strafing makes it entirely lateral and the name slides off
+   * its owner until they stop.
+   *
+   * The first call still has to wait for the font, which is the one case where
+   * there is nothing to draw yet anyway.
+   */
   public sync(inputs: readonly ShadoDynamicEntityNameplateInput[]): void {
     this.latestInputs = inputs;
     if (this.disposed) {
+      return;
+    }
+    if (this.ready) {
+      this.applySync(inputs);
       return;
     }
     void this.ensureReady()
@@ -281,6 +305,7 @@ export class ShadoDynamicEntityNameplateLayer {
 
   public dispose(): void {
     this.disposed = true;
+    this.ready = false;
     this.mesh?.dispose(false, false);
     this.container?.dispose();
     this.nameplates?.dispose();
@@ -310,6 +335,7 @@ export class ShadoDynamicEntityNameplateLayer {
         );
         this.ownsFontAsset = true;
       }
+      this.ready = true;
     })();
     await this.readyPromise;
   }

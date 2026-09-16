@@ -341,8 +341,24 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     vec3 viewDirection = normalize(uShadoFoliageCamera - shadoFoliageAnchor);
     vec3 bladeNormal = normalize(cross(shadoFoliageAcross, shadoFoliageTangent));
     if (dot(bladeNormal, viewDirection) < 0.0) bladeNormal = -bladeNormal;
+    // A meadow is a rough surface, not a crowd of vertical plates.
+    //
+    // Lighting each blade by its own normal alone is the classic grass mistake.
+    // A blade stands up, so its normal points sideways, and at midday
+    // dot(n, sun) is near zero: the blade takes about 0.31 of the sun while the
+    // flat ground beside it takes 1.0, and the field reads as a dark carpet cut
+    // into pale earth. At dusk the same term inverts -- a sideways normal faces
+    // a low sun head-on -- and the grass is suddenly brighter than the ground.
+    // Either way it does not belong to the ground it grows out of.
+    //
+    // What the single-facet term cannot express is the light bouncing between
+    // blades, which is most of what leaves a real meadow. Shading partly by the
+    // field's aggregate normal -- up -- stands in for it: the blade keeps its
+    // own shape and its own variation, and the field as a whole tracks the
+    // ground's response through the day.
+    vec3 shadingNormal = normalize(mix(bladeNormal, vec3(0.0, 1.0, 0.0), 0.55));
     if (inst.padding1 > 0.5) {
-      float wrapped = clamp((dot(bladeNormal, uShadoLightDirection) + 0.45) / 1.45, 0.0, 1.0);
+      float wrapped = clamp((dot(shadingNormal, uShadoLightDirection) + 0.45) / 1.45, 0.0, 1.0);
       float backscatter =
         pow(max(dot(viewDirection, -uShadoLightDirection), 0.0), 3.0) * 0.35;
       vShadoLighting = uShadoAmbientColor + uShadoLightColor
@@ -488,9 +504,25 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     let viewDirection = normalize(uniforms.uShadoFoliageCamera - shadoFoliageAnchor);
     var bladeNormal = normalize(cross(shadoFoliageAcross, shadoFoliageTangent));
     bladeNormal = select(-bladeNormal, bladeNormal, dot(bladeNormal, viewDirection) >= 0.0);
+    // A meadow is a rough surface, not a crowd of vertical plates.
+    //
+    // Lighting each blade by its own normal alone is the classic grass mistake.
+    // A blade stands up, so its normal points sideways, and at midday
+    // dot(n, sun) is near zero: the blade takes about 0.31 of the sun while the
+    // flat ground beside it takes 1.0, and the field reads as a dark carpet cut
+    // into pale earth. At dusk the same term inverts -- a sideways normal faces
+    // a low sun head-on -- and the grass is suddenly brighter than the ground.
+    // Either way it does not belong to the ground it grows out of.
+    //
+    // What the single-facet term cannot express is the light bouncing between
+    // blades, which is most of what leaves a real meadow. Shading partly by the
+    // field's aggregate normal -- up -- stands in for it: the blade keeps its
+    // own shape and its own variation, and the field as a whole tracks the
+    // ground's response through the day.
+    let shadingNormal = normalize(mix(bladeNormal, vec3f(0.0, 1.0, 0.0), 0.55));
     if (inst.padding1 > 0.5) {
       let wrapped = clamp(
-        (dot(bladeNormal, uniforms.uShadoLightDirection) + 0.45) / 1.45,
+        (dot(shadingNormal, uniforms.uShadoLightDirection) + 0.45) / 1.45,
         0.0,
         1.0
       );

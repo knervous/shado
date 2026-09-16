@@ -287,6 +287,7 @@
     "build": "cross-env NODE_OPTIONS=--max-old-space-size=8192 tsup",
     "build:vat-kernel": "node scripts/build-vat-kernel.mjs",
     "build:sprite-2d-motion-kernel": "node scripts/build-sprite-2d-motion-kernel.mjs",
+    "build:particle-reducer": "node scripts/build-particle-reducer.mjs",
     "build:vat-bake-worker": "npm run build:vat-kernel && node scripts/build-vat-bake-worker.mjs",
     "build:showcase-culling": "npm run build && node scripts/build-showcase-culling-wasm.mjs",
     "build:world-reducer": "node dist/cli.js asc build --config world/shado.config.mjs",
