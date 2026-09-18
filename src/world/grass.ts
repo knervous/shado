@@ -1,6 +1,7 @@
 import {
   appendSurfaceHeightField,
   compileCoverage,
+  type TerrainSuppression,
   COVERAGE_RESOLUTION,
   eligibleTriangles,
   randomGenerator,
@@ -44,7 +45,8 @@ const DEFAULTS = {
 export function compileShadoWorldGrass(
   primitives: readonly ShadoWorldPrimitive[],
   options: ShadoWorldGrassCompileOptions | false | undefined,
-  blockerPrimitives: readonly ShadoWorldPrimitive[] = []
+  blockerPrimitives: readonly ShadoWorldPrimitive[] = [],
+  terrainSuppression?: TerrainSuppression
 ): ShadoWorldGrassPackage | undefined {
   if (options === false) return undefined;
   const settings = { ...DEFAULTS, ...options };
@@ -60,7 +62,7 @@ export function compileShadoWorldGrass(
   if (!sources.length) {
     return options ? bucketPlacements([], settings, new Map()) : undefined;
   }
-  const coverage = compileCoverage(primitives, settings, blockerPrimitives);
+  const coverage = compileCoverage(primitives, settings, blockerPrimitives, terrainSuppression);
 
   const placements: Placement[] = [];
   let remaining = settings.maxPlacements;

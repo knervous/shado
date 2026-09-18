@@ -28,7 +28,13 @@ export type EltaniaTerrainRole =
   | 'terrain.path'
   | 'terrain.soil'
   | 'terrain.gravel'
-  | 'terrain.rock';
+  | 'terrain.rock'
+  /**
+   * Ground somebody laid. Every other role is a surface that happened; this one
+   * was a decision, which is why a plaza reads as civic and a gravel yard does
+   * not.
+   */
+  | 'terrain.paving';
 
 export type EltaniaTerrainMaterial = {
   /** `family/key`, the value an authored layer stores in `material`. */
@@ -71,7 +77,9 @@ export type EltaniaTerrainControlChannel =
   | 'path'
   | 'growth'
   | 'exposure'
-  | 'wetness';
+  | 'wetness'
+  | 'paving'
+  | 'gravel';
 
 export type EltaniaTerrainControlDefinition = {
   channel: EltaniaTerrainControlChannel;
@@ -112,6 +120,39 @@ export const ELTANIA_TERRAIN_CONTROLS: readonly EltaniaTerrainControlDefinition[
     label: 'Wetness',
     effect: 'Darkens and smooths the surface, favours damp earth and moss, and deepens colour in hollows.',
   },
+  /*
+   * The first channel on the SECOND control map, and the reason there is one.
+   *
+   * Laid paving is not wear, growth, exposure or wet, and it cannot borrow one
+   * of those: whichever it borrowed would also do its own job wherever the
+   * plaza is, so a paved square would come with the grass suppression of a
+   * cart track or the bare rock of a scoured crest wherever the painter
+   * happened to put it. A surface somebody decided on needs its own decision.
+   */
+  {
+    channel: 'paving',
+    map: 1,
+    component: 0,
+    label: 'Laid paving',
+    effect: 'Brings up cut stone paving, flat and level, and stops grass entirely.',
+  },
+  /*
+   * Loose stone is not bare rock, and they cannot share a channel.
+   *
+   * `exposure` summons the cliff layer — that is what it is for, an outcrop
+   * pushing through regardless of slope. Painting a gravelly verge along every
+   * street with it therefore painted CRAG along every street: a top-down view of
+   * the market spine came back with a wide band of mountain face flanking the
+   * earth, on the flat, between two rows of houses. A trodden verge and a
+   * scoured crest are different decisions and now have different brushes.
+   */
+  {
+    channel: 'gravel',
+    map: 1,
+    component: 1,
+    label: 'Loose stone',
+    effect: 'Brings up scree and gravel on flat ground, for verges, yards and the edges of made surfaces.',
+  },
 ];
 
 export const ELTANIA_TERRAIN_CONTROL_BY_CHANNEL: Readonly<Record<EltaniaTerrainControlChannel, EltaniaTerrainControlDefinition>> =
@@ -127,7 +168,7 @@ export function terrainMaterial(id: string): EltaniaTerrainMaterial | null {
 
 /** Palette grouped by role, in role order, for a grouped dropdown. */
 export function terrainMaterialsByRole(): Array<{ role: EltaniaTerrainRole; label: string; materials: EltaniaTerrainMaterial[] }> {
-  const roles: EltaniaTerrainRole[] = ['terrain.grass', 'terrain.path', 'terrain.soil', 'terrain.gravel', 'terrain.rock'];
+  const roles: EltaniaTerrainRole[] = ['terrain.grass', 'terrain.path', 'terrain.soil', 'terrain.gravel', 'terrain.rock', 'terrain.paving'];
   return roles.map((role) => ({
     role,
     label: ELTANIA_TERRAIN_ROLE_LABELS[role],

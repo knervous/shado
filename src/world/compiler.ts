@@ -16,15 +16,25 @@ import { resolveShadoWorldAudioEmitters } from './audio-emitters';
 import { compileTerrainSurface, type EltaniaTerrainSurfaceSpec } from './terrain-compile';
 
 function compileTerrainSurfaceOrNothing(
-  authoring: { terrain?: ShadoWorldTerrainMaterialAuthoring } | undefined,
+  authoring:
+    | { terrain?: ShadoWorldTerrainMaterialAuthoring; metadata?: Record<string, unknown> }
+    | undefined,
   bounds: { min: WorldVec3; max: WorldVec3 },
 ): EltaniaTerrainSurfaceSpec | undefined {
   if (!authoring?.terrain) return undefined;
   try {
+    /*
+     * The zone's own scale, so a layer authored at four metres arrives four
+     * metres wide. Talios builds at three units to the metre; a zone that does
+     * not declare a scale is taken to be one, which is what every presentation
+     * scene is.
+     */
+    const declared = Number(authoring.metadata?.zoneUnitsPerMetre);
     return compileTerrainSurface(authoring.terrain, {
       worldMin: [bounds.min[0], bounds.min[2]],
       worldMax: [bounds.max[0], bounds.max[2]],
       ...(authoring.terrain.settings ?? {}),
+      unitsPerMetre: Number.isFinite(declared) && declared > 0 ? declared : 1,
     }) ?? undefined;
   } catch {
     return undefined;
@@ -318,15 +328,24 @@ export function compileShadoWorld(
     unionBounds(clusters.filter(cluster => cluster.cellId === cell))
   );
   const compiledObjects = compileObjects(authoring, tileIds, originX, originZ, tileSize);
+  /*
+   * The painted ground is the third thing that can say "no grass here", beside
+   * a blocking object and a surface too steep to hold any. It arrives as a
+   * raster over the terrain's own rectangle rather than as a callback so the
+   * packer stays serialisable and the same mask can be asserted in a test.
+   */
+  const terrainSuppression = options.grassTerrainSuppression;
   const grass = compileShadoWorldGrass(
     primitives,
     options.grass,
-    options.grassBlockerPrimitives
+    options.grassBlockerPrimitives,
+    terrainSuppression
   );
   const grassField = compileShadoWorldGrassField(
     primitives,
     options.grassField,
-    options.grassBlockerPrimitives
+    options.grassBlockerPrimitives,
+    terrainSuppression
   );
   const navigationModifiers = compileNavigationModifiers(authoring);
   const collision = encodeShadoWorldCollision(options.collisionPrimitives ?? primitives, {

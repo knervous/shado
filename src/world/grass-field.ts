@@ -3,6 +3,7 @@ import {
   compileCoverage,
   COVERAGE_RESOLUTION,
   SURFACE_HEIGHT_RESOLUTION,
+  type TerrainSuppression,
 } from './grass-coverage';
 import type {
   ShadoWorldGrassFieldCompileOptions,
@@ -41,13 +42,14 @@ const DEFAULTS = {
 export function compileShadoWorldGrassField(
   primitives: readonly ShadoWorldPrimitive[],
   options: ShadoWorldGrassFieldCompileOptions | false | undefined,
-  blockerPrimitives: readonly ShadoWorldPrimitive[] = []
+  blockerPrimitives: readonly ShadoWorldPrimitive[] = [],
+  terrainSuppression?: TerrainSuppression
 ): ShadoWorldGrassFieldPackage | undefined {
   if (options === false || options === undefined) return undefined;
   const settings = { ...DEFAULTS, ...options };
   validateSettings(settings);
 
-  const coverage = compileCoverage(primitives, settings, blockerPrimitives);
+  const coverage = compileCoverage(primitives, settings, blockerPrimitives, terrainSuppression);
   const cells = [...coverage.values()].sort((a, b) => a.z - b.z || a.x - b.x);
 
   const output: ShadoWorldGrassFieldPackage = {

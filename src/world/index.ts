@@ -1,6 +1,7 @@
 export * from './types';
 export * from './terrain-palette';
 export * from './terrain-compile';
+export * from './terrain-grass';
 export * from './fx';
 export * from './foliage';
 export * from './grass';

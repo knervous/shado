@@ -24,17 +24,49 @@ export type CoverageSettings = {
   minimumUpNormal: number;
 };
 
+/** Where the painted ground is not grass; see `terrainGrassSuppression`. */
+export type TerrainSuppression = {
+  width: number;
+  height: number;
+  values: Uint8Array;
+  worldMin: readonly [number, number];
+  worldMax: readonly [number, number];
+  threshold?: number;
+};
+
+/**
+ * Nearest-texel read of the suppression raster at a world XZ.
+ *
+ * Nearest rather than bilinear on purpose: this is a yes/no decision against a
+ * threshold, and interpolating first only moves the edge by half a texel while
+ * costing four reads per grass sample over the whole zone.
+ */
+function suppressedAt(mask: TerrainSuppression, x: number, z: number): boolean {
+  const spanX = mask.worldMax[0] - mask.worldMin[0];
+  const spanZ = mask.worldMax[1] - mask.worldMin[1];
+  if (!(spanX > 0) || !(spanZ > 0)) return false;
+  const u = Math.floor(((x - mask.worldMin[0]) / spanX) * mask.width);
+  const v = Math.floor(((z - mask.worldMin[1]) / spanZ) * mask.height);
+  if (u < 0 || v < 0 || u >= mask.width || v >= mask.height) return false;
+  return mask.values[v * mask.width + u]! >= Math.round(255 * (mask.threshold ?? 0.35));
+}
+
 export function compileCoverage(
   primitives: readonly ShadoWorldPrimitive[],
   settings: CoverageSettings,
-  blockerPrimitives: readonly ShadoWorldPrimitive[]
+  blockerPrimitives: readonly ShadoWorldPrimitive[],
+  terrainSuppression?: TerrainSuppression
 ): Map<string, CoverageCell> {
   const cells = new Map<string, CoverageCell>();
   for (const primitive of primitives) {
     if (primitive.extraShader !== 'grass') continue;
     const triangles = eligibleTriangles(primitive, settings.minimumUpNormal);
     for (const triangle of triangles) {
-      rasterizeTriangle(primitive, triangle, settings.cellSize, (x, z, sample, y) => {
+      rasterizeTriangle(primitive, triangle, settings.cellSize, (x, z, sample, y, worldX, worldZ) => {
+        // Painted ground that is not grass never bears blades. This is the same
+        // mask the terrain shader draws the track from, so what the player sees
+        // and what the grass grows on cannot disagree.
+        if (terrainSuppression && suppressedAt(terrainSuppression, worldX, worldZ)) return;
         const key = `${x}:${z}`;
         let cell = cells.get(key);
         if (!cell) {
@@ -121,7 +153,8 @@ export function rasterizeTriangle(
   primitive: ShadoWorldPrimitive,
   triangle: SurfaceTriangle,
   cellSize: number,
-  visit: (cellX: number, cellZ: number, sample: number, y: number) => void
+  /** `worldX`/`worldZ` are the sample's position in canonical zone space. */
+  visit: (cellX: number, cellZ: number, sample: number, y: number, worldX: number, worldZ: number) => void
 ): void {
   const positions = primitive.positions;
   const ax = Number(positions[triangle.a]);
@@ -158,7 +191,9 @@ export function rasterizeTriangle(
         cellX,
         cellZ,
         localZ * COVERAGE_RESOLUTION + localX,
-        ay * baryA + by * baryB + cy * baryC
+        ay * baryA + by * baryB + cy * baryC,
+        sampleX,
+        sampleZ
       );
     }
   }

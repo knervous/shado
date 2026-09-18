@@ -40,7 +40,12 @@ export type EltaniaTerrainSpecLayer = {
   /** Multiplied onto the sampled roughness, so a surface can be pushed wet or dry without a new scan. */
   roughness: number;
   heightContrast: number;
-  /** RGBA component of control map 0 this layer answers to, or -1. */
+  /**
+   * Which painted channel this layer answers to, as a flat index across both
+   * control maps — 0-3 are map 0's RGBA, 4-7 are map 1's — or -1 for a layer
+   * that is purely procedural. Flat because it rides in one float of a
+   * per-layer vec4 and the shader picks it with a chain of comparisons.
+   */
   controlComponent: number;
   controlSign: number;
   controlGain: number;
@@ -75,6 +80,20 @@ export type EltaniaTerrainSurfaceSpec = {
 export type TerrainCompileOptions = {
   worldMin: [number, number];
   worldMax: [number, number];
+  /**
+   * World units per metre in the space the shader receives positions in.
+   *
+   * An author sets a layer's tile and its macro noise in METRES, which is the
+   * only size either of them can be reasoned about in, and the shader multiplies
+   * a WORLD position by the reciprocal. Those are the same number only in a zone
+   * built at one unit to the metre — and Talios is built at three, so every
+   * authored tile was arriving a third of its stated size. The effect is not a
+   * subtle one: a four-metre dirt repeat laid at 1.33 m mips to its own average
+   * by the far end of a street, and a road reads as flat sand.
+   *
+   * Defaults to 1 so a presentation scene authored in metres is unchanged.
+   */
+  unitsPerMetre?: number;
   /** Degrees of slope over which hybrid layers cross to triplanar projection. */
   triplanarDegrees?: [number, number];
   heightBlendSharpness?: number;
@@ -130,6 +149,10 @@ export function compileTerrainSurface(
   const resolved: ResolvedTerrainLayer[] = enabled.map((layer) => resolveTerrainLayer(layer));
   const triplanarDegrees = options.triplanarDegrees ?? [24, 46];
   const macroMetres = options.macroMetres ?? 60;
+  /* Authored metres become the shader's world-space reciprocals here, once. */
+  const unitsPerMetre = options.unitsPerMetre && options.unitsPerMetre > 0 ? options.unitsPerMetre : 1;
+  const perUnit = (reciprocalMetres: number): number =>
+    reciprocalMetres > 0 ? reciprocalMetres / unitsPerMetre : 0;
 
   return {
     schema: 'eltania.terrain.surface',
@@ -141,15 +164,15 @@ export function compileTerrainSurface(
       textures: layer.material.textures,
       projection: layer.projection,
       weight: layer.weight,
-      tileScale: layer.tileScale,
+      tileScale: perUnit(layer.tileScale),
       slope: layer.slope,
       altitude: layer.altitude,
-      noiseScale: layer.noiseScale,
+      noiseScale: perUnit(layer.noiseScale),
       noiseAmount: layer.noiseScale > 0 ? LAYER_NOISE_AMOUNT : 0,
       normalScale: layer.normalScale,
       roughness: layer.roughness,
       heightContrast: layer.heightContrast,
-      controlComponent: layer.control ? layer.control.component : -1,
+      controlComponent: layer.control ? layer.control.map * 4 + layer.control.component : -1,
       controlSign: layer.controlSign,
       controlGain: CONTROL_GAIN,
     })),
@@ -158,7 +181,7 @@ export function compileTerrainSurface(
     worldMax: options.worldMax,
     triplanarSlope: [steepnessFromDegrees(triplanarDegrees[0]), steepnessFromDegrees(triplanarDegrees[1])],
     heightBlendSharpness: options.heightBlendSharpness ?? 0.14,
-    macroScale: 1 / Math.max(1, macroMetres),
+    macroScale: 1 / Math.max(1, macroMetres * unitsPerMetre),
     macroStrength: options.macroStrength ?? 0.22,
     pathSuppression: options.pathSuppression ?? 0.92,
     biomeTint: options.biomeTint ?? [1, 1, 1],

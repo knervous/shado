@@ -875,6 +875,23 @@ export type ShadoWorldCompileOptions = {
   collisionPrimitives?: readonly ShadoWorldPrimitive[];
   /** Stamped structural geometry that suppresses grass without joining the base render scene. */
   grassBlockerPrimitives?: readonly ShadoWorldPrimitive[];
+  /**
+   * Where the painted terrain is not grass, over the terrain's own world
+   * rectangle. Built by `terrainGrassSuppression` from the zone's control maps.
+   *
+   * Without it the bake grows a lawn through every dirt track and paved square
+   * in the zone, because a painted floor is the same triangle as the meadow
+   * beside it and geometry alone cannot tell them apart.
+   */
+  grassTerrainSuppression?: {
+    width: number;
+    height: number;
+    values: Uint8Array;
+    worldMin: readonly [number, number];
+    worldMax: readonly [number, number];
+    /** 0..1; a texel at or above this is not grass. Defaults to 0.35. */
+    threshold?: number;
+  };
   /** Width/depth of independently resident Havok collision chunks. */
   physicsChunkSize?: number;
   /** Runtime URL, normally a sibling of the spatial package. */

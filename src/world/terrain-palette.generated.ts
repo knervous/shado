@@ -11,7 +11,8 @@ export const ELTANIA_TERRAIN_ROLE_LABELS: Readonly<Record<EltaniaTerrainRole, st
   "terrain.path": "Paths and wear",
   "terrain.soil": "Soil and litter",
   "terrain.gravel": "Gravel and scree",
-  "terrain.rock": "Stone"
+  "terrain.rock": "Stone",
+  "terrain.paving": "Laid paving"
 };
 
 export const ELTANIA_TERRAIN_PALETTE_MATERIALS: readonly EltaniaTerrainMaterial[] = [
@@ -223,5 +224,24 @@ export const ELTANIA_TERRAIN_PALETTE_MATERIALS: readonly EltaniaTerrainMaterial[
     "normalScale": 1.4,
     "roughness": 1,
     "heightContrast": 0.9
+  },
+  {
+    "id": "eltania-ground-v1/stonePaving",
+    "family": "eltania-ground-v1",
+    "key": "stonePaving",
+    "label": "Cut stone paving",
+    "role": "terrain.paving",
+    "note": "cut and laid civic paving for plazas, courts and processional ways",
+    "source": "granite_tile_04",
+    "textures": {
+      "albedo": "/eltania/terrain/palette/eltania-ground-v1/stonePaving-albedo.webp",
+      "normal": "/eltania/terrain/palette/eltania-ground-v1/stonePaving-normal.webp",
+      "hrm": "/eltania/terrain/palette/eltania-ground-v1/stonePaving-hrm.webp"
+    },
+    "preview": "/eltania/terrain/palette/eltania-ground-v1/previews/stonePaving-preview.webp",
+    "tileMetres": 3.2,
+    "normalScale": 1,
+    "roughness": 0.9,
+    "heightContrast": 0.42
   }
 ];
