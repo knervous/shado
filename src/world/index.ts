@@ -19,3 +19,4 @@ export * from './runtime';
 export * from './ShadoWorldReducer';
 export * from './ShadoWorldVisibilityCoordinator';
 export * from './ShadoEntityVisibilityWorker';
+export * from './light-behavior';
