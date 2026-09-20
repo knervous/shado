@@ -43,6 +43,49 @@ export type ShadoWorldObjectRenderBatch = {
   matrices: Float32Array;
   /** Per-stamp baked irradiance uploaded as Babylon thin-instance colors. */
   colors: Float32Array;
+  /**
+   * The same stamps split by detail level, nearest first. Always at least one
+   * entry; without a {@link ShadoWorldObjectLodSelection} it is the whole set
+   * at level 0, which is what every consumer saw before levels existed.
+   */
+  levels: ShadoWorldObjectRenderLevel[];
+};
+
+/** One detail level's share of a prototype's visible stamps. */
+export type ShadoWorldObjectRenderLevel = {
+  /** 0 is the shipped model; 1 and up are the coarser meshes beside it. */
+  level: number;
+  stampIndices: Uint32Array;
+  matrices: Float32Array;
+  colors: Float32Array;
+};
+
+/**
+ * How to choose a level for each stamp.
+ *
+ * Selection is by PROJECTED SIZE, not distance, and the difference matters: a
+ * zone stamps a cobble tile and a keep from the same layer, and a distance that
+ * is far for one is intimate for the other. Screen height also makes the choice
+ * resolution- and field-of-view independent for free, and it is the metric the
+ * visibility reduction already culls on, so a stamp cannot be culled for being
+ * small while being drawn at full detail for being close.
+ */
+export type ShadoWorldObjectLodSelection = {
+  /** Camera position, world space. */
+  camera: readonly [number, number, number];
+  /**
+   * Pixels covered by one world unit of radius at one unit of distance:
+   * `(renderHeight / 2) / tan(fov / 2)` for a vertically-fixed field of view.
+   */
+  pixelsPerRadius: number;
+  /**
+   * Projected screen height at or below which a stamp drops to the next level.
+   * `thresholds[0]` is the 0 -> 1 boundary, `[1]` the 1 -> 2, and so on;
+   * descending, and a stamp never drops past what its prototype ships.
+   */
+  thresholds: readonly number[];
+  /** How many COARSER levels this prototype has. 0 means model only. */
+  levelsFor: (prototype: number) => number;
 };
 
 /**
@@ -53,7 +96,8 @@ export type ShadoWorldObjectRenderBatch = {
  */
 export function buildShadoWorldObjectRenderBatches(
   world: ShadoWorldSpatialPackage,
-  visibleByPrototype?: readonly ArrayLike<number>[]
+  visibleByPrototype?: readonly ArrayLike<number>[],
+  lod?: ShadoWorldObjectLodSelection
 ): ShadoWorldObjectRenderBatch[] {
   const objects = world.objects;
   if (!objects) return [];
@@ -87,8 +131,70 @@ export function buildShadoWorldObjectRenderBatches(
       stampIndices,
       matrices,
       colors,
+      levels: splitByLevel(objects.stamps, stampIndices, matrices, colors, prototype, lod),
     };
   });
+}
+
+/**
+ * Deal one prototype's visible stamps into its levels.
+ *
+ * The matrices are re-used rather than recomputed: they were already written
+ * above, and a level is a permutation of rows out of that buffer. A prototype
+ * whose stamps all land on one level returns a single entry sharing the
+ * original arrays, so the common case allocates nothing.
+ */
+function splitByLevel(
+  stamps: NonNullable<ShadoWorldSpatialPackage['objects']>['stamps'],
+  stampIndices: Uint32Array,
+  matrices: Float32Array,
+  colors: Float32Array,
+  prototype: number,
+  lod?: ShadoWorldObjectLodSelection
+): ShadoWorldObjectRenderLevel[] {
+  const whole = [{ level: 0, stampIndices, matrices, colors }];
+  if (!lod || stampIndices.length === 0) return whole;
+  const deepest = Math.min(lod.levelsFor(prototype), lod.thresholds.length);
+  if (deepest <= 0) return whole;
+
+  const [cx, cy, cz] = lod.camera;
+  const levelOf = new Uint8Array(stampIndices.length);
+  let highest = 0;
+  stampIndices.forEach((stamp, index) => {
+    const dx = stamps.positionX[stamp] - cx;
+    const dy = stamps.positionY[stamp] - cy;
+    const dz = stamps.positionZ[stamp] - cz;
+    const distance = Math.sqrt(dx * dx + dy * dy + dz * dz);
+    // A stamp at or inside the camera is as large as it can be, not infinite.
+    const pixels =
+      distance > 1e-3
+        ? (stamps.radius[stamp] * lod.pixelsPerRadius) / distance
+        : Number.POSITIVE_INFINITY;
+    let level = 0;
+    while (level < deepest && pixels <= lod.thresholds[level]!) level += 1;
+    levelOf[index] = level;
+    if (level > highest) highest = level;
+  });
+  if (highest === 0) return whole;
+
+  const out: ShadoWorldObjectRenderLevel[] = [];
+  for (let level = 0; level <= highest; level += 1) {
+    const rows: number[] = [];
+    for (let index = 0; index < levelOf.length; index += 1) {
+      if (levelOf[index] === level) rows.push(index);
+    }
+    if (!rows.length) continue;
+    const levelMatrices = new Float32Array(rows.length * 16);
+    const levelColors = new Float32Array(rows.length * 4);
+    const levelStamps = new Uint32Array(rows.length);
+    rows.forEach((row, index) => {
+      levelMatrices.set(matrices.subarray(row * 16, row * 16 + 16), index * 16);
+      levelColors.set(colors.subarray(row * 4, row * 4 + 4), index * 4);
+      levelStamps[index] = stampIndices[row]!;
+    });
+    out.push({ level, stampIndices: levelStamps, matrices: levelMatrices, colors: levelColors });
+  }
+  return out;
 }
 
 const QUATERNION_SCRATCH = new Float32Array(4);
