@@ -27,6 +27,12 @@ export interface SpeechBubbleSpawn {
   /** The spoken text, already stripped of any markup the chat layer understands. */
   readonly text: string;
   readonly tone?: SpeechBubbleTone;
+  /**
+   * Display name of the speaker, already resolved and spaced for reading. The
+   * caller resolves it once at speak time — a spawn id points at a body that may
+   * leave the world mid-sentence — and the bubble carries it for its whole life.
+   */
+  readonly name?: string;
 }
 
 /** Where a speaker is right now. Returning null retires the bubble. */
@@ -50,6 +56,10 @@ export interface SpeechBubbleInstance {
   visible: boolean;
   fontSize: number;
   color: string;
+  /** Resolved speaker name, spaced for reading; "" when the caller gave none. */
+  name: string;
+  /** Carried through so a consumer can style dialogue, chat and emote apart. */
+  tone: SpeechBubbleTone;
 }
 
 export interface SpeechBubbleStyle {
@@ -111,6 +121,7 @@ interface ActiveBubble {
   readonly id: string;
   readonly speakerId: number | string;
   readonly text: string;
+  readonly name: string;
   readonly lineCount: number;
   readonly tone: SpeechBubbleTone;
   readonly bornAtMs: number;
@@ -227,6 +238,7 @@ export class SpeechBubblePool {
       id,
       speakerId: spawn.speakerId,
       text,
+      name: spawn.name ?? "",
       lineCount: text.split("\n").length,
       tone: spawn.tone ?? "npc",
       bornAtMs: nowMs,
@@ -301,6 +313,8 @@ export class SpeechBubblePool {
         visible: anchor.visible !== false && alpha > 0.02,
         fontSize: style.fontSize,
         color: `#${style.rgb}${toHexByte(alpha)}`,
+        name: entry.name,
+        tone: entry.tone,
       });
     }
 
