@@ -35,6 +35,10 @@ export type ShadoEntityVisibilityWorkerLayout = {
   radiusOffset: number;
   enabledOffset: number;
   phaseMaskOffset: number;
+  /** Per-slot generation, bumped whenever a slot is reused by a new occupant. */
+  slotGenerationOffset: number;
+  /** Generation of each visible slot, published beside the compact indices. */
+  resultGenerationOffsets: readonly [number, number];
   visibleIndicesOffsets: readonly [number, number];
   flagsOffsets: readonly [number, number];
   flagsCapacity: number;
@@ -43,12 +47,39 @@ export type ShadoEntityVisibilityWorkerLayout = {
 export type ShadoEntityVisibilityWorkerResult = {
   generation: number;
   visibleIndices: Uint32Array;
+  /**
+   * The slot generation each visible index was computed for.
+   *
+   * A slot reused by a new occupant carries a new generation, so a result
+   * computed for the previous occupant can be recognised and dropped instead
+   * of revealing or hiding whoever holds the slot now.
+   */
+  visibleGenerations: Uint32Array;
   flags: Uint8Array;
+  /** Milliseconds between the request being dispatched and this being read. */
+  ageMs: number;
+  /** The epochs this result was computed against, for the caller to match. */
+  epochs: ShadoEntityVisibilityEpochs;
+  /** True when the result is older than the caller's permitted age. */
+  stale: boolean;
   workerDurationMs: number;
   candidateCount: number;
   hierarchyRebuildMs: number;
   copiedInputBytes: number;
   publishedFlagBytes: number;
+};
+
+/**
+ * What a result was computed against.
+ *
+ * A result is only applicable to the state it was asked about: a different
+ * package, a changed topology or a changed policy makes an old hidden
+ * decision unsafe immediately, rather than merely out of date.
+ */
+export type ShadoEntityVisibilityEpochs = {
+  world: number;
+  topology: number;
+  policy: number;
 };
 
 export type ShadoEntityVisibilityWorkerStats = {
@@ -63,6 +94,14 @@ export type ShadoEntityVisibilityWorkerStats = {
   publishedFlagBytes: number;
   scheduledSkips: number;
   error: string | null;
+  /** Results discarded because their epochs no longer match the caller's. */
+  staleEpochResults: number;
+  /** Results delivered past the permitted age; the caller falls back. */
+  staleAgeResults: number;
+  /** Age of the last delivered result, in milliseconds. */
+  lastResultAgeMs: number;
+  /** Slots whose deltas are waiting for the next dispatch. */
+  pendingDeltaSlots: number;
 };
 
 type WorkerRequest = {
@@ -75,6 +114,12 @@ type WorkerRequest = {
   outsideWorldVisible: boolean;
   activePhaseMask: number;
   radiusScale: number;
+  /** Slot changes this request carries; applied before it reduces. */
+  delta: ShadoEntityVisibilityDelta;
+  /** What this request is asking about; a result only applies to these. */
+  epochs: ShadoEntityVisibilityEpochs;
+  /** When it was dispatched, for the age the caller is allowed to accept. */
+  dispatchedAtMs: number;
 };
 
 type WorkerMessage =
@@ -118,6 +163,26 @@ export type ShadoEntityVisibilityWorkerWorld = {
  * request never walks this projection, so request cost does not grow with the
  * total entity count.
  */
+/**
+ * One immutable batch of slot changes, handed to the worker with a request.
+ *
+ * Packed rather than per-slot messages, and drained rather than re-sent: a
+ * camera move must not copy the whole population, and a population change
+ * must not be lost because a camera move replaced the request carrying it.
+ */
+export type ShadoEntityVisibilityDelta = {
+  /** Slots this batch describes. */
+  slots: Uint32Array;
+  /** Generation of each slot at the moment it was drained. */
+  generations: Uint32Array;
+  /** x, y, z, radius per slot, in slot order. */
+  transforms: Float32Array;
+  /** enabled in bit 0, the phase mask in the upper bits, per slot. */
+  policy: Uint32Array;
+  /** Entity count at drain time; the worker resizes to it. */
+  count: number;
+};
+
 export class ShadoEntityVisibilityProjection {
   public readonly positionX: Float32Array;
   public readonly positionY: Float32Array;
@@ -125,6 +190,12 @@ export class ShadoEntityVisibilityProjection {
   public readonly radius: Float32Array;
   public readonly enabled: Uint8Array;
   public readonly phaseMask: Uint32Array;
+  /** Per-slot generation; a reused slot is a different entity. */
+  public readonly slotGeneration: Uint32Array;
+  /** Slots changed since the last drain, in insertion order, deduplicated. */
+  private readonly dirty = new Set<number>();
+  /** Set once the whole population must be resent, e.g. after a bulk load. */
+  private dirtyAll = true;
 
   public constructor(
     public readonly buffer: SharedArrayBuffer,
@@ -136,6 +207,7 @@ export class ShadoEntityVisibilityProjection {
     this.radius = new Float32Array(buffer, layout.radiusOffset, layout.capacity);
     this.enabled = new Uint8Array(buffer, layout.enabledOffset, layout.capacity);
     this.phaseMask = new Uint32Array(buffer, layout.phaseMaskOffset, layout.capacity);
+    this.slotGeneration = new Uint32Array(buffer, layout.slotGenerationOffset, layout.capacity);
   }
 
   public get capacity(): number {
@@ -163,6 +235,7 @@ export class ShadoEntityVisibilityProjection {
     this.positionY[index] = y;
     this.positionZ[index] = z;
     this.radius[index] = Math.max(0, radius);
+    this.dirty.add(index);
     this.markSpatialChange();
   }
 
@@ -170,6 +243,58 @@ export class ShadoEntityVisibilityProjection {
     this.assertIndex(index);
     this.enabled[index] = enabled ? 1 : 0;
     this.phaseMask[index] = phaseMask >>> 0;
+    this.dirty.add(index);
+    // Policy decides admission, so an old hidden decision made under the
+    // previous policy is not merely stale -- it is wrong now.
+    this.markSpatialChange();
+  }
+
+  /**
+   * Hands a slot to a new occupant, so results for the previous one can be
+   * recognised and dropped rather than applied to whoever holds it now.
+   */
+  public reuseSlot(index: number): number {
+    this.assertIndex(index);
+    const next = (this.slotGeneration[index]! + 1) >>> 0;
+    this.slotGeneration[index] = next === 0 ? 1 : next;
+    this.dirty.add(index);
+    this.markSpatialChange();
+    return this.slotGeneration[index]!;
+  }
+
+  /** Slots whose changes have not been handed to a request yet. */
+  public get pendingDeltaSlots(): number {
+    return this.dirtyAll ? this.count : this.dirty.size;
+  }
+
+  /**
+   * Takes every pending change as one immutable batch and clears the record.
+   *
+   * Drained, not copied: a slot that changes twice between dispatches is one
+   * entry, and a dispatch that carries the batch is the only thing that clears
+   * it -- so a request replaced by a later camera move hands its batch on
+   * rather than dropping it.
+   */
+  public drainDelta(): ShadoEntityVisibilityDelta {
+    const count = this.count;
+    const slots = this.dirtyAll
+      ? Uint32Array.from({ length: count }, (_, index) => index)
+      : Uint32Array.from([...this.dirty].filter((slot) => slot < count));
+    const generations = new Uint32Array(slots.length);
+    const transforms = new Float32Array(slots.length * 4);
+    const policy = new Uint32Array(slots.length);
+    for (let index = 0; index < slots.length; index += 1) {
+      const slot = slots[index]!;
+      generations[index] = this.slotGeneration[slot]!;
+      transforms[index * 4] = this.positionX[slot]!;
+      transforms[index * 4 + 1] = this.positionY[slot]!;
+      transforms[index * 4 + 2] = this.positionZ[slot]!;
+      transforms[index * 4 + 3] = this.radius[slot]!;
+      policy[index] = ((this.phaseMask[slot]! >>> 0) & 0xfffffffe) | (this.enabled[slot] ? 1 : 0);
+    }
+    this.dirty.clear();
+    this.dirtyAll = false;
+    return { slots, generations, transforms, policy, count };
   }
 
   /** One-time/bulk synchronization. Prefer setEntity for normal moving updates. */
@@ -187,6 +312,11 @@ export class ShadoEntityVisibilityProjection {
     else this.radius.fill(Math.max(0, defaultRadius), 0, count);
     this.enabled.fill(1, 0, count);
     this.phaseMask.fill(0xffffffff, 0, count);
+    for (let slot = 0; slot < count; slot += 1) {
+      if (!this.slotGeneration[slot]) this.slotGeneration[slot] = 1;
+    }
+    // A bulk load replaces everything, so the next batch is a full snapshot.
+    this.dirtyAll = true;
     this.count = count;
   }
 
@@ -216,6 +346,7 @@ export class ShadoEntityVisibilityWorker {
 
   private readonly control: Int32Array;
   private readonly visibleIndices: readonly [Uint32Array, Uint32Array];
+  private readonly resultGenerations: readonly [Uint32Array, Uint32Array];
   private readonly flags: readonly [Uint8Array, Uint8Array];
   private inFlight = false;
   private pendingRequest: WorkerRequest | null = null;
@@ -225,6 +356,20 @@ export class ShadoEntityVisibilityWorker {
   private lastScheduledSignature = '';
   private lastScheduledAt = Number.NEGATIVE_INFINITY;
   private scheduledSkips = 0;
+  private epochs: ShadoEntityVisibilityEpochs = { world: 0, topology: 0, policy: 0 };
+  private inFlightRequest: WorkerRequest | null = null;
+  private completedRequest: WorkerRequest | null = null;
+  private staleEpochResults = 0;
+  private staleAgeResults = 0;
+  private lastResultAgeMs = 0;
+  /**
+   * Two updates at the 30 Hz cadence. A result older than this describes a
+   * world the caller has already moved past, so its hidden decisions are not
+   * used -- the caller falls back to conservative candidates until a matching
+   * one arrives. It is a validity limit, not permission to hide a newly
+   * visible actor for two updates.
+   */
+  public maxResultAgeMs = (1000 / 30) * 2;
 
   private constructor(
     private readonly worker: ShadoVisibilityWorkerPort,
@@ -237,6 +382,10 @@ export class ShadoEntityVisibilityWorker {
     this.visibleIndices = [
       new Uint32Array(buffer, layout.visibleIndicesOffsets[0], layout.capacity),
       new Uint32Array(buffer, layout.visibleIndicesOffsets[1], layout.capacity),
+    ];
+    this.resultGenerations = [
+      new Uint32Array(buffer, layout.resultGenerationOffsets[0], layout.capacity),
+      new Uint32Array(buffer, layout.resultGenerationOffsets[1], layout.capacity),
     ];
     this.flags = [
       new Uint8Array(buffer, layout.flagsOffsets[0], layout.flagsCapacity),
@@ -351,9 +500,24 @@ export class ShadoEntityVisibilityWorker {
       outsideWorldVisible: options.outsideWorldVisible !== false,
       activePhaseMask: (options.activePhaseMask ?? 0xffffffff) >>> 0,
       radiusScale: Math.max(0, options.radiusScale ?? 1),
+      delta: this.projection.drainDelta(),
+      epochs: { ...this.epochs },
+      dispatchedAtMs: 0,
     };
-    if (this.inFlight) this.pendingRequest = request;
-    else this.dispatch(request);
+    if (this.inFlight) {
+      /*
+       * A pending request is replaced by the newer camera, but its slot
+       * changes are not: a spawn, a move or a despawn that arrived while the
+       * worker was busy has to reach it, and dropping the batch with the
+       * request it happened to ride on would lose the entity, not just delay
+       * it.
+       */
+      const superseded = this.pendingRequest;
+      if (superseded) request.delta = mergeDeltas(superseded.delta, request.delta);
+      this.pendingRequest = request;
+    } else {
+      this.dispatch(request);
+    }
     return generation;
   }
 
@@ -417,10 +581,35 @@ export class ShadoEntityVisibilityWorker {
         : ShadoVisibilityWorkerControl.ResultEntityCount1
     );
     this.consumedGeneration = generation;
+    const request = this.completedRequest;
+    this.completedRequest = null;
+    /*
+     * A result belongs to the state it was asked about. If the package,
+     * topology or policy has changed since it was dispatched, its hidden
+     * decisions are wrong now rather than late, and it is dropped outright
+     * so the caller falls back to conservative candidates.
+     */
+    if (request && !sameEpochs(request.epochs, this.epochs)) {
+      this.staleEpochResults += 1;
+      return null;
+    }
+    const ageMs = request ? now() - request.dispatchedAtMs : 0;
+    this.lastResultAgeMs = ageMs;
+    const stale = ageMs > this.maxResultAgeMs;
+    if (stale) this.staleAgeResults += 1;
+    /*
+     * Copied, not viewed. The worker reuses both output buffers, so a caller
+     * holding a view would find it rewritten underneath: the copy is what
+     * makes the result the caller's own.
+     */
     return {
       generation,
-      visibleIndices: this.visibleIndices[output].subarray(0, count),
-      flags: this.flags[output].subarray(0, entityCount),
+      visibleIndices: this.visibleIndices[output].slice(0, count),
+      visibleGenerations: this.resultGenerations[output].slice(0, count),
+      ageMs,
+      epochs: request ? { ...request.epochs } : { ...this.epochs },
+      stale,
+      flags: this.flags[output].slice(0, entityCount),
       workerDurationMs:
         Atomics.load(this.control, ShadoVisibilityWorkerControl.WorkerDurationMicros) / 1000,
       candidateCount: Atomics.load(this.control, ShadoVisibilityWorkerControl.CandidateCount),
@@ -458,6 +647,10 @@ export class ShadoEntityVisibilityWorker {
       ),
       scheduledSkips: this.scheduledSkips,
       error: this.error,
+      staleEpochResults: this.staleEpochResults,
+      staleAgeResults: this.staleAgeResults,
+      lastResultAgeMs: this.lastResultAgeMs,
+      pendingDeltaSlots: this.projection.pendingDeltaSlots,
     };
   }
 
@@ -470,10 +663,32 @@ export class ShadoEntityVisibilityWorker {
 
   private dispatch(request: WorkerRequest): void {
     this.inFlight = true;
+    request.dispatchedAtMs = now();
+    this.inFlightRequest = request;
+    /*
+     * Everything the worker reads is transferred, so neither side holds a
+     * view the other may write. The projection stays authoritative here and
+     * the worker keeps a private copy it owns outright.
+     */
     this.worker.postMessage(request, [
       request.planes.buffer as ArrayBuffer,
       request.cellFlags.buffer as ArrayBuffer,
+      request.delta.slots.buffer as ArrayBuffer,
+      request.delta.generations.buffer as ArrayBuffer,
+      request.delta.transforms.buffer as ArrayBuffer,
+      request.delta.policy.buffer as ArrayBuffer,
     ]);
+  }
+
+  /**
+   * Declares what later results will be compared against.
+   *
+   * A change here makes every outstanding result inapplicable at once: a
+   * different package, topology or policy means an old hidden decision is
+   * wrong now rather than merely old.
+   */
+  public setEpochs(epochs: Partial<ShadoEntityVisibilityEpochs>): void {
+    this.epochs = { ...this.epochs, ...epochs };
   }
 
   private handleWorkerMessage(message: WorkerMessage): void {
@@ -483,6 +698,8 @@ export class ShadoEntityVisibilityWorker {
     }
     if (message.type !== 'complete') return;
     this.inFlight = false;
+    this.completedRequest = this.inFlightRequest;
+    this.inFlightRequest = null;
     const pending = this.pendingRequest;
     this.pendingRequest = null;
     if (pending && !this.disposed) this.dispatch(pending);
@@ -493,6 +710,58 @@ export class ShadoEntityVisibilityWorker {
     this.inFlight = false;
     this.pendingRequest = null;
   }
+}
+
+/** Monotonic milliseconds, wherever this runs. */
+function now(): number {
+  return typeof performance === 'undefined' ? Date.now() : performance.now();
+}
+
+function sameEpochs(
+  left: ShadoEntityVisibilityEpochs,
+  right: ShadoEntityVisibilityEpochs
+): boolean {
+  return (
+    left.world === right.world &&
+    left.topology === right.topology &&
+    left.policy === right.policy
+  );
+}
+
+/**
+ * Folds an older batch into a newer one, newest value per slot winning.
+ *
+ * A slot described by both is one entry: the later state is the true one, and
+ * sending both would make the worker apply a change it has already been told
+ * about.
+ */
+function mergeDeltas(
+  older: ShadoEntityVisibilityDelta,
+  newer: ShadoEntityVisibilityDelta
+): ShadoEntityVisibilityDelta {
+  const bySlot = new Map<number, number>();
+  for (let index = 0; index < older.slots.length; index += 1) bySlot.set(older.slots[index]!, index);
+  const newerIndex = new Map<number, number>();
+  for (let index = 0; index < newer.slots.length; index += 1) newerIndex.set(newer.slots[index]!, index);
+  const slots = [...new Set([...bySlot.keys(), ...newerIndex.keys()])].sort((a, b) => a - b);
+  const generations = new Uint32Array(slots.length);
+  const transforms = new Float32Array(slots.length * 4);
+  const policy = new Uint32Array(slots.length);
+  for (let index = 0; index < slots.length; index += 1) {
+    const slot = slots[index]!;
+    const from = newerIndex.has(slot) ? newer : older;
+    const at = (newerIndex.has(slot) ? newerIndex.get(slot) : bySlot.get(slot))!;
+    generations[index] = from.generations[at]!;
+    transforms.set(from.transforms.subarray(at * 4, at * 4 + 4), index * 4);
+    policy[index] = from.policy[at]!;
+  }
+  return {
+    slots: Uint32Array.from(slots),
+    generations,
+    transforms,
+    policy,
+    count: newer.count,
+  };
 }
 
 export function createShadoEntityVisibilityWorkerLayout(
@@ -515,6 +784,8 @@ export function createShadoEntityVisibilityWorkerLayout(
   const radiusOffset = take(floats, 4);
   const enabledOffset = take(capacity, 1);
   const phaseMaskOffset = take(indices, 4);
+  const slotGenerationOffset = take(indices, 4);
+  const resultGenerationOffsets = [take(indices, 4), take(indices, 4)] as const;
   const visibleIndicesOffsets = [take(indices, 4), take(indices, 4)] as const;
   const flagsCapacity = publishFlags ? capacity : 1;
   const flagsOffsets = [take(flagsCapacity, 1), take(flagsCapacity, 1)] as const;
@@ -528,6 +799,8 @@ export function createShadoEntityVisibilityWorkerLayout(
     radiusOffset,
     enabledOffset,
     phaseMaskOffset,
+    slotGenerationOffset,
+    resultGenerationOffsets,
     visibleIndicesOffsets,
     flagsOffsets,
     flagsCapacity,
@@ -579,15 +852,29 @@ async function createState(message) {
   const wasm = instance.exports;
   const { layout, buffer, tiles } = message;
   const control = new Int32Array(buffer, layout.controlOffset, 16);
+  /*
+   * PRIVATE arrays, not views into the shared projection.
+   *
+   * The main thread owns the projection and writes it whenever an entity
+   * moves; reading it here while it does that is a read of a value in the
+   * middle of being written. These are the worker's own, fed by the delta
+   * batch each request carries, so what a reduction sees is exactly the state
+   * its caller described and nothing later.
+   */
   const positions = [
-    new Float32Array(buffer, layout.positionXOffset, layout.capacity),
-    new Float32Array(buffer, layout.positionYOffset, layout.capacity),
-    new Float32Array(buffer, layout.positionZOffset, layout.capacity),
+    new Float32Array(layout.capacity),
+    new Float32Array(layout.capacity),
+    new Float32Array(layout.capacity),
   ];
-  const radius = new Float32Array(buffer, layout.radiusOffset, layout.capacity);
-  const enabled = new Uint8Array(buffer, layout.enabledOffset, layout.capacity);
-  const phaseMask = new Uint32Array(buffer, layout.phaseMaskOffset, layout.capacity);
+  const radius = new Float32Array(layout.capacity);
+  const enabled = new Uint8Array(layout.capacity);
+  const phaseMask = new Uint32Array(layout.capacity);
+  const slotGeneration = new Uint32Array(layout.capacity);
+  let entityCount = 0;
   const sharedIndices = layout.visibleIndicesOffsets.map(
+    offset => new Uint32Array(buffer, offset, layout.capacity)
+  );
+  const sharedGenerations = layout.resultGenerationOffsets.map(
     offset => new Uint32Array(buffer, offset, layout.capacity)
   );
   const sharedFlags = layout.flagsOffsets.map(
@@ -622,7 +909,10 @@ async function createState(message) {
     radius,
     enabled,
     phaseMask,
+    slotGeneration,
+    entityCount,
     sharedIndices,
+    sharedGenerations,
     sharedFlags,
     publishFlags: message.publishFlags,
     tiles,
@@ -727,10 +1017,36 @@ function prepareCandidateIds(count, message) {
   return candidateCount;
 }
 
+/**
+ * Applies one request's slot changes to the worker's private arrays.
+ *
+ * Done before anything is reduced, so the reduction describes the state the
+ * request carried rather than a mixture of that and whatever arrived since.
+ */
+function applyDelta(delta) {
+  if (!delta) return false;
+  let membershipChanged = delta.count !== state.entityCount;
+  state.entityCount = delta.count;
+  for (let index = 0; index < delta.slots.length; index++) {
+    const slot = delta.slots[index];
+    if (slot >= state.layout.capacity) continue;
+    state.positions[0][slot] = delta.transforms[index * 4];
+    state.positions[1][slot] = delta.transforms[index * 4 + 1];
+    state.positions[2][slot] = delta.transforms[index * 4 + 2];
+    state.radius[slot] = delta.transforms[index * 4 + 3];
+    state.enabled[slot] = delta.policy[index] & 1;
+    state.phaseMask[slot] = delta.policy[index] >>> 0;
+    state.slotGeneration[slot] = delta.generations[index];
+    membershipChanged = true;
+  }
+  return membershipChanged;
+}
+
 function reduce(message) {
   const started = performance.now();
-  const count = Math.max(0, Atomics.load(state.control, 3));
-  const revision = Atomics.load(state.control, 6);
+  const changed = applyDelta(message.delta);
+  const count = state.entityCount;
+  const revision = changed ? Atomics.add(state.control, 6, 1) + 1 : state.hierarchyRevision;
   let hierarchyRebuildMs = 0;
   if (
     !state.publishFlags &&
@@ -795,6 +1111,7 @@ function reduce(message) {
       if (state.publishFlags) state.sharedFlags[output][entity] &= 0x7f;
       continue;
     }
+    state.sharedGenerations[output][visibleCount] = state.slotGeneration[entity];
     state.sharedIndices[output][visibleCount++] = entity;
   }
   Atomics.store(state.control, output === 0 ? 4 : 5, visibleCount);
