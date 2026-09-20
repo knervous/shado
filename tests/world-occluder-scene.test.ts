@@ -377,6 +377,27 @@ describe('what may be trusted as a permanent blocker', () => {
     expect(primitives).toHaveLength(1);
   });
 
+  it('does not let an explicit mask talk its way out of invariance', () => {
+    /*
+     * Asking for one phase used to narrow the set invariance was measured
+     * against, so a stamp present only in that phase looked invariant across
+     * it -- and the row that came out had no phase restriction a runtime
+     * could enforce. Invariance is a property of the world, not of the
+     * request, so selecting phase 1 must still refuse a blocker that phase 2
+     * does not have.
+     */
+    const scene = world({ phaseMask: [0b11, 0b01] }, ['wall.glb']);
+    const { manifest, primitives } = assembleOccluderScene({
+      world: scene,
+      activePhaseMask: 0b01,
+      loadPrototype: () => opaque,
+    });
+    expect(manifest.phases).toMatchObject({ policy: 'invariant', activeMask: 0b01, worldMask: 0b11 });
+    expect(manifest.stamps.included).toBe(1);
+    expect(manifest.stamps.excluded['phase-variant-blocker']).toBe(1);
+    expect(primitives).toHaveLength(1);
+  });
+
   it('admits the phase-bound blocker only when the caller binds the row to that phase', () => {
     const scene = world({ phaseMask: [0b11, 0b01] }, ['wall.glb']);
     const { manifest } = assembleOccluderScene({
@@ -417,6 +438,52 @@ describe('what may be trusted as a permanent blocker', () => {
       loadPrototype: (source) => (source === 'one.glb' ? oneSided : bothSides),
     });
     expect(primitives.map((primitive) => primitive.doubleSided)).toEqual([false, true]);
+  });
+
+  it('agrees on the blocking face however the mirror is expressed', () => {
+    /*
+     * The same placement written two ways: a mirrored glTF node with an
+     * unmirrored stamp, and an unmirrored node with a mirrored stamp. They
+     * put identical vertices in identical places, so they must agree on which
+     * side of the surface blocks. Correcting winding at only one of the two
+     * levels made them disagree.
+     */
+    const mirroredNode = glb({ node: { scale: [-1, 1, 1] } });
+    const plainNode = glb({});
+    const stamp = (scale: [number, number, number]) =>
+      packageWith(
+        { prototype: [0], enabled: [1], phaseMask: [0xffffffff], position: [[0, 0, 0]], scale: [scale] },
+        [{ id: 'wall', source: 'wall.glb' }],
+      );
+    const viaNode = assembleOccluderScene({
+      world: stamp([1, 1, 1]),
+      loadPrototype: () => mirroredNode,
+    }).primitives[0]!;
+    const viaStamp = assembleOccluderScene({
+      world: stamp([-1, 1, 1]),
+      loadPrototype: () => plainNode,
+    }).primitives[0]!;
+    // Same geometry either way.
+    expect(Array.from(viaNode.positions as Float32Array)).toEqual(
+      Array.from(viaStamp.positions as Float32Array)
+    );
+    // And the same front face either way.
+    expect(Array.from(viaNode.indices as Uint32Array)).toEqual(
+      Array.from(viaStamp.indices as Uint32Array)
+    );
+
+    // Two mirrors compose back to no mirror, and must not be corrected twice.
+    const doubleMirrored = assembleOccluderScene({
+      world: stamp([-1, 1, 1]),
+      loadPrototype: () => mirroredNode,
+    }).primitives[0]!;
+    const plain = assembleOccluderScene({
+      world: stamp([1, 1, 1]),
+      loadPrototype: () => plainNode,
+    }).primitives[0]!;
+    expect(Array.from(doubleMirrored.indices as Uint32Array)).toEqual(
+      Array.from(plain.indices as Uint32Array)
+    );
   });
 
   it('reverses winding for a mirrored stamp, keeping the front face in front', () => {

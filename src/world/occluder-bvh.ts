@@ -47,7 +47,31 @@ export type OccluderBvhCounters = {
   blockedQueries: number;
 };
 
+/** Bounds on construction itself, not on the queries it will later answer. */
+export type OccluderBuildLimits = {
+  /** Ceiling on the structure's own allocation, checked before allocating. */
+  maxBytes?: number;
+  /** Polled while reading geometry; true abandons the build. */
+  shouldStop?: () => boolean;
+};
+
+/** What three Float64 arrays plus the node storage will cost for n triangles. */
+export function estimateBvhBytes(triangleCount: number): number {
+  const payload = triangleCount * 9 * 8;
+  const centroids = triangleCount * 3 * 8;
+  const bounds = triangleCount * 6 * 8;
+  const nodes = Math.max(4, 2 * Math.ceil(triangleCount / 4) + 1) * (6 * 8 + 3 * 4);
+  // The payload is built once and then copied into leaf order.
+  return payload * 2 + centroids + bounds + nodes;
+}
+
 export type OccluderBvh = {
+  /**
+   * Why this structure is empty despite being asked for geometry, or null
+   * when it was built. An abandoned build indexes nothing, and a caller that
+   * uses it anyway simply finds no blockers -- which admits more, never less.
+   */
+  readonly aborted: 'cancelled' | 'over-budget' | null;
   /** Triangle corners, nine doubles each, in build order. */
   readonly triangles: Float64Array;
   /**
@@ -75,16 +99,33 @@ export type OccluderBvh = {
  * cannot degenerate on the axis-aligned architecture these zones are built
  * from, and the query counters say whether anything better is warranted.
  */
-export function buildOccluderBvh(primitives: readonly ShadoWorldPrimitive[]): OccluderBvh {
+export function buildOccluderBvh(
+  primitives: readonly ShadoWorldPrimitive[],
+  limits: OccluderBuildLimits = {}
+): OccluderBvh {
   let total = 0;
   for (const primitive of primitives) total += Math.floor(primitive.indices.length / 3);
+  /*
+   * Refuse the allocation before making it. A build that is going to exceed
+   * its budget should say so while the memory is still unclaimed, not after
+   * the process has already taken it: three Float64Arrays over the triangle
+   * set is the dominant cost and is exactly predictable from the count.
+   */
+  if (limits.maxBytes !== undefined && estimateBvhBytes(total) > limits.maxBytes) {
+    return emptyBvh('over-budget');
+  }
+  if (limits.shouldStop?.()) return emptyBvh('cancelled');
   const triangles = new Float64Array(total * 9);
   const sides = new Uint8Array(total);
   const centroids = new Float64Array(total * 3);
   const triangleBounds = new Float64Array(total * 6);
   let write = 0;
   let triangle = 0;
+  let aborted: OccluderBvh['aborted'] = null;
   for (const primitive of primitives) {
+    // Checked per primitive rather than per triangle: often enough to
+    // interrupt a large scene, rare enough not to cost anything.
+    if (limits.shouldStop?.()) { aborted = 'cancelled'; break; }
     const { positions, indices } = primitive;
     // Unknown sidedness blocks from both sides: that is what collision
     // geometry has always done, and narrowing it silently would change every
@@ -171,6 +212,7 @@ export function buildOccluderBvh(primitives: readonly ShadoWorldPrimitive[]): Oc
 
   /** Returns the node index; children are laid out immediately after it. */
   const build = (start: number, count: number, depth: number): number => {
+    if (aborted) { /* unwind quickly; the caller discards the result */ }
     reserve();
     const node = nodeCount++;
     if (depth > maxDepth) maxDepth = depth;
@@ -195,6 +237,7 @@ export function buildOccluderBvh(primitives: readonly ShadoWorldPrimitive[]): Oc
     nodeMeta[node * 3 + 2] = build(start + half, count - half, depth + 1);
     return node;
   };
+  if (aborted) return emptyBvh(aborted);
   if (triangleCount) build(0, triangleCount, 0);
   else {
     nodeCount = 1;
@@ -211,6 +254,7 @@ export function buildOccluderBvh(primitives: readonly ShadoWorldPrimitive[]): Oc
     orderedSides[index] = sides[order[index]!]!;
   }
   return {
+    aborted: null,
     triangles: ordered,
     doubleSided: orderedSides,
     triangleCount,
@@ -218,6 +262,29 @@ export function buildOccluderBvh(primitives: readonly ShadoWorldPrimitive[]): Oc
     nodeMeta,
     nodeCount,
     maxDepth,
+    counters: {
+      segmentQueries: 0,
+      columnQueries: 0,
+      nodeVisits: 0,
+      triangleTests: 0,
+      blockedQueries: 0,
+    },
+  };
+}
+
+/** An index over nothing, which therefore blocks nothing. */
+function emptyBvh(aborted: OccluderBvh['aborted']): OccluderBvh {
+  const nodeMeta = new Int32Array(3);
+  nodeMeta[2] = -1;
+  return {
+    aborted,
+    triangles: new Float64Array(0),
+    triangleCount: 0,
+    doubleSided: new Uint8Array(0),
+    nodeBounds: new Float64Array(6),
+    nodeMeta,
+    nodeCount: 1,
+    maxDepth: 0,
     counters: {
       segmentQueries: 0,
       columnQueries: 0,

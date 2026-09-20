@@ -114,6 +114,38 @@ describe('visibility modes', () => {
     }
   });
 
+  it('stands viewers on ground that is not in the occluder set', () => {
+    /*
+     * The wall occludes; the ground does not. Baking with only the wall as an
+     * occluder leaves every region floorless and therefore unsampled, so
+     * nothing is culled however solid the wall is. Handing the ground over
+     * separately restores the sampling without letting the ground hide
+     * anything.
+     */
+    const strip = groundStrip(LENGTH, DEPTH, 8);
+    const blocker = wall(WALL_X, DEPTH, 200);
+    const centers: [number, number][] = [];
+    for (let x = REGION / 2; x < LENGTH; x += REGION) centers.push([x, DEPTH / 2]);
+    const compile = (ground?: typeof strip) =>
+      compileShadoWorldVisibility({
+        mode: 'sampled-occlusion',
+        bounds: { min: [0, 0, 0], max: [LENGTH, 200, DEPTH] },
+        regionSize: REGION,
+        maxDistance: 1024,
+        renderCellCenters: centers,
+        persistentRenderCells: new Uint8Array(centers.length),
+        collisionPrimitives: [blocker],
+        ...(ground ? { groundPrimitives: [ground] } : {}),
+      });
+    const bit = (v: ReturnType<typeof compile>, from: number, to: number) =>
+      ((v.pvs.words[from * v.pvs.wordsPerRow + (to >>> 5)]! >>> 0) & (1 << (to & 31))) !== 0;
+
+    // Wall alone: nothing to stand on, so nothing is judged.
+    expect(bit(compile(), 0, 9)).toBe(true);
+    // Wall to block, ground to stand on.
+    expect(bit(compile(strip), 0, 9)).toBe(false);
+  });
+
   it('falls back to the flood, and says so, when nothing is eligible to occlude', () => {
     const reports: ShadoWorldVisibilityBakeReport[] = [];
     const visibility = compileShadoWorldVisibility({
@@ -256,6 +288,37 @@ describe('bounded bakes', () => {
     expect(report.work.segmentQueries).toBe(0);
     const flood = bake(undefined, () => {});
     expect(visibility.visibleRegionPairs).toBeGreaterThan(flood.visibleRegionPairs);
+  });
+
+  it('refuses an index it cannot afford, before allocating it', () => {
+    /*
+     * A synchronous build cannot be interrupted by checks that run before and
+     * after it, so the limits go inside: the allocation is predicted from the
+     * triangle count and refused while the memory is still unclaimed. The
+     * bake then reports a flood, which is what its rows are.
+     */
+    const reports: ShadoWorldVisibilityBakeReport[] = [];
+    bake(
+      { maxResidentBytes: 4096, residentBytes: () => 0 },
+      (value) => reports.push(value)
+    );
+    const report = reports[0]!;
+    expect(report.limit.stop).toBe('memory');
+    expect(report.limit.stoppedDuring).toBe('index-build');
+    expect(report.mode).toBe('distance-flood');
+    expect(report.fallbackReason).toBe('budget-exhausted');
+    expect(report.occluderTriangles).toBe(0);
+  });
+
+  it('abandons a build when cancelled part way through reading geometry', () => {
+    const reports: ShadoWorldVisibilityBakeReport[] = [];
+    let polls = 0;
+    // Aborts once construction has started reading, not before it begins.
+    const signal = { get aborted() { return ++polls > 2; } };
+    bake({ signal }, (value) => reports.push(value));
+    expect(reports[0]!.limit.stop).toBe('cancelled');
+    expect(reports[0]!.mode).toBe('distance-flood');
+    expect(reports[0]!.occlusionTested).toBe(0);
   });
 
   it('stops on a memory ceiling the host reports', () => {

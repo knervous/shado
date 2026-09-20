@@ -1,6 +1,6 @@
 import { buildOccluderGrid, highestSurfaceAt, segmentBlocked } from './occlusion';
 import { buildOccluderBvh, bvhHighestSurfaceAt, bvhSegmentBlocked } from './occluder-bvh';
-import type { OccluderBvh } from './occluder-bvh';
+import type { OccluderBuildLimits, OccluderBvh } from './occluder-bvh';
 import type { OccluderGrid } from './occlusion';
 import type {
   ShadoWorldBounds,
@@ -25,6 +25,8 @@ export type ShadoWorldOccluderIndex = 'bvh' | 'grid';
 /** One question, two structures: can this segment reach that point? */
 type Occluders = {
   readonly kind: ShadoWorldOccluderIndex;
+  /** Set when construction refused or was interrupted; the index is empty. */
+  readonly aborted?: 'cancelled' | 'over-budget' | null;
   readonly triangleCount: number;
   readonly blocked: (
     ax: number, ay: number, az: number,
@@ -45,7 +47,8 @@ function buildOccluders(
   kind: ShadoWorldOccluderIndex,
   primitives: readonly ShadoWorldPrimitive[],
   bounds: ShadoWorldBounds,
-  cellSize: number
+  cellSize: number,
+  limits: OccluderBuildLimits = {}
 ): Occluders {
   if (kind === 'grid') {
     const grid: OccluderGrid = buildOccluderGrid(primitives, bounds, cellSize);
@@ -59,9 +62,10 @@ function buildOccluders(
       references: grid.bucketReferences,
     };
   }
-  const bvh: OccluderBvh = buildOccluderBvh(primitives);
+  const bvh: OccluderBvh = buildOccluderBvh(primitives, limits);
   return {
     kind,
+    aborted: bvh.aborted,
     triangleCount: bvh.triangleCount,
     blocked: (ax, ay, az, bx, by, bz) => bvhSegmentBlocked(bvh, ax, ay, az, bx, by, bz),
     floorAt: (x, z) => bvhHighestSurfaceAt(bvh, x, z),
@@ -148,7 +152,25 @@ export type ShadoWorldVisibilityCompileInput = {
    */
   renderCellBounds?: readonly ShadoWorldBounds[];
   persistentRenderCells: ArrayLike<number>;
+  /**
+   * What blocks sight. Historically the zone's collision mesh, hence the
+   * name; a caller that has assembled the opaque visual scene passes that
+   * instead.
+   */
   collisionPrimitives: readonly ShadoWorldPrimitive[];
+  /**
+   * What a viewer can STAND on, if that is not the same set.
+   *
+   * Eye samples sit above the highest surface under a region, and a surface
+   * you can stand on is not the same thing as a surface that blocks sight: a
+   * pane of glass holds nobody up, and the ground holds everybody up while
+   * hiding almost nothing. Baking with only placed objects as occluders made
+   * the conflation obvious -- 2,529 of Crownward's 2,880 regions had no floor
+   * under them, so they were admitted unsampled and the bake culled nothing
+   * whatever the objects did. Defaults to the occluder set, which is the
+   * historical behaviour.
+   */
+  groundPrimitives?: readonly ShadoWorldPrimitive[];
   /** Optional bake diagnostics; the numbers that say whether it is working. */
   report?: (stats: ShadoWorldVisibilityBakeReport) => void;
 };
@@ -261,16 +283,60 @@ export function compileShadoWorldVisibility(
   };
 
   const gridStarted = clock();
-  const grid = requestedMode === 'sampled-occlusion' && !check('index-build', 0)
+  /*
+   * Construction is bounded from the inside, not merely surrounded by checks.
+   * A synchronous build cannot be interrupted by a test that runs before and
+   * after it, and on a five-million-triangle scene the allocation alone can
+   * exceed a memory ceiling before control ever comes back. So the limits go
+   * in: refuse the allocation up front when it is predictably too large, and
+   * poll for cancellation while reading geometry.
+   */
+  const buildLimits: OccluderBuildLimits = {
+    ...(budget?.maxResidentBytes !== undefined && budget.residentBytes
+      ? { maxBytes: Math.max(0, budget.maxResidentBytes - budget.residentBytes()) }
+      : {}),
+    shouldStop: () => exhausted(0) !== 'none',
+  };
+  const built = requestedMode === 'sampled-occlusion' && !check('index-build', 0)
     ? buildOccluders(
         input.occluderIndex ?? 'bvh',
         input.collisionPrimitives,
         input.bounds,
-        OCCLUDER_CELL_SIZE
+        OCCLUDER_CELL_SIZE,
+        buildLimits
       )
     : null;
+  if (built?.aborted) {
+    stop = built.aborted === 'cancelled' ? 'cancelled' : 'memory';
+    stoppedDuring = 'index-build';
+  }
+  // An abandoned index holds nothing, so using it would silently mean "no
+  // occluders" rather than "stopped"; dropping it makes the fallback explicit.
+  const grid = built?.aborted ? null : built;
+  /*
+   * A second index only when the standing surfaces are a different set. It
+   * answers "what is under this column" and never "what blocks this segment",
+   * so nothing it contains can hide anything.
+   */
+  const groundBuilt = grid && input.groundPrimitives && !check('index-build', grid.counters.segmentQueries)
+    ? buildOccluders(
+        input.occluderIndex ?? 'bvh',
+        input.groundPrimitives,
+        input.bounds,
+        OCCLUDER_CELL_SIZE,
+        buildLimits
+      )
+    : null;
+  if (groundBuilt?.aborted) {
+    stop = groundBuilt.aborted === 'cancelled' ? 'cancelled' : 'memory';
+    stoppedDuring = 'index-build';
+  }
+  const ground = input.groundPrimitives
+    ? (groundBuilt?.aborted ? null : groundBuilt)
+    : grid;
   const occluderGridMs = clock() - gridStarted;
-  const sampled = grid !== null && grid.triangleCount > 0;
+  // Without ground there is nothing to stand on, so nothing can be sampled.
+  const sampled = grid !== null && grid.triangleCount > 0 && ground !== null;
   const mode: ShadoWorldVisibilityMode = sampled ? 'sampled-occlusion' : 'distance-flood';
   const eyes: (Float64Array | null)[] = new Array(regionCount).fill(null);
   const targets: (Float64Array | null)[] = new Array(regionCount).fill(null);
@@ -316,7 +382,7 @@ export function compileShadoWorldVisibility(
     const high = regionHigh[region]!;
     const known = Number.isFinite(low) && Number.isFinite(high);
     for (const [x, z] of footprint(region)) {
-      const floor = grid!.floorAt(x, z);
+      const floor = ground!.floorAt(x, z);
       if (floor === null) continue;
       for (const eye of EYE_HEIGHTS) eyePoints.push(x, floor + eye, z);
       if (known) {
@@ -423,7 +489,7 @@ export function compileShadoWorldVisibility(
         index: grid?.kind ?? null,
         segmentQueries: grid?.counters.segmentQueries ?? 0,
         blockedQueries: grid?.counters.blockedQueries ?? 0,
-        columnQueries: grid?.counters.columnQueries ?? 0,
+        columnQueries: ground?.counters.columnQueries ?? 0,
         nodeVisits: grid ? grid.nodeVisits() : 0,
         triangleTests: grid?.counters.triangleTests ?? 0,
         indexEntries: grid?.references ?? 0,

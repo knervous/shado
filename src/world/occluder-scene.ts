@@ -274,16 +274,20 @@ export function assembleOccluderScene(
   const phaseMask = input.activePhaseMask ?? 0xffffffff;
   const phasePolicy = input.phasePolicy ?? 'invariant';
   /*
-   * The phases this world actually uses, taken from what it draws. One static
-   * visibility row serves all of them, so under `invariant` a blocker has to
-   * be present in every one of them -- otherwise a row built in a phase where
-   * the wall exists would hide, from a phase where it does not, content the
-   * player can see straight to.
+   * The phases this world supports, taken from everything it draws -- and
+   * deliberately NOT narrowed by the mask this bake selected.
+   *
+   * Intersecting the two first is how the protection defeated itself: asking
+   * for `activePhaseMask = 1` made the supported set `1`, and a stamp present
+   * only in phase 1 then looked invariant across it. The row that comes out
+   * is still an ordinary row with no phase restriction the runtime can
+   * enforce, so it would hide, from phase 2, a target that phase 2 can see.
+   * Invariance is a property of the world, not of the request.
    */
   let worldPhases = 0;
   for (const mask of input.world.cells?.phaseMask ?? []) worldPhases |= mask;
   for (const mask of stamps?.phaseMask ?? []) worldPhases |= mask;
-  worldPhases = (worldPhases & phaseMask) >>> 0;
+  worldPhases = worldPhases >>> 0;
   const maxTriangles = input.maxTriangles ?? 8_000_000;
   const excluded: Record<OccluderExclusion, number> = {
     'alpha-blended-material': 0,
@@ -377,10 +381,18 @@ export function assembleOccluderScene(
   const quaternion = new Float32Array(4);
   for (const stamp of order) {
     if (!stamps.enabled[stamp]) { excluded['stamp-disabled'] += 1; continue; }
-    const stampPhases = (stamps.phaseMask[stamp]! & phaseMask) >>> 0;
-    if (stampPhases === 0) { excluded['stamp-out-of-phase'] += 1; continue; }
-    if (phasePolicy === 'invariant' && worldPhases !== 0 && stampPhases !== worldPhases) {
-      // Present in some phases sharing this row but not all of them.
+    const stampPhases = stamps.phaseMask[stamp]! >>> 0;
+    // Drawn at all in the requested state? That is what the mask decides.
+    if ((stampPhases & phaseMask) === 0) { excluded['stamp-out-of-phase'] += 1; continue; }
+    // Present in EVERY phase the world supports? That is what invariance
+    // decides, and no mask may relax it.
+    if (
+      phasePolicy === 'invariant' &&
+      worldPhases !== 0 &&
+      // `&` yields a signed int32, so an all-bits mask compares as -1 unless
+      // it is coerced back to unsigned before the comparison.
+      ((stampPhases & worldPhases) >>> 0) !== worldPhases
+    ) {
       excluded['phase-variant-blocker'] += 1;
       continue;
     }
@@ -428,7 +440,13 @@ export function assembleOccluderScene(
   return { primitives, manifest };
 }
 
-/** Determinant of a column-major matrix's rotation/scale part. */
+/**
+ * Determinant of a column-major matrix's rotation/scale part.
+ *
+ * Negative means the transform mirrors, which reverses triangle winding and
+ * so swaps the front face for the back. Used at every level that can mirror:
+ * the glTF node hierarchy and the stamp placement.
+ */
 function determinant3(m: readonly number[]): number {
   return (
     m[0]! * (m[5]! * m[10]! - m[6]! * m[9]!) -
@@ -579,7 +597,19 @@ function readPrimitive(
     if (!read) return empty;
     indices = Uint32Array.from(read);
   }
-  return { positions, indices };
+  /*
+   * A node or ancestor with a negative determinant has already mirrored these
+   * positions, which reverses their winding and therefore swaps which face is
+   * the front. Correcting it here means the primitive that leaves this
+   * function is always front-face-correct in prototype space, and the stamp
+   * transform later corrects only its own mirroring. Each level of the
+   * transform is accounted for exactly once, so a mirror expressed on the
+   * node and the same mirror expressed on the stamp end up agreeing.
+   */
+  return {
+    positions,
+    indices: determinant3(matrix) < 0 ? reverseWinding(indices) : indices,
+  };
 }
 
 /** Flat component values for an accessor, or null when its layout is unsupported. */
