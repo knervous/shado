@@ -257,6 +257,101 @@ export function occluderEligibility(primitive: GlbPrimitive): OccluderExclusion 
   return null;
 }
 
+/** What the base world contributed, and what it could not. */
+export type BaseWorldSceneManifest = {
+  submeshes: { total: number; eligible: number };
+  triangles: { sourced: number; eligible: number };
+  excluded: Record<OccluderExclusion, number>;
+  sidedness: { doubleSidedTriangles: number; singleSidedTriangles: number };
+  /** The transform applied on the way in, mirroring the runtime's import. */
+  sourceTransform: 'identity' | 'mirror-x';
+};
+
+/**
+ * The zone's own render geometry as occluders, rather than its collision mesh.
+ *
+ * Collision was always a stand-in here, and a poor one in both directions: it
+ * carries invisible barriers and box proxies that seal openings a player sees
+ * straight through, and it omits the visual surfaces that actually block a
+ * view. This reads the promoted world GLB -- the same bytes the runtime draws
+ * -- through the same eligibility contract placed objects go through, so one
+ * rule decides what may hide anything.
+ *
+ * The transform defaults to `identity`, and that is not an oversight. The
+ * shipped world GLB is the PROMOTED output the runtime draws, so it is
+ * already in the package's frame: `sourceTransform: 'mirror-x'` records what
+ * import did to the authoring source, not something to do again. Applying it
+ * a second time produced a scene that agreed with a mirrored world 36.7% of
+ * the time against 3.0% as placed, which is what the bake's frame-agreement
+ * check is for. The parameter remains for a caller holding pre-import bytes,
+ * and mirroring reverses winding, so the indices go with it.
+ */
+export function assembleBaseWorldScene(input: {
+  glb: Uint8Array;
+  sourceTransform?: 'identity' | 'mirror-x';
+  maxTriangles?: number;
+}): { primitives: ShadoWorldPrimitive[]; manifest: BaseWorldSceneManifest } {
+  const sourceTransform = input.sourceTransform ?? 'identity';
+  const mirrored = sourceTransform === 'mirror-x';
+  const maxTriangles = input.maxTriangles ?? 12_000_000;
+  const excluded: Record<OccluderExclusion, number> = {
+    'alpha-blended-material': 0,
+    'alpha-tested-material': 0,
+    'non-triangle-primitive': 0,
+    'unsupported-accessor': 0,
+    'missing-prototype-asset': 0,
+    'unreadable-prototype-asset': 0,
+    'stamp-disabled': 0,
+    'stamp-out-of-phase': 0,
+    'phase-variant-blocker': 0,
+    'skinned-geometry': 0,
+    'morph-targets': 0,
+    'animated-node': 0,
+    'no-eligible-submesh': 0,
+    'triangle-budget': 0,
+  };
+  const manifest: BaseWorldSceneManifest = {
+    submeshes: { total: 0, eligible: 0 },
+    triangles: { sourced: 0, eligible: 0 },
+    excluded,
+    sidedness: { doubleSidedTriangles: 0, singleSidedTriangles: 0 },
+    sourceTransform,
+  };
+  const primitives: ShadoWorldPrimitive[] = [];
+  for (const part of readGlbPrimitives(input.glb)) {
+    manifest.submeshes.total += 1;
+    const triangles = part.indices.length / 3;
+    manifest.triangles.sourced += triangles;
+    const reason = occluderEligibility(part);
+    if (reason) {
+      excluded[reason] += 1;
+      continue;
+    }
+    if (manifest.triangles.eligible + triangles > maxTriangles) {
+      excluded['triangle-budget'] += 1;
+      continue;
+    }
+    const positions = new Float32Array(part.positions.length);
+    for (let offset = 0; offset < part.positions.length; offset += 3) {
+      positions[offset] = mirrored ? -part.positions[offset]! : part.positions[offset]!;
+      positions[offset + 1] = part.positions[offset + 1]!;
+      positions[offset + 2] = part.positions[offset + 2]!;
+    }
+    manifest.submeshes.eligible += 1;
+    manifest.triangles.eligible += triangles;
+    if (part.doubleSided) manifest.sidedness.doubleSidedTriangles += triangles;
+    else manifest.sidedness.singleSidedTriangles += triangles;
+    primitives.push({
+      name: `base:${part.node}`,
+      material: part.material,
+      doubleSided: part.doubleSided,
+      positions,
+      indices: mirrored ? reverseWinding(part.indices) : part.indices,
+    });
+  }
+  return { primitives, manifest };
+}
+
 /**
  * Assembles every eligible opaque placed object into world-space primitives.
  *
