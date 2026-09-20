@@ -55,15 +55,30 @@ export type OccluderBuildLimits = {
   shouldStop?: () => boolean;
 };
 
-/** What three Float64 arrays plus the node storage will cost for n triangles. */
+/**
+ * Peak bytes this structure allocates for n triangles.
+ *
+ * Every live buffer, not only the large ones: the payload exists twice while
+ * it is copied into leaf order, and the per-triangle sidedness, ordering and
+ * scratch bounds are small individually and not nothing at five million
+ * triangles. Partitioning is done in place on the order array, so there is no
+ * recursive scratch to account for.
+ */
 export function estimateBvhBytes(triangleCount: number): number {
   const payload = triangleCount * 9 * 8;
   const centroids = triangleCount * 3 * 8;
   const bounds = triangleCount * 6 * 8;
+  const sides = triangleCount * 2;
+  const order = triangleCount * 4;
   const nodes = Math.max(4, 2 * Math.ceil(triangleCount / 4) + 1) * (6 * 8 + 3 * 4);
-  // The payload is built once and then copied into leaf order.
-  return payload * 2 + centroids + bounds + nodes;
+  return payload * 2 + centroids + bounds + sides + order + nodes;
 }
+
+/** How often construction asks whether it should stop. */
+const CANCEL_STRIDE = 4096;
+
+/** Thrown to unwind out of recursive construction; never escapes this module. */
+const CANCELLED = Symbol('occluder-build-cancelled');
 
 export type OccluderBvh = {
   /**
@@ -121,17 +136,30 @@ export function buildOccluderBvh(
   const triangleBounds = new Float64Array(total * 6);
   let write = 0;
   let triangle = 0;
+  const stop = limits.shouldStop;
+  /*
+   * Asked often enough to interrupt one enormous primitive, rarely enough to
+   * cost nothing: a scene is not always many meshes, and a single
+   * ten-thousand-triangle mesh used to run to completion because the only
+   * check was between primitives.
+   */
+  let sinceCheck = 0;
+  const shouldStop = (): boolean => {
+    if (!stop) return false;
+    if (++sinceCheck < CANCEL_STRIDE) return false;
+    sinceCheck = 0;
+    return stop();
+  };
   let aborted: OccluderBvh['aborted'] = null;
   for (const primitive of primitives) {
-    // Checked per primitive rather than per triangle: often enough to
-    // interrupt a large scene, rare enough not to cost anything.
-    if (limits.shouldStop?.()) { aborted = 'cancelled'; break; }
+    if (stop?.()) { aborted = 'cancelled'; break; }
     const { positions, indices } = primitive;
     // Unknown sidedness blocks from both sides: that is what collision
     // geometry has always done, and narrowing it silently would change every
     // historical measurement.
     const bothFaces = primitive.doubleSided !== false;
     for (let index = 0; index + 2 < indices.length; index += 3) {
+      if (shouldStop()) { aborted = 'cancelled'; break; }
       let minX = Infinity, minY = Infinity, minZ = Infinity;
       let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
       for (let corner = 0; corner < 3; corner += 1) {
@@ -158,6 +186,7 @@ export function buildOccluderBvh(
       sides[triangle] = bothFaces ? 1 : 0;
       triangle += 1;
     }
+    if (aborted) break;
   }
   const triangleCount = triangle;
   const order = new Int32Array(triangleCount);
@@ -191,6 +220,7 @@ export function buildOccluderBvh(
   };
 
   const boundsOf = (start: number, count: number, node: number): void => {
+    if (stop && shouldStop()) throw CANCELLED;
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let index = start; index < start + count; index += 1) {
@@ -212,7 +242,7 @@ export function buildOccluderBvh(
 
   /** Returns the node index; children are laid out immediately after it. */
   const build = (start: number, count: number, depth: number): number => {
-    if (aborted) { /* unwind quickly; the caller discards the result */ }
+    if (stop && shouldStop()) throw CANCELLED;
     reserve();
     const node = nodeCount++;
     if (depth > maxDepth) maxDepth = depth;
@@ -227,10 +257,14 @@ export function buildOccluderBvh(
     const extentY = nodeBounds[node * 6 + 4]! - nodeBounds[node * 6 + 1]!;
     const extentZ = nodeBounds[node * 6 + 5]! - nodeBounds[node * 6 + 2]!;
     const axis = extentX >= extentY && extentX >= extentZ ? 0 : extentY >= extentZ ? 1 : 2;
-    const slice = Array.from(order.subarray(start, start + count));
-    slice.sort((left, right) => centroids[left * 3 + axis]! - centroids[right * 3 + axis]!);
-    order.set(slice, start);
     const half = count >> 1;
+    /*
+     * Only the median matters, so the range is partitioned around it in place
+     * rather than sorted. That removes an array allocation and a full sort per
+     * level -- the largest of which was over every triangle in the zone -- and
+     * gives cancellation somewhere to be checked inside the work.
+     */
+    selectNth(order, centroids, axis, start, start + count - 1, start + half, shouldStop);
     nodeMeta[node * 3] = start;
     nodeMeta[node * 3 + 1] = 0;
     build(start, half, depth + 1);
@@ -238,8 +272,13 @@ export function buildOccluderBvh(
     return node;
   };
   if (aborted) return emptyBvh(aborted);
-  if (triangleCount) build(0, triangleCount, 0);
-  else {
+  try {
+    if (triangleCount) build(0, triangleCount, 0);
+  } catch (error) {
+    if (error === CANCELLED) return emptyBvh('cancelled');
+    throw error;
+  }
+  if (!triangleCount) {
     nodeCount = 1;
     nodeMeta[0] = 0;
     nodeMeta[1] = 0;
@@ -250,6 +289,8 @@ export function buildOccluderBvh(
   const ordered = new Float64Array(triangleCount * 9);
   const orderedSides = new Uint8Array(triangleCount);
   for (let index = 0; index < triangleCount; index += 1) {
+    // The reordering is a full pass over the payload and is interruptible too.
+    if (shouldStop()) return emptyBvh('cancelled');
     ordered.set(triangles.subarray(order[index]! * 9, order[index]! * 9 + 9), index * 9);
     orderedSides[index] = sides[order[index]!]!;
   }
@@ -270,6 +311,55 @@ export function buildOccluderBvh(
       blockedQueries: 0,
     },
   };
+}
+
+/**
+ * Partitions `order[low..high]` in place so that position `nth` holds the
+ * element it would hold if the range were sorted by centroid on `axis`.
+ *
+ * Quickselect, iterated rather than recursed. The build only needs the median,
+ * and this is linear where a sort is n log n -- on the root range that is
+ * every triangle in the zone. `shouldStop` is polled per partition pass so a
+ * cancellation does not have to wait for the largest one to finish.
+ */
+function selectNth(
+  order: Int32Array,
+  centroids: Float64Array,
+  axis: number,
+  low: number,
+  high: number,
+  nth: number,
+  shouldStop: () => boolean
+): void {
+  const key = (index: number): number => centroids[order[index]! * 3 + axis]!;
+  const swap = (left: number, right: number): void => {
+    const value = order[left]!;
+    order[left] = order[right]!;
+    order[right] = value;
+  };
+  while (low < high) {
+    if (shouldStop()) throw CANCELLED;
+    // Median of three, which keeps sorted and reversed input off the worst case.
+    const middle = (low + high) >> 1;
+    if (key(middle) < key(low)) swap(middle, low);
+    if (key(high) < key(low)) swap(high, low);
+    if (key(high) < key(middle)) swap(high, middle);
+    const pivot = key(middle);
+    let left = low;
+    let right = high;
+    while (left <= right) {
+      while (key(left) < pivot) left += 1;
+      while (key(right) > pivot) right -= 1;
+      if (left <= right) {
+        swap(left, right);
+        left += 1;
+        right -= 1;
+      }
+    }
+    if (nth <= right) high = right;
+    else if (nth >= left) low = left;
+    else return;
+  }
 }
 
 /** An index over nothing, which therefore blocks nothing. */

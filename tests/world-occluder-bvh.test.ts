@@ -1,5 +1,6 @@
 import {
   buildOccluderBvh,
+  estimateBvhBytes,
   buildOccluderGrid,
   bvhHighestSurfaceAt,
   bvhSegmentBlocked,
@@ -185,6 +186,71 @@ describe('the hierarchy answers what the grid and a brute-force sweep answer', (
           }
         }
       }
+    }
+  });
+});
+
+describe('construction can be stopped while it is working', () => {
+  /** One primitive big enough that stopping between primitives is no use. */
+  const huge = scatter(10_000, 31337, 800);
+
+  it('aborts inside a single large primitive', () => {
+    let calls = 0;
+    const built = buildOccluderBvh([huge], { shouldStop: () => ++calls >= 3 });
+    expect(built.aborted).toBe('cancelled');
+    expect(built.triangleCount).toBe(0);
+    expect(calls).toBeGreaterThanOrEqual(3);
+  });
+
+  it('aborts during partitioning, not only while reading geometry', () => {
+    // Let the whole ingestion pass, then stop once the hierarchy starts.
+    const reads = Math.ceil((huge.indices.length / 3) / 4096) + 2;
+    let calls = 0;
+    const built = buildOccluderBvh([huge], { shouldStop: () => ++calls > reads });
+    expect(built.aborted).toBe('cancelled');
+    expect(built.triangleCount).toBe(0);
+  });
+
+  it('runs to completion when nothing asks it to stop', () => {
+    let calls = 0;
+    const built = buildOccluderBvh([huge], { shouldStop: () => { calls += 1; return false; } });
+    expect(built.aborted).toBeNull();
+    expect(built.triangleCount).toBe(10_000);
+    // It really was asked, repeatedly, rather than never polled at all.
+    expect(calls).toBeGreaterThan(3);
+  });
+
+  it('refuses an allocation it can predict will not fit', () => {
+    const built = buildOccluderBvh([huge], { maxBytes: 1024 });
+    expect(built.aborted).toBe('over-budget');
+    expect(built.triangleCount).toBe(0);
+    // And the prediction covers every buffer it would have taken.
+    expect(estimateBvhBytes(10_000)).toBeGreaterThan(10_000 * 9 * 8 * 2);
+  });
+
+  it('selects the same tree a full sort would have', () => {
+    /*
+     * Partitioning in place replaced a sort per level. The structure that
+     * comes out still has to answer identically, which the coverage invariant
+     * and a differential query check together establish.
+     */
+    const built = buildOccluderBvh([huge]);
+    const covered = new Uint8Array(built.triangleCount);
+    for (let node = 0; node < built.nodeCount; node += 1) {
+      const count = built.nodeMeta[node * 3 + 1]!;
+      if (count === 0) continue;
+      const first = built.nodeMeta[node * 3]!;
+      for (let index = first; index < first + count; index += 1) covered[index] = 1;
+    }
+    expect(Array.from(covered).every((seen) => seen === 1)).toBe(true);
+    const grid = buildOccluderGrid([huge], { min: [-800, -800, -800], max: [800, 800, 800] }, 32);
+    const pick = random(24680);
+    for (let trial = 0; trial < 300; trial += 1) {
+      const a = [(pick() - 0.5) * 1600, (pick() - 0.5) * 1600, (pick() - 0.5) * 1600] as const;
+      const b = [(pick() - 0.5) * 1600, (pick() - 0.5) * 1600, (pick() - 0.5) * 1600] as const;
+      expect(bvhSegmentBlocked(built, a[0], a[1], a[2], b[0], b[1], b[2])).toBe(
+        segmentBlocked(grid, a[0], a[1], a[2], b[0], b[1], b[2])
+      );
     }
   });
 });

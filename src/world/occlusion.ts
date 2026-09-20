@@ -28,6 +28,7 @@
  * occlude it, and a caller that cannot find geometry to sample is expected to
  * fall back to admitting the region.
  */
+import type { OccluderBuildLimits } from './occluder-bvh';
 import type { ShadoWorldBounds, ShadoWorldPrimitive } from './types';
 
 /** Hits closer than this to either end are the endpoints' own surfaces. */
@@ -55,6 +56,8 @@ export type OccluderGridCounters = {
 };
 
 export type OccluderGrid = {
+  /** Set when construction refused or was interrupted; the grid indexes nothing. */
+  readonly aborted: 'cancelled' | 'over-budget' | null;
   /** One byte per triangle: non-zero where the surface draws both faces. */
   readonly doubleSided: Uint8Array;
   /**
@@ -85,10 +88,27 @@ export type OccluderGrid = {
 export function buildOccluderGrid(
   primitives: readonly ShadoWorldPrimitive[],
   bounds: ShadoWorldBounds,
-  cellSize = 32
+  cellSize = 32,
+  limits: OccluderBuildLimits = {}
 ): OccluderGrid {
   let total = 0;
   for (const primitive of primitives) total += primitive.indices.length / 3;
+  /*
+   * The same contract the hierarchy honours. Without it, asking for hard
+   * limits and selecting this backend silently got no limits at all.
+   */
+  if (limits.maxBytes !== undefined && estimateGridBytes(total) > limits.maxBytes) {
+    return emptyGrid(bounds, cellSize, 'over-budget');
+  }
+  if (limits.shouldStop?.()) return emptyGrid(bounds, cellSize, 'cancelled');
+  const stop = limits.shouldStop;
+  let sinceCheck = 0;
+  const shouldStop = (): boolean => {
+    if (!stop) return false;
+    if (++sinceCheck < GRID_CANCEL_STRIDE) return false;
+    sinceCheck = 0;
+    return stop();
+  };
   const triangles = new Float64Array(total * 9);
   const doubleSided = new Uint8Array(total);
   let write = 0;
@@ -98,6 +118,7 @@ export function buildOccluderGrid(
     // Unknown sidedness blocks from both sides, as collision always has.
     const bothFaces = primitive.doubleSided !== false;
     for (let i = 0; i < indices.length; i += 3) {
+      if (shouldStop()) return emptyGrid(bounds, cellSize, 'cancelled');
       doubleSided[triangleIndex++] = bothFaces ? 1 : 0;
       for (let corner = 0; corner < 3; corner++) {
         const base = Number(indices[i + corner]) * 3;
@@ -124,6 +145,7 @@ export function buildOccluderGrid(
   };
   let bucketReferences = 0;
   const grid = {
+    aborted: null as OccluderGrid['aborted'],
     bucketReferences,
     counters,
     doubleSided,
@@ -139,6 +161,7 @@ export function buildOccluderGrid(
     countZ,
   };
   for (let triangle = 0; triangle < triangleCount; triangle++) {
+    if (shouldStop()) return emptyGrid(bounds, cellSize, 'cancelled');
     const offset = triangle * 9;
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
@@ -169,6 +192,56 @@ export function buildOccluderGrid(
     }
   }
   return { ...grid, bucketReferences };
+}
+
+/** How often construction asks whether it should stop. */
+const GRID_CANCEL_STRIDE = 4096;
+
+/**
+ * Peak bytes the grid allocates for n triangles.
+ *
+ * The payload is exact; the buckets are estimated at the duplication factor
+ * these zones actually measure (about 1.15 references per triangle) plus the
+ * per-array and Map overhead that a JS number array carries. It is an
+ * estimate, and it is the honest kind: it is used only to refuse allocations
+ * that are predictably too large.
+ */
+export function estimateGridBytes(triangleCount: number): number {
+  const payload = triangleCount * 9 * 8;
+  const sides = triangleCount;
+  const references = Math.ceil(triangleCount * 1.15) * 8;
+  const bucketOverhead = Math.ceil(triangleCount / 8) * 64;
+  return payload + sides + references + bucketOverhead;
+}
+
+/** A grid over nothing, which therefore blocks nothing. */
+function emptyGrid(
+  bounds: ShadoWorldBounds,
+  cellSize: number,
+  aborted: OccluderGrid['aborted']
+): OccluderGrid {
+  return {
+    aborted,
+    bucketReferences: 0,
+    counters: {
+      segmentQueries: 0,
+      columnQueries: 0,
+      cellVisits: 0,
+      triangleTests: 0,
+      blockedQueries: 0,
+    },
+    doubleSided: new Uint8Array(0),
+    triangles: new Float64Array(0),
+    triangleCount: 0,
+    buckets: new Map(),
+    size: cellSize,
+    originX: bounds.min[0],
+    originY: bounds.min[1],
+    originZ: bounds.min[2],
+    countX: 1,
+    countY: 1,
+    countZ: 1,
+  };
 }
 
 const clampIndex = (value: number, count: number): number =>

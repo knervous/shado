@@ -227,7 +227,8 @@ describe('bounded bakes', () => {
   /** The walled strip again, driven through the compiler directly. */
   function bake(
     budget: Parameters<typeof compileShadoWorldVisibility>[0]['budget'],
-    report: (value: ShadoWorldVisibilityBakeReport) => void
+    report: (value: ShadoWorldVisibilityBakeReport) => void,
+    occluderIndex: 'bvh' | 'grid' = 'bvh'
   ) {
     const strip = groundStrip(LENGTH, DEPTH, 8);
     const blocker = wall(WALL_X, DEPTH, 200);
@@ -236,6 +237,7 @@ describe('bounded bakes', () => {
     return compileShadoWorldVisibility({
       mode: 'sampled-occlusion',
       budget,
+      occluderIndex,
       bounds: { min: [0, 0, 0], max: [LENGTH, 200, DEPTH] },
       regionSize: REGION,
       maxDistance: 1024,
@@ -323,6 +325,54 @@ describe('bounded bakes', () => {
     expect(reports[0]!.limit.stop).toBe('cancelled');
     expect(reports[0]!.mode).toBe('distance-flood');
     expect(reports[0]!.occlusionTested).toBe(0);
+  });
+
+  it('offers the second index what is left, not what the first was offered', () => {
+    /*
+     * Two structures that each fit the ceiling can exceed it together, because
+     * the first is resident by the time the second is measured. The allowance
+     * is therefore recomputed against live usage before each build rather than
+     * shared between them.
+     */
+    const offered: number[] = [];
+    let resident = 0;
+    const strip = groundStrip(LENGTH, DEPTH, 8);
+    compileShadoWorldVisibility({
+      mode: 'sampled-occlusion',
+      bounds: { min: [0, 0, 0], max: [LENGTH, 200, DEPTH] },
+      regionSize: REGION,
+      maxDistance: 1024,
+      renderCellCenters: [[8, 8]],
+      persistentRenderCells: new Uint8Array(1),
+      collisionPrimitives: [wall(WALL_X, DEPTH, 200)],
+      groundPrimitives: [strip],
+      budget: {
+        maxResidentBytes: 64 * 1024 * 1024,
+        // Each read reports more resident memory than the last, as a real
+        // process would once the first index is allocated.
+        residentBytes: () => {
+          offered.push(resident);
+          resident += 32 * 1024 * 1024;
+          return resident;
+        },
+      },
+    });
+    // Consulted separately for the two builds, with the second seeing more
+    // memory already taken than the first did.
+    expect(offered.length).toBeGreaterThanOrEqual(2);
+    expect(offered[1]!).toBeGreaterThan(offered[0]!);
+  });
+
+  it('applies the same build limits to the grid backend', () => {
+    const reports: ShadoWorldVisibilityBakeReport[] = [];
+    bake(
+      { maxResidentBytes: 4096, residentBytes: () => 0 },
+      (value) => reports.push(value),
+      'grid'
+    );
+    expect(reports[0]!.limit.stop).toBe('memory');
+    expect(reports[0]!.limit.stoppedDuring).toBe('index-build');
+    expect(reports[0]!.mode).toBe('distance-flood');
   });
 
   it('stops on a memory ceiling the host reports', () => {

@@ -53,9 +53,10 @@ function buildOccluders(
   limits: OccluderBuildLimits = {}
 ): Occluders {
   if (kind === 'grid') {
-    const grid: OccluderGrid = buildOccluderGrid(primitives, bounds, cellSize);
+    const grid: OccluderGrid = buildOccluderGrid(primitives, bounds, cellSize, limits);
     return {
       kind,
+      aborted: grid.aborted,
       triangleCount: grid.triangleCount,
       blocked: (ax, ay, az, bx, by, bz) => segmentBlocked(grid, ax, ay, az, bx, by, bz),
       floorAt: (x, z) => highestSurfaceAt(grid, x, z, bounds),
@@ -307,19 +308,27 @@ export function compileShadoWorldVisibility(
    * in: refuse the allocation up front when it is predictably too large, and
    * poll for cancellation while reading geometry.
    */
-  const buildLimits: OccluderBuildLimits = {
+  /*
+   * Recomputed immediately before each build, never shared between them.
+   *
+   * One allowance handed to both indexes lets two structures that each fit
+   * individually exceed the ceiling together: the first one is resident by the
+   * time the second is measured, so the second has to be offered what is
+   * actually left rather than what the first was offered.
+   */
+  const buildLimits = (): OccluderBuildLimits => ({
     ...(budget?.maxResidentBytes !== undefined && budget.residentBytes
       ? { maxBytes: Math.max(0, budget.maxResidentBytes - budget.residentBytes()) }
       : {}),
     shouldStop: () => exhausted(0) !== 'none',
-  };
+  });
   const built = requestedMode === 'sampled-occlusion' && !check('index-build', 0)
     ? buildOccluders(
         input.occluderIndex ?? 'bvh',
         input.collisionPrimitives,
         input.bounds,
         OCCLUDER_CELL_SIZE,
-        buildLimits
+        buildLimits()
       )
     : null;
   if (built?.aborted) {
@@ -340,7 +349,7 @@ export function compileShadoWorldVisibility(
         input.groundPrimitives,
         input.bounds,
         OCCLUDER_CELL_SIZE,
-        buildLimits
+        buildLimits()
       )
     : null;
   if (groundBuilt?.aborted) {
