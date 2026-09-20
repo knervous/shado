@@ -1,5 +1,6 @@
 import {
   assembleOccluderScene,
+  compileShadoWorldVisibility,
   occluderEligibility,
   readGlbPrimitives,
 } from '../src/world';
@@ -213,5 +214,73 @@ describe('assembling placed objects', () => {
     expect(names).toContain('stamp-1');
     expect(names).toContain('stamp-2');
     expect(names).not.toContain('stamp-0');
+  });
+});
+
+describe('a placed object is why something is hidden', () => {
+  /** A 200-unit wall as a prototype, so a stamp of it can block a street. */
+  const wallGlb = glb({ corners: [0, 0, -8, 0, 0, 8, 0, 200, 8, 0, 200, -8] });
+  const REGION = 16;
+  const LENGTH = 160;
+
+  /** Ground for the viewers to stand on; the only collision in the scene. */
+  const ground = () => {
+    const positions: number[] = [];
+    const indices: number[] = [];
+    for (let x = 0; x < LENGTH; x += 8) {
+      const v = positions.length / 3;
+      positions.push(x, 0, -8, x + 8, 0, -8, x + 8, 0, 8, x, 0, 8);
+      indices.push(v, v + 1, v + 2, v, v + 2, v + 3);
+    }
+    return {
+      name: 'ground',
+      material: 'stone',
+      positions: new Float32Array(positions),
+      indices: new Uint32Array(indices),
+    };
+  };
+
+  function rowsWithWallAt(x: number | null) {
+    const world = packageWith(
+      x === null
+        ? { prototype: [], enabled: [], phaseMask: [], position: [] }
+        : {
+            prototype: [0],
+            enabled: [1],
+            phaseMask: [0xffffffff],
+            position: [[x, 0, 0]],
+            radius: [100],
+          },
+      [{ id: 'wall', source: 'wall.glb' }],
+    );
+    const { primitives } = assembleOccluderScene({ world, loadPrototype: () => wallGlb });
+    const centers: [number, number][] = [];
+    for (let cx = REGION / 2; cx < LENGTH; cx += REGION) centers.push([cx, 0]);
+    const visibility = compileShadoWorldVisibility({
+      mode: 'sampled-occlusion',
+      bounds: { min: [0, 0, -8], max: [LENGTH, 200, 8] },
+      regionSize: REGION,
+      maxDistance: 1024,
+      renderCellCenters: centers,
+      persistentRenderCells: new Uint8Array(centers.length),
+      collisionPrimitives: [ground(), ...primitives],
+    });
+    return (from: number, to: number) =>
+      ((visibility.pvs.words[from * visibility.pvs.wordsPerRow + (to >>> 5)]! >>> 0) &
+        (1 << (to & 31))) !== 0;
+  }
+
+  it('hides across a stamped wall, and stops hiding when the stamp moves away', () => {
+    const open = rowsWithWallAt(null);
+    const walled = rowsWithWallAt(80);
+    const moved = rowsWithWallAt(158);
+
+    // With nothing placed, the street is open end to end.
+    expect(open(0, 9)).toBe(true);
+    // Placing one opaque object is the entire difference.
+    expect(walled(0, 9)).toBe(false);
+    // Moving that same object out of the way restores the view, so the
+    // rejection was caused by where the stamp stands and not by the ground.
+    expect(moved(0, 9)).toBe(true);
   });
 });
