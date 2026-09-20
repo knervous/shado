@@ -123,7 +123,7 @@ export type ShadoWorldVisibilityMode = 'distance-flood' | 'sampled-occlusion';
 export type ShadoWorldVisibilityBakeReport = {
   requestedMode: ShadoWorldVisibilityMode;
   mode: ShadoWorldVisibilityMode;
-  fallbackReason: 'no-eligible-occluders' | null;
+  fallbackReason: 'no-eligible-occluders' | 'budget-exhausted' | null;
   occluderTriangles: number;
   /** Pairs admitted by the local guarantee, never offered to an occlusion test. */
   forcedLocalPairs: number;
@@ -146,13 +146,25 @@ export type ShadoWorldVisibilityBakeReport = {
   };
   /** Query work, counted in the hot path rather than inferred from wall time. */
   work: {
+    /** Which acceleration structure answered the queries. */
+    index: 'bvh' | 'grid' | null;
     segmentQueries: number;
     blockedQueries: number;
     columnQueries: number;
-    cellVisits: number;
+    /**
+     * Index elements whose bounds were tested: grid cells entered by a DDA
+     * walk, or hierarchy nodes opened. Comparable across indexes only as
+     * "work done to reach the triangles".
+     */
+    nodeVisits: number;
     triangleTests: number;
-    /** Triangle references across grid buckets; over `occluderTriangles` by the duplication factor. */
-    bucketReferences: number;
+    /**
+     * What the index stores. For the grid this is triangle references across
+     * buckets, which exceeds `occluderTriangles` by its duplication factor;
+     * for the hierarchy it is the node count, which is fewer. The two are not
+     * the same quantity and are not comparable to each other.
+     */
+    indexEntries: number;
     /** Regions with no surface to stand on, which are sampled as unknown and admitted. */
     regionsWithoutFloor: number;
   };
@@ -162,8 +174,12 @@ export type ShadoWorldVisibilityBakeReport = {
    * correctness, so a truncated run is publishable and merely worse.
    */
   limit: {
-    stop: 'none' | 'seconds' | 'segment-queries' | 'cancelled';
+    stop: 'none' | 'seconds' | 'segment-queries' | 'cancelled' | 'memory';
+    /** Where the bake was when it gave up. */
+    stoppedDuring: 'none' | 'index-build' | 'region-sampling' | 'pair-loop';
     pairsAdmittedAfterStop: number;
+    /** Regions left unsampled, each of which is therefore admitted unknown. */
+    regionsLeftUnsampled: number;
   };
 };
 
@@ -175,9 +191,22 @@ export type ShadoWorldVisibilityBakeReport = {
  * remaining pair, which is the conservative direction.
  */
 export type ShadoWorldVisibilityBudget = {
+  /**
+   * Wall-clock ceiling for the WHOLE bake, measured from the first thing it
+   * does. It covers index construction and region sampling, not only the pair
+   * sweep: a deadline that starts after the expensive preprocessing is not a
+   * deadline.
+   */
   maxSeconds?: number;
   maxSegmentQueries?: number;
-  /** Polled between pairs; an `AbortSignal` satisfies this shape. */
+  /**
+   * Resident bytes, sampled through a host-supplied reader so this stays free
+   * of any runtime's process API. Exceeding it stops the bake the same way a
+   * deadline does.
+   */
+  maxResidentBytes?: number;
+  residentBytes?: () => number;
+  /** Polled at every stage boundary; an `AbortSignal` satisfies this shape. */
   signal?: { readonly aborted: boolean };
 };
 
@@ -811,6 +840,15 @@ export type ShadoWorldPrimitive = {
   pvsPriority?: string;
   /** Bitwise ShadoCollisionFlags retained from glTF collision metadata. */
   collisionFlags?: number;
+  /**
+   * Whether the source material draws both faces. Consumed by occlusion: a
+   * single-sided surface is invisible from behind, so it must not hide
+   * anything from a viewpoint on that side. Undefined means unknown, and an
+   * unknown surface is treated as two-sided, which is the historical
+   * behaviour and the one that blocks more -- callers that know better
+   * (anything reading a glTF material) should say so.
+   */
+  doubleSided?: boolean;
   positions: ArrayLike<number>;
   indices: ArrayLike<number>;
   /** Optional glTF TEXCOORD_1 stream used by the offline lightmap baker. */

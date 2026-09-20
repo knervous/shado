@@ -1,4 +1,7 @@
 import { buildOccluderGrid, highestSurfaceAt, segmentBlocked } from './occlusion';
+import { buildOccluderBvh, bvhHighestSurfaceAt, bvhSegmentBlocked } from './occluder-bvh';
+import type { OccluderBvh } from './occluder-bvh';
+import type { OccluderGrid } from './occlusion';
 import type {
   ShadoWorldBounds,
   ShadoWorldPrimitive,
@@ -7,6 +10,66 @@ import type {
   ShadoWorldVisibilityBudget,
   ShadoWorldVisibilityMode,
 } from './types';
+
+/**
+ * Which index answers the segment queries.
+ *
+ * `bvh` is the default because the grid's cost grows with world density: on
+ * Crownward's assembled visual scene it tested 640 triangles per cell visited
+ * and 5,337 per query. `grid` stays selectable so the two remain
+ * differentially testable and a regression in either is visible rather than
+ * theoretical.
+ */
+export type ShadoWorldOccluderIndex = 'bvh' | 'grid';
+
+/** One question, two structures: can this segment reach that point? */
+type Occluders = {
+  readonly kind: ShadoWorldOccluderIndex;
+  readonly triangleCount: number;
+  readonly blocked: (
+    ax: number, ay: number, az: number,
+    bx: number, by: number, bz: number
+  ) => boolean;
+  readonly floorAt: (x: number, z: number) => number | null;
+  readonly counters: {
+    segmentQueries: number;
+    blockedQueries: number;
+    columnQueries: number;
+    triangleTests: number;
+  };
+  readonly nodeVisits: () => number;
+  readonly references: number;
+};
+
+function buildOccluders(
+  kind: ShadoWorldOccluderIndex,
+  primitives: readonly ShadoWorldPrimitive[],
+  bounds: ShadoWorldBounds,
+  cellSize: number
+): Occluders {
+  if (kind === 'grid') {
+    const grid: OccluderGrid = buildOccluderGrid(primitives, bounds, cellSize);
+    return {
+      kind,
+      triangleCount: grid.triangleCount,
+      blocked: (ax, ay, az, bx, by, bz) => segmentBlocked(grid, ax, ay, az, bx, by, bz),
+      floorAt: (x, z) => highestSurfaceAt(grid, x, z, bounds),
+      counters: grid.counters,
+      nodeVisits: () => grid.counters.cellVisits,
+      references: grid.bucketReferences,
+    };
+  }
+  const bvh: OccluderBvh = buildOccluderBvh(primitives);
+  return {
+    kind,
+    triangleCount: bvh.triangleCount,
+    blocked: (ax, ay, az, bx, by, bz) => bvhSegmentBlocked(bvh, ax, ay, az, bx, by, bz),
+    floorAt: (x, z) => bvhHighestSurfaceAt(bvh, x, z),
+    counters: bvh.counters,
+    nodeVisits: () => bvh.counters.nodeVisits,
+    references: bvh.nodeCount,
+  };
+}
 
 type Point2 = [number, number];
 
@@ -68,6 +131,8 @@ export type ShadoWorldVisibilityCompileInput = {
   mode?: ShadoWorldVisibilityMode;
   /** Bounds enforced while the bake runs; exhaustion admits the rest. */
   budget?: ShadoWorldVisibilityBudget;
+  /** Which acceleration structure answers segment queries. Defaults to `bvh`. */
+  occluderIndex?: ShadoWorldOccluderIndex;
   bounds: ShadoWorldBounds;
   regionSize: number;
   maxDistance: number;
@@ -156,9 +221,53 @@ export function compileShadoWorldVisibility(
    */
   const clock = () => (typeof performance === 'undefined' ? Date.now() : performance.now());
   const bakeStarted = clock();
+  /*
+   * One deadline for the whole bake, started before anything is built.
+   *
+   * A budget that begins after the index and the sampling have already run
+   * bounds the cheapest stage and leaves the expensive ones unbounded, which
+   * is how a `--budget-seconds 0` run finished successfully and reported no
+   * failure. Every stage below asks the same question, and every affirmative
+   * answer degrades the bake towards admitting rather than towards hiding.
+   */
+  const budget = input.budget;
+  const deadline = budget?.maxSeconds === undefined
+    ? Number.POSITIVE_INFINITY
+    : bakeStarted + budget.maxSeconds * 1000;
+  const maxSegmentQueries = budget?.maxSegmentQueries ?? Number.POSITIVE_INFINITY;
+  let stop: ShadoWorldVisibilityBakeReport['limit']['stop'] = 'none';
+  let stoppedDuring: ShadoWorldVisibilityBakeReport['limit']['stoppedDuring'] = 'none';
+  const exhausted = (segmentQueries: number): typeof stop => {
+    if (budget?.signal?.aborted) return 'cancelled';
+    if (segmentQueries >= maxSegmentQueries) return 'segment-queries';
+    if (clock() > deadline) return 'seconds';
+    if (
+      budget?.maxResidentBytes !== undefined &&
+      budget.residentBytes &&
+      budget.residentBytes() > budget.maxResidentBytes
+    ) return 'memory';
+    return 'none';
+  };
+  const check = (
+    during: ShadoWorldVisibilityBakeReport['limit']['stoppedDuring'],
+    segmentQueries: number
+  ): boolean => {
+    if (stop !== 'none') return true;
+    const reason = exhausted(segmentQueries);
+    if (reason === 'none') return false;
+    stop = reason;
+    stoppedDuring = during;
+    return true;
+  };
+
   const gridStarted = clock();
-  const grid = requestedMode === 'sampled-occlusion'
-    ? buildOccluderGrid(input.collisionPrimitives, input.bounds, OCCLUDER_CELL_SIZE)
+  const grid = requestedMode === 'sampled-occlusion' && !check('index-build', 0)
+    ? buildOccluders(
+        input.occluderIndex ?? 'bvh',
+        input.collisionPrimitives,
+        input.bounds,
+        OCCLUDER_CELL_SIZE
+      )
     : null;
   const occluderGridMs = clock() - gridStarted;
   const sampled = grid !== null && grid.triangleCount > 0;
@@ -192,14 +301,22 @@ export function compileShadoWorldVisibility(
 
   const samplingStarted = clock();
   let regionsWithoutFloor = 0;
+  let regionsLeftUnsampled = 0;
   for (let region = 0; sampled && region < regionCount; region++) {
+    // Sampling a region walks its footprint against the whole occluder set,
+    // which on a dense zone is not cheap; an unsampled region has no eyes and
+    // is therefore admitted, so stopping here is safe and merely worse.
+    if ((region & 31) === 0 && check('region-sampling', grid!.counters.segmentQueries)) {
+      regionsLeftUnsampled = regionCount - region;
+      break;
+    }
     const eyePoints: number[] = [];
     const targetPoints: number[] = [];
     const low = regionLow[region]!;
     const high = regionHigh[region]!;
     const known = Number.isFinite(low) && Number.isFinite(high);
     for (const [x, z] of footprint(region)) {
-      const floor = highestSurfaceAt(grid!, x, z, input.bounds);
+      const floor = grid!.floorAt(x, z);
       if (floor === null) continue;
       for (const eye of EYE_HEIGHTS) eyePoints.push(x, floor + eye, z);
       if (known) {
@@ -224,12 +341,6 @@ export function compileShadoWorldVisibility(
   let occluded = 0;
   let forcedLocalPairs = 0;
   const pairLoopStarted = clock();
-  const budget = input.budget;
-  const deadline = budget?.maxSeconds === undefined
-    ? Number.POSITIVE_INFINITY
-    : pairLoopStarted + budget.maxSeconds * 1000;
-  const maxSegmentQueries = budget?.maxSegmentQueries ?? Number.POSITIVE_INFINITY;
-  let stop: ShadoWorldVisibilityBakeReport['limit']['stop'] = 'none';
   let pairsAdmittedAfterStop = 0;
   const geometry = { originX, originZ, size, width, height, maxDistance };
   for (let from = 0; from < regionCount; from++) {
@@ -245,12 +356,7 @@ export function compileShadoWorldVisibility(
          * stopped, every remaining pair is ADMITTED untested, so a truncated
          * bake is a worse PVS and never an unsafe one.
          */
-        if (stop === 'none') {
-          if (budget?.signal?.aborted) stop = 'cancelled';
-          else if (grid!.counters.segmentQueries >= maxSegmentQueries) stop = 'segment-queries';
-          else if (clock() > deadline) stop = 'seconds';
-        }
-        if (stop !== 'none') {
+        if (check('pair-loop', grid!.counters.segmentQueries)) {
           pairsAdmittedAfterStop++;
         } else {
           /*
@@ -298,7 +404,7 @@ export function compileShadoWorldVisibility(
       mode,
       fallbackReason:
         requestedMode === 'sampled-occlusion' && !sampled
-          ? 'no-eligible-occluders'
+          ? (stop === 'none' ? 'no-eligible-occluders' : 'budget-exhausted')
           : null,
       occluderTriangles: sampled ? grid!.triangleCount : 0,
       forcedLocalPairs,
@@ -314,15 +420,16 @@ export function compileShadoWorldVisibility(
         totalMs: clock() - bakeStarted,
       },
       work: {
+        index: grid?.kind ?? null,
         segmentQueries: grid?.counters.segmentQueries ?? 0,
         blockedQueries: grid?.counters.blockedQueries ?? 0,
         columnQueries: grid?.counters.columnQueries ?? 0,
-        cellVisits: grid?.counters.cellVisits ?? 0,
+        nodeVisits: grid ? grid.nodeVisits() : 0,
         triangleTests: grid?.counters.triangleTests ?? 0,
-        bucketReferences: grid?.bucketReferences ?? 0,
+        indexEntries: grid?.references ?? 0,
         regionsWithoutFloor,
       },
-      limit: { stop, pairsAdmittedAfterStop },
+      limit: { stop, stoppedDuring, pairsAdmittedAfterStop, regionsLeftUnsampled },
     });
   }
   return {
@@ -352,14 +459,13 @@ export function compileShadoWorldVisibility(
  * and the expensive all-blocked case is the rare one.
  */
 function anyClearSegment(
-  grid: ReturnType<typeof buildOccluderGrid>,
+  grid: Occluders,
   eyes: Float64Array,
   targets: Float64Array
 ): boolean {
   for (let t = targets.length - 3; t >= 0; t -= 3) {
     for (let e = 0; e < eyes.length; e += 3) {
-      if (!segmentBlocked(
-        grid,
+      if (!grid.blocked(
         eyes[e]!, eyes[e + 1]!, eyes[e + 2]!,
         targets[t]!, targets[t + 1]!, targets[t + 2]!
       )) return true;

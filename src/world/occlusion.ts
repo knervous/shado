@@ -55,6 +55,8 @@ export type OccluderGridCounters = {
 };
 
 export type OccluderGrid = {
+  /** One byte per triangle: non-zero where the surface draws both faces. */
+  readonly doubleSided: Uint8Array;
   /**
    * Triangle references across all buckets. Larger than `triangleCount`
    * because a triangle spanning several cells is referenced by each: the ratio
@@ -88,10 +90,15 @@ export function buildOccluderGrid(
   let total = 0;
   for (const primitive of primitives) total += primitive.indices.length / 3;
   const triangles = new Float64Array(total * 9);
+  const doubleSided = new Uint8Array(total);
   let write = 0;
+  let triangleIndex = 0;
   for (const primitive of primitives) {
     const { positions, indices } = primitive;
+    // Unknown sidedness blocks from both sides, as collision always has.
+    const bothFaces = primitive.doubleSided !== false;
     for (let i = 0; i < indices.length; i += 3) {
+      doubleSided[triangleIndex++] = bothFaces ? 1 : 0;
       for (let corner = 0; corner < 3; corner++) {
         const base = Number(indices[i + corner]) * 3;
         triangles[write++] = Number(positions[base]);
@@ -119,6 +126,7 @@ export function buildOccluderGrid(
   const grid = {
     bucketReferences,
     counters,
+    doubleSided,
     triangles,
     triangleCount,
     buckets,
@@ -261,6 +269,8 @@ function hitsAny(
     const hz = dx * e2y - dy * e2x;
     const det = e1x * hx + e1y * hy + e1z * hz;
     if (det > -1e-12 && det < 1e-12) continue;
+    // The back of a single-sided surface is not drawn, so it hides nothing.
+    if (det < 0 && grid.doubleSided[triangle] === 0) continue;
     const inv = 1 / det;
     const sx = ax - t[o]!, sy = ay - t[o + 1]!, sz = az - t[o + 2]!;
     const u = inv * (sx * hx + sy * hy + sz * hz);

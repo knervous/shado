@@ -217,7 +217,12 @@ describe('bounded bakes', () => {
     // One segment query is enough to start and not enough to finish.
     const truncated = bake({ maxSegmentQueries: 1 }, (value) => stopped.push(value));
 
-    expect(full[0]!.limit).toEqual({ stop: 'none', pairsAdmittedAfterStop: 0 });
+    expect(full[0]!.limit).toEqual({
+      stop: 'none',
+      stoppedDuring: 'none',
+      pairsAdmittedAfterStop: 0,
+      regionsLeftUnsampled: 0,
+    });
     expect(stopped[0]!.limit.stop).toBe('segment-queries');
     expect(stopped[0]!.limit.pairsAdmittedAfterStop).toBeGreaterThan(0);
     expect(stopped[0]!.occluded).toBeLessThan(full[0]!.occluded);
@@ -231,6 +236,36 @@ describe('bounded bakes', () => {
         if (bit(complete)) expect(bit(truncated)).toBe(true);
       }
     }
+  });
+
+  it('spends one deadline across every stage, not just the pair sweep', () => {
+    /*
+     * A zero-second budget must stop the bake before it builds an index or
+     * samples a region, and must say which stage it died in. The rows it
+     * returns are a flood, and it says that too rather than labelling them
+     * occlusion-tested.
+     */
+    const reports: ShadoWorldVisibilityBakeReport[] = [];
+    const visibility = bake({ maxSeconds: 0 }, (value) => reports.push(value));
+    const report = reports[0]!;
+    expect(report.limit.stop).toBe('seconds');
+    expect(report.limit.stoppedDuring).toBe('index-build');
+    expect(report.mode).toBe('distance-flood');
+    expect(report.fallbackReason).toBe('budget-exhausted');
+    expect(report.occlusionTested).toBe(0);
+    expect(report.work.segmentQueries).toBe(0);
+    const flood = bake(undefined, () => {});
+    expect(visibility.visibleRegionPairs).toBeGreaterThan(flood.visibleRegionPairs);
+  });
+
+  it('stops on a memory ceiling the host reports', () => {
+    const reports: ShadoWorldVisibilityBakeReport[] = [];
+    bake(
+      { maxResidentBytes: 1, residentBytes: () => 1024 },
+      (value) => reports.push(value)
+    );
+    expect(reports[0]!.limit.stop).toBe('memory');
+    expect(reports[0]!.occluded).toBe(0);
   });
 
   it('stops when cancelled, without producing a hidden row', () => {
@@ -252,10 +287,13 @@ describe('bounded bakes', () => {
     expect(work.blockedQueries).toBeGreaterThan(0);
     expect(work.blockedQueries).toBeLessThanOrEqual(work.segmentQueries);
     expect(work.columnQueries).toBeGreaterThan(0);
-    expect(work.cellVisits).toBeGreaterThanOrEqual(work.segmentQueries);
+    expect(work.index).toBe('bvh');
+    expect(work.nodeVisits).toBeGreaterThanOrEqual(work.segmentQueries);
     expect(work.triangleTests).toBeGreaterThan(0);
-    // A triangle spanning several cells is referenced by each of them.
-    expect(work.bucketReferences).toBeGreaterThanOrEqual(reports[0]!.occluderTriangles);
+    // The hierarchy stores fewer entries than it indexes triangles; the grid
+    // stores more. Which is why the field says what the index was.
+    expect(work.indexEntries).toBeGreaterThan(0);
+    expect(work.indexEntries).toBeLessThan(reports[0]!.occluderTriangles);
     expect(stages.totalMs).toBeGreaterThanOrEqual(stages.pairLoopMs);
     expect(stages.occluderGridMs).toBeGreaterThanOrEqual(0);
   });

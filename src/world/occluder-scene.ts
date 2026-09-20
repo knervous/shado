@@ -48,6 +48,10 @@ export type OccluderExclusion =
   | 'unreadable-prototype-asset'
   | 'stamp-disabled'
   | 'stamp-out-of-phase'
+  | 'phase-variant-blocker'
+  | 'skinned-geometry'
+  | 'morph-targets'
+  | 'animated-node'
   | 'no-eligible-submesh'
   | 'triangle-budget';
 
@@ -57,6 +61,13 @@ export type GlbPrimitive = {
   readonly material: string;
   readonly alphaMode: 'OPAQUE' | 'MASK' | 'BLEND';
   readonly doubleSided: boolean;
+  /**
+   * Why this submesh cannot be treated as geometry that is always exactly
+   * where it was read, or null when nothing disqualifies it. Skinning, morph
+   * targets and animated ancestors all mean the drawn surface is not the
+   * surface in the buffer.
+   */
+  readonly dynamic: 'skinned-geometry' | 'morph-targets' | 'animated-node' | null;
   /** Prototype-local positions with the node hierarchy already applied. */
   readonly positions: Float64Array;
   readonly indices: Uint32Array;
@@ -75,6 +86,14 @@ export type OccluderSceneManifest = {
     included: number;
     excluded: Record<OccluderExclusion, number>;
   };
+  /** The phase contract the assembly ran under, and the phases it saw. */
+  phases: { policy: 'invariant' | 'active-phase'; activeMask: number; worldMask: number };
+  /**
+   * Placed triangles by how many faces their material draws. Single-sided
+   * triangles block only from the front, so this is the share of the occluder
+   * set whose usefulness depends on which side a viewer stands.
+   */
+  sidedness: { doubleSidedTriangles: number; singleSidedTriangles: number };
   triangles: {
     /** Triangles in the prototype meshes before eligibility. */
     sourced: number;
@@ -107,6 +126,18 @@ export type OccluderSceneInput = {
   loadPrototype: (source: string, id: string) => Uint8Array | null;
   /** Stamps outside this mask are not drawn, so they cannot block. */
   activePhaseMask?: number;
+  /**
+   * How a blocker has to relate to the phases that share one visibility row.
+   *
+   * `invariant` (the default) admits only stamps present in EVERY phase the
+   * world uses, because one static row serves all of them: a wall that exists
+   * in phase A and not in phase B would otherwise hide, from phase B, content
+   * a player in phase B can see. `active-phase` admits anything drawn in
+   * `activePhaseMask`, which is only sound for rows that are themselves bound
+   * to that phase and selected as such at runtime -- which the package cannot
+   * currently express, so it is opt-in and never the default.
+   */
+  phasePolicy?: 'invariant' | 'active-phase';
   /**
    * Ceiling on placed occluder triangles. Reaching it excludes the remaining
    * objects, smallest first, and records them as `triangle-budget`. Omitting
@@ -145,34 +176,60 @@ export function readGlbPrimitives(bytes: Uint8Array): GlbPrimitive[] {
   if (!binary) return [];
 
   const out: GlbPrimitive[] = [];
+  /*
+   * Nodes an animation drives, and every descendant of one: a child inherits
+   * its ancestor's motion, so a door leaf under an animated hinge is animated
+   * even though no channel names it.
+   */
+  const animatedNodes = new Set<number>();
+  for (const animation of gltf.animations ?? []) {
+    for (const channel of animation.channels ?? []) {
+      if (channel.target?.node != null) animatedNodes.add(channel.target.node);
+    }
+  }
   const scene = gltf.scenes?.[gltf.scene ?? 0];
   const roots = scene?.nodes ?? gltf.nodes?.map((_, index) => index) ?? [];
-  const walk = (nodeIndex: number, parent: number[], path: string): void => {
+  const walk = (
+    nodeIndex: number,
+    parent: number[],
+    path: string,
+    animatedAncestor: boolean
+  ): void => {
     const node = gltf.nodes?.[nodeIndex];
     if (!node) return;
     const local = nodeMatrix(node);
     const matrix = multiply(parent, local);
     const name = node.name ? `${path}/${node.name}` : `${path}/node${nodeIndex}`;
+    const animated = animatedAncestor || animatedNodes.has(nodeIndex);
     if (node.mesh != null) {
       const mesh = gltf.meshes?.[node.mesh];
       mesh?.primitives?.forEach((primitive, index) => {
         const material =
           primitive.material == null ? undefined : gltf.materials?.[primitive.material];
         const geometry = readPrimitive(gltf, binary!, primitive, matrix);
+        const dynamic: GlbPrimitive['dynamic'] =
+          node.skin != null || primitive.attributes?.JOINTS_0 != null
+            ? 'skinned-geometry'
+            : primitive.targets?.length
+              ? 'morph-targets'
+              : animated
+                ? 'animated-node'
+                : null;
         out.push({
           node: mesh!.primitives!.length === 1 ? name : `${name}#${index}`,
           material: material?.name ?? (primitive.material == null ? '__default' : `material-${primitive.material}`),
           alphaMode: (material?.alphaMode as GlbPrimitive['alphaMode']) ?? 'OPAQUE',
           doubleSided: material?.doubleSided === true,
+          dynamic,
           positions: geometry.positions,
           indices: geometry.indices,
           extras: { ...(material?.extras ?? {}), ...(mesh?.extras ?? {}), ...(primitive.extras ?? {}) },
         });
       });
     }
-    for (const child of node.children ?? []) walk(child, matrix, name);
+    for (const child of node.children ?? []) walk(child, matrix, name, animated);
   };
-  for (const root of roots) walk(root, IDENTITY, '');
+  for (const root of roots) walk(root, IDENTITY, '', false);
   return out;
 }
 
@@ -189,6 +246,13 @@ export function readGlbPrimitives(bytes: Uint8Array): GlbPrimitive[] {
 export function occluderEligibility(primitive: GlbPrimitive): OccluderExclusion | null {
   if (primitive.alphaMode === 'BLEND') return 'alpha-blended-material';
   if (primitive.alphaMode === 'MASK') return 'alpha-tested-material';
+  /*
+   * `OPAQUE` is a statement about light, not about permanence. A skinned or
+   * morphed mesh, or one under an animated node, is drawn somewhere other
+   * than where its buffer says -- a door that swings open is the case that
+   * matters, because baking it shut hides a corridor the player walks down.
+   */
+  if (primitive.dynamic) return primitive.dynamic;
   if (!primitive.indices.length || !primitive.positions.length) return 'unsupported-accessor';
   return null;
 }
@@ -208,6 +272,18 @@ export function assembleOccluderScene(
   const stamps = input.world.objects?.stamps;
   const prototypes = input.world.objects?.prototypes;
   const phaseMask = input.activePhaseMask ?? 0xffffffff;
+  const phasePolicy = input.phasePolicy ?? 'invariant';
+  /*
+   * The phases this world actually uses, taken from what it draws. One static
+   * visibility row serves all of them, so under `invariant` a blocker has to
+   * be present in every one of them -- otherwise a row built in a phase where
+   * the wall exists would hide, from a phase where it does not, content the
+   * player can see straight to.
+   */
+  let worldPhases = 0;
+  for (const mask of input.world.cells?.phaseMask ?? []) worldPhases |= mask;
+  for (const mask of stamps?.phaseMask ?? []) worldPhases |= mask;
+  worldPhases = (worldPhases & phaseMask) >>> 0;
   const maxTriangles = input.maxTriangles ?? 8_000_000;
   const excluded: Record<OccluderExclusion, number> = {
     'alpha-blended-material': 0,
@@ -218,15 +294,22 @@ export function assembleOccluderScene(
     'unreadable-prototype-asset': 0,
     'stamp-disabled': 0,
     'stamp-out-of-phase': 0,
+    'phase-variant-blocker': 0,
+    'skinned-geometry': 0,
+    'morph-targets': 0,
+    'animated-node': 0,
     'no-eligible-submesh': 0,
     'triangle-budget': 0,
   };
   const manifest: OccluderSceneManifest = {
     prototypes: { total: prototypes?.id.length ?? 0, resolved: 0, unresolved: [] },
     stamps: { total: stamps?.id.length ?? 0, included: 0, excluded },
+    phases: { policy: input.phasePolicy ?? 'invariant', activeMask: input.activePhaseMask ?? 0xffffffff, worldMask: 0 },
+    sidedness: { doubleSidedTriangles: 0, singleSidedTriangles: 0 },
     triangles: { sourced: 0, eligible: 0, placed: 0, budget: maxTriangles },
     submeshes: [],
   };
+  manifest.phases.worldMask = worldPhases;
   if (!stamps || !prototypes) return { primitives: [], manifest };
 
   /** Eligible submeshes per prototype, read once and instanced many times. */
@@ -294,7 +377,13 @@ export function assembleOccluderScene(
   const quaternion = new Float32Array(4);
   for (const stamp of order) {
     if (!stamps.enabled[stamp]) { excluded['stamp-disabled'] += 1; continue; }
-    if ((stamps.phaseMask[stamp]! & phaseMask) === 0) { excluded['stamp-out-of-phase'] += 1; continue; }
+    const stampPhases = (stamps.phaseMask[stamp]! & phaseMask) >>> 0;
+    if (stampPhases === 0) { excluded['stamp-out-of-phase'] += 1; continue; }
+    if (phasePolicy === 'invariant' && worldPhases !== 0 && stampPhases !== worldPhases) {
+      // Present in some phases sharing this row but not all of them.
+      excluded['phase-variant-blocker'] += 1;
+      continue;
+    }
     const parts = eligibleFor(stamps.prototype[stamp]!);
     if (!parts) { excluded['no-eligible-submesh'] += 1; continue; }
     let triangles = 0;
@@ -304,6 +393,14 @@ export function assembleOccluderScene(
       continue;
     }
     const matrix = stampMatrix(stamps, stamp, quaternion);
+    /*
+     * A negative determinant means this stamp is mirrored, which reverses the
+     * winding of every triangle it places. Front-face occlusion reads winding,
+     * so the indices have to be reversed to keep the front face in front --
+     * otherwise a mirrored wall would block from the side you can see through
+     * and pass light on the side you cannot.
+     */
+    const mirrored = determinant3(matrix) < 0;
     for (const part of parts) {
       const positions = new Float32Array(part.positions.length);
       for (let offset = 0; offset < part.positions.length; offset += 3) {
@@ -314,17 +411,41 @@ export function assembleOccluderScene(
         positions[offset + 1] = matrix[1]! * x + matrix[5]! * y + matrix[9]! * z + matrix[13]!;
         positions[offset + 2] = matrix[2]! * x + matrix[6]! * y + matrix[10]! * z + matrix[14]!;
       }
+      const partTriangles = part.indices.length / 3;
+      if (part.doubleSided) manifest.sidedness.doubleSidedTriangles += partTriangles;
+      else manifest.sidedness.singleSidedTriangles += partTriangles;
       primitives.push({
         name: `${stamps.id[stamp] ?? `stamp-${stamp}`}:${part.node}`,
         material: part.material,
+        doubleSided: part.doubleSided,
         positions,
-        indices: part.indices,
+        indices: mirrored ? reverseWinding(part.indices) : part.indices,
       });
     }
     manifest.triangles.placed += triangles;
     manifest.stamps.included += 1;
   }
   return { primitives, manifest };
+}
+
+/** Determinant of a column-major matrix's rotation/scale part. */
+function determinant3(m: readonly number[]): number {
+  return (
+    m[0]! * (m[5]! * m[10]! - m[6]! * m[9]!) -
+    m[4]! * (m[1]! * m[10]! - m[2]! * m[9]!) +
+    m[8]! * (m[1]! * m[6]! - m[2]! * m[5]!)
+  );
+}
+
+/** Swaps two corners of every triangle, flipping which face is the front. */
+function reverseWinding(indices: Uint32Array): Uint32Array {
+  const out = new Uint32Array(indices.length);
+  for (let index = 0; index + 2 < indices.length; index += 3) {
+    out[index] = indices[index]!;
+    out[index + 1] = indices[index + 2]!;
+    out[index + 2] = indices[index + 1]!;
+  }
+  return out;
 }
 
 /** The runtime's stamp transform, column-major, as thin instances receive it. */
@@ -350,9 +471,11 @@ function stampMatrix(
 type GltfDocument = {
   scene?: number;
   scenes?: { nodes?: number[] }[];
+  animations?: { channels?: { target?: { node?: number } }[] }[];
   nodes?: {
     name?: string;
     mesh?: number;
+    skin?: number;
     children?: number[];
     matrix?: number[];
     translation?: number[];
@@ -366,6 +489,7 @@ type GltfDocument = {
       material?: number;
       indices?: number;
       attributes?: Record<string, number>;
+      targets?: Record<string, number>[];
       extras?: Record<string, unknown>;
     }[];
   }[];

@@ -9,12 +9,23 @@ import type { ShadoWorldSpatialPackage } from '../src/world';
 /** A GLB holding one axis-aligned quad, built by hand so the test owns every byte. */
 function glb(options: {
   alphaMode?: string;
+  doubleSided?: boolean;
   node?: { translation?: number[]; scale?: number[] };
   corners?: number[];
+  /** Explicit triangle list; defaults to one quad over the first four corners. */
+  indices?: number[];
+  /** Drive the node with an animation channel. */
+  animated?: boolean;
+  /** Give the primitive a morph target. */
+  morphed?: boolean;
+  /** Attach the node to a skin. */
+  skinned?: boolean;
 }): Uint8Array {
   const corners = options.corners ?? [0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0];
   const positions = new Float32Array(corners);
-  const indices = new Uint16Array([0, 1, 2, 0, 2, 3]);
+  const indices = new Uint16Array(
+    options.indices ?? [0, 1, 2, 0, 2, 3]
+  );
   const indexBytes = new Uint8Array(indices.buffer);
   const padding = (4 - (indexBytes.byteLength % 4)) % 4;
   const binary = new Uint8Array(positions.byteLength + indexBytes.byteLength + padding);
@@ -24,9 +35,29 @@ function glb(options: {
     asset: { version: '2.0' },
     scene: 0,
     scenes: [{ nodes: [0] }],
-    nodes: [{ name: 'root', mesh: 0, ...(options.node ?? {}) }],
-    meshes: [{ primitives: [{ attributes: { POSITION: 0 }, indices: 1, material: 0, mode: 4 }] }],
-    materials: [{ name: 'stone', ...(options.alphaMode ? { alphaMode: options.alphaMode } : {}) }],
+    nodes: [{
+      name: 'root',
+      mesh: 0,
+      ...(options.skinned ? { skin: 0 } : {}),
+      ...(options.node ?? {}),
+    }],
+    meshes: [{
+      primitives: [{
+        attributes: { POSITION: 0 },
+        indices: 1,
+        material: 0,
+        mode: 4,
+        ...(options.morphed ? { targets: [{ POSITION: 0 }] } : {}),
+      }],
+    }],
+    materials: [{
+      name: 'stone',
+      ...(options.alphaMode ? { alphaMode: options.alphaMode } : {}),
+      ...(options.doubleSided === undefined ? {} : { doubleSided: options.doubleSided }),
+    }],
+    ...(options.animated
+      ? { animations: [{ channels: [{ target: { node: 0, path: 'translation' }, sampler: 0 }], samplers: [] }] }
+      : {}),
     accessors: [
       { bufferView: 0, componentType: 5126, count: positions.length / 3, type: 'VEC3' },
       { bufferView: 1, componentType: 5123, count: indices.length, type: 'SCALAR' },
@@ -219,7 +250,15 @@ describe('assembling placed objects', () => {
 
 describe('a placed object is why something is hidden', () => {
   /** A 200-unit wall as a prototype, so a stamp of it can block a street. */
-  const wallGlb = glb({ corners: [0, 0, -8, 0, 0, 8, 0, 200, 8, 0, 200, -8] });
+  const wallGlb = glb({
+    // Two quads back to back: a thin wall drawn on both of its faces, which is
+    // what a building is and what a single unpaired quad is not.
+    corners: [
+      0, 0, -8, 0, 0, 8, 0, 200, 8, 0, 200, -8,
+      1, 0, -8, 1, 0, 8, 1, 200, 8, 1, 200, -8,
+    ],
+    indices: [0, 1, 2, 0, 2, 3, 4, 6, 5, 4, 7, 6],
+  });
   const REGION = 16;
   const LENGTH = 160;
 
@@ -240,7 +279,13 @@ describe('a placed object is why something is hidden', () => {
     };
   };
 
-  function rowsWithWallAt(x: number | null) {
+  /** The same wall drawn on one face only: visible from in front, not behind. */
+  const oneSidedWallGlb = glb({
+    corners: [0, 0, -8, 0, 0, 8, 0, 200, 8, 0, 200, -8],
+    doubleSided: false,
+  });
+
+  function rowsWithWallAt(x: number | null, asset: Uint8Array = wallGlb) {
     const world = packageWith(
       x === null
         ? { prototype: [], enabled: [], phaseMask: [], position: [] }
@@ -253,7 +298,7 @@ describe('a placed object is why something is hidden', () => {
           },
       [{ id: 'wall', source: 'wall.glb' }],
     );
-    const { primitives } = assembleOccluderScene({ world, loadPrototype: () => wallGlb });
+    const { primitives } = assembleOccluderScene({ world, loadPrototype: () => asset });
     const centers: [number, number][] = [];
     for (let cx = REGION / 2; cx < LENGTH; cx += REGION) centers.push([cx, 0]);
     const visibility = compileShadoWorldVisibility({
@@ -282,5 +327,123 @@ describe('a placed object is why something is hidden', () => {
     // Moving that same object out of the way restores the view, so the
     // rejection was caused by where the stamp stands and not by the ground.
     expect(moved(0, 9)).toBe(true);
+  });
+
+  it('does not hide anything behind a surface that is only drawn from one side', () => {
+    /*
+     * A row has to hold for a camera on either side of the blocker. A
+     * single-sided panel is invisible from behind, so the far region is
+     * genuinely reachable by sight from there, and admitting the pair is the
+     * only correct answer -- even though the same panel, from in front, looks
+     * like a perfectly good wall. Recovering that occlusion needs directed
+     * rows, not a bolder ray test.
+     */
+    const oneSided = rowsWithWallAt(80, oneSidedWallGlb);
+    expect(oneSided(0, 9)).toBe(true);
+    expect(oneSided(9, 0)).toBe(true);
+    // The two-faced wall in the same place still hides, so the difference is
+    // sidedness and not the fixture.
+    expect(rowsWithWallAt(80)(0, 9)).toBe(false);
+  });
+});
+
+describe('what may be trusted as a permanent blocker', () => {
+  const opaque = glb({});
+
+  function world(stamps: { phaseMask: number[]; prototype?: number[] }, sources: string[]) {
+    const count = stamps.phaseMask.length;
+    return packageWith(
+      {
+        prototype: stamps.prototype ?? stamps.phaseMask.map(() => 0),
+        enabled: stamps.phaseMask.map(() => 1),
+        phaseMask: stamps.phaseMask,
+        position: stamps.phaseMask.map((_, index) => [index * 10, 0, 0] as [number, number, number]),
+      },
+      sources.map((source, index) => ({ id: `proto-${index}`, source })),
+    );
+  }
+
+  it('refuses a blocker that exists in one phase of the row and not another', () => {
+    // Two phases share this bake. The first stamp is in both; the second is
+    // only in phase A, so from phase B it is not there to hide anything.
+    const scene = world({ phaseMask: [0b11, 0b01] }, ['wall.glb']);
+    const { manifest, primitives } = assembleOccluderScene({
+      world: scene,
+      loadPrototype: () => opaque,
+    });
+    expect(manifest.phases).toMatchObject({ policy: 'invariant', worldMask: 0b11 });
+    expect(manifest.stamps.included).toBe(1);
+    expect(manifest.stamps.excluded['phase-variant-blocker']).toBe(1);
+    expect(primitives).toHaveLength(1);
+  });
+
+  it('admits the phase-bound blocker only when the caller binds the row to that phase', () => {
+    const scene = world({ phaseMask: [0b11, 0b01] }, ['wall.glb']);
+    const { manifest } = assembleOccluderScene({
+      world: scene,
+      activePhaseMask: 0b01,
+      phasePolicy: 'active-phase',
+      loadPrototype: () => opaque,
+    });
+    expect(manifest.stamps.included).toBe(2);
+    expect(manifest.stamps.excluded['phase-variant-blocker']).toBe(0);
+  });
+
+  it('refuses geometry that is not where its buffer says it is', () => {
+    for (const [reason, asset] of [
+      ['animated-node', glb({ animated: true })],
+      ['morph-targets', glb({ morphed: true })],
+      ['skinned-geometry', glb({ skinned: true })],
+    ] as const) {
+      const parts = readGlbPrimitives(asset);
+      expect(parts[0]!.dynamic).toBe(reason);
+      expect(occluderEligibility(parts[0]!)).toBe(reason);
+      const { primitives, manifest } = assembleOccluderScene({
+        world: world({ phaseMask: [0xffffffff] }, ['thing.glb']),
+        loadPrototype: () => asset,
+      });
+      expect(primitives).toHaveLength(0);
+      expect(manifest.submeshes[0]!.reason).toBe(reason);
+    }
+  });
+
+  it('carries sidedness through, so a one-sided surface cannot hide from behind', () => {
+    const oneSided = glb({ doubleSided: false });
+    const bothSides = glb({ doubleSided: true });
+    expect(readGlbPrimitives(oneSided)[0]!.doubleSided).toBe(false);
+    expect(readGlbPrimitives(bothSides)[0]!.doubleSided).toBe(true);
+    const { primitives } = assembleOccluderScene({
+      world: world({ phaseMask: [0xffffffff, 0xffffffff], prototype: [0, 1] }, ['one.glb', 'both.glb']),
+      loadPrototype: (source) => (source === 'one.glb' ? oneSided : bothSides),
+    });
+    expect(primitives.map((primitive) => primitive.doubleSided)).toEqual([false, true]);
+  });
+
+  it('reverses winding for a mirrored stamp, keeping the front face in front', () => {
+    const base = packageWith(
+      {
+        prototype: [0],
+        enabled: [1],
+        phaseMask: [0xffffffff],
+        position: [[0, 0, 0]],
+      },
+      [{ id: 'wall', source: 'wall.glb' }],
+    );
+    const mirrored = packageWith(
+      {
+        prototype: [0],
+        enabled: [1],
+        phaseMask: [0xffffffff],
+        position: [[0, 0, 0]],
+        scale: [[-1, 1, 1]],
+      },
+      [{ id: 'wall', source: 'wall.glb' }],
+    );
+    const one = assembleOccluderScene({ world: base, loadPrototype: () => opaque }).primitives[0]!;
+    const other = assembleOccluderScene({ world: mirrored, loadPrototype: () => opaque }).primitives[0]!;
+    // Same triangles, opposite corner order: the mirror flipped the geometry,
+    // so the index order flips back to keep the drawn face the front face.
+    expect(Array.from(other.indices as Uint32Array).slice(0, 3)).toEqual([0, 2, 1]);
+    expect(Array.from(one.indices as Uint32Array).slice(0, 3)).toEqual([0, 1, 2]);
   });
 });
