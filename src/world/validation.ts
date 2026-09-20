@@ -481,9 +481,36 @@ export function validateShadoWorldPackage(world: ShadoWorldSpatialPackage): void
     )
       throw new Error('Invalid Shado world visibility topology header');
     sameLength('visibility.cellRegion', cellCount, visibility.cellRegion);
+    /*
+     * Rows are volumes plus one conservative union per region when the bake
+     * produced vertical source volumes, and regions otherwise. Targets stay
+     * region-indexed either way, so only the row count changes.
+     */
+    const volumes = visibility.volumes;
+    if (volumes) {
+      if (
+        !Number.isInteger(volumes.count) ||
+        volumes.count <= 0 ||
+        volumes.region.length !== volumes.count ||
+        volumes.minY.length !== volumes.count ||
+        volumes.maxY.length !== volumes.count
+      ) {
+        throw new Error('Invalid Shado world visibility volume header');
+      }
+      for (let volume = 0; volume < volumes.count; volume += 1) {
+        const region = volumes.region[volume]!;
+        if (!Number.isInteger(region) || region < 0 || region >= visibilityRegionCount) {
+          throw new Error(`Invalid Shado world visibility volume region ${region}`);
+        }
+        if (!(volumes.maxY[volume]! > volumes.minY[volume]!)) {
+          throw new Error(`Invalid Shado world visibility volume band at ${volume}`);
+        }
+      }
+    }
     sameLength(
       'visibility PVS words',
-      visibilityRegionCount * visibility.pvs.wordsPerRow,
+      (volumes ? volumes.count + visibilityRegionCount : visibilityRegionCount) *
+        visibility.pvs.wordsPerRow,
       visibility.pvs.words
     );
     for (const region of visibility.cellRegion) {
@@ -512,8 +539,19 @@ export function validateShadoWorldPackage(world: ShadoWorldSpatialPackage): void
         `Invalid Shado world visible-region pair count: expected ${visibility.visibleRegionPairs}, got ${pairCount}`
       );
     }
-    for (let region = 0; region < visibilityRegionCount; region++) {
-      const word = visibility.pvs.words[region * visibility.pvs.wordsPerRow + (region >>> 5)] >>> 0;
+    /*
+     * Every row must admit the region it is FOR: a volume row the region it
+     * sits in, a union row its own region. A row that hides the ground the
+     * camera stands on is the one failure no reader can recover from.
+     */
+    const rowRegionCount = volumes ? volumes.count + visibilityRegionCount : visibilityRegionCount;
+    for (let row = 0; row < rowRegionCount; row++) {
+      const region = volumes
+        ? row < volumes.count
+          ? volumes.region[row]!
+          : row - volumes.count
+        : row;
+      const word = visibility.pvs.words[row * visibility.pvs.wordsPerRow + (region >>> 5)] >>> 0;
       if (!(word & (1 << (region & 31)))) {
         throw new Error(`Shado world visibility region ${region} cannot see itself`);
       }

@@ -1278,6 +1278,32 @@ export type ShadoWorldSpatialPackage = {
     persistentRegions: number[];
     /** Render cells that bypass regional occlusion without widening entity PVS. */
     persistentCells: number[];
+    /**
+     * Vertically separated source volumes, when the bake produced them.
+     *
+     * A 2D region is a column spanning every height, so it holds a room AND
+     * the roof above it, and one row has to serve both: the row is therefore
+     * a rooftop row, and no amount of better sampling can cull the room. That
+     * is measured, not assumed -- sampling every floor in Crypts instead of
+     * only the roof changed nothing at all.
+     *
+     * These split a region into vertical bands, each with its own row. Rows
+     * are indexed by VOLUME on the source side and by region on the target
+     * side, so the bitset is `volumes.count + width * height` rows of
+     * `width * height` bits: one row per volume, then one conservative union
+     * row per region for a camera whose height no volume covers.
+     *
+     * Absent on a legacy package, where rows are indexed by region and a
+     * reader must keep working exactly as before.
+     */
+    volumes?: {
+      count: number;
+      /** Which region each volume stands in. */
+      region: number[];
+      /** The band each volume covers, in world Y. */
+      minY: number[];
+      maxY: number[];
+    };
     /** Conservative region-to-region potentially-visible rows. */
     pvs: {
       wordsPerRow: number;

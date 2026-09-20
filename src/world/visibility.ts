@@ -153,6 +153,13 @@ const EYE_HEIGHTS = [8] as const;
 const MIN_FLOOR_CLEARANCE = 6;
 /** Ceiling on floors sampled per column; deep stacks cost queries linearly. */
 const MAX_FLOORS_PER_COLUMN = 4;
+/**
+ * How far a band reaches below its own floor.
+ *
+ * Enough that a camera standing on the surface is inside the band rather than
+ * on its boundary, and small enough that it cannot reach the floor beneath.
+ */
+const BAND_FOOTING = 0.5;
 /** Used only when the caller supplies no cell bounds to sample instead. */
 const TARGET_HEIGHTS = [2, 40, 120, 240] as const;
 /**
@@ -194,6 +201,23 @@ export type ShadoWorldVisibilityCompileInput = {
   };
   /** Which acceleration structure answers segment queries. Defaults to `bvh`. */
   occluderIndex?: ShadoWorldOccluderIndex;
+  /**
+   * Split each region into vertical source volumes instead of one column.
+   *
+   * A column holds a room and the roof above it at once, so its row has to
+   * serve both and is therefore a rooftop row. Measured on Crypts: sampling
+   * every floor rather than only the roof changed the result by nothing at
+   * all, because the roof is still in the same source region. Splitting the
+   * column is the only thing that can change it.
+   */
+  verticalVolumes?: boolean;
+  /**
+   * How many regions of camera-position slack each source row carries, in
+   * place of {@link CAMERA_ROW_MARGIN}. Lowering it is a measurement lever,
+   * not a shipping default: the margin is what stops geometry popping as a
+   * player crosses a region edge.
+   */
+  cameraRowMargin?: number;
   bounds: ShadoWorldBounds;
   regionSize: number;
   maxDistance: number;
@@ -272,7 +296,13 @@ export function compileShadoWorldVisibility(
   ).filter(cell => cell >= 0);
 
   const wordsPerRow = Math.ceil(regionCount / 32);
-  const words = new Uint32Array(regionCount * wordsPerRow);
+  /*
+   * Rows are allocated once the volumes are known, below: one per volume plus
+   * one conservative union per region. Targets stay region-indexed, so the
+   * bitset is rectangular rather than square and the kernel -- which already
+   * indexes a row by a number the host supplies -- needs no change.
+   */
+  let words = new Uint32Array(0);
   let visibleRegionPairs = 0;
   const setVisible = (from: number, to: number) => {
     const index = from * wordsPerRow + (to >>> 5);
@@ -468,6 +498,32 @@ export function compileShadoWorldVisibility(
   const samplingStarted = clock();
   let regionsWithoutFloor = 0;
   let regionsLeftUnsampled = 0;
+  /*
+   * One source volume per (region, vertical band), or exactly one per region
+   * spanning every height when volumes are off -- which is the historical
+   * behaviour, expressed in the same loop rather than in a second one.
+   */
+  /*
+   * Vertical volumes are a property of the OCCLUSION bake. A distance flood
+   * tests nothing, so splitting its columns would produce rows that differ
+   * only in index -- and the flood is the baseline every comparison is read
+   * against, which must keep the layout it has always had.
+   */
+  const useVolumes = input.verticalVolumes === true && sampled;
+  const volumeRegion: number[] = [];
+  const volumeMinY: number[] = [];
+  const volumeMaxY: number[] = [];
+  const volumeEyes: (Float64Array | null)[] = [];
+  /*
+   * A volume's own targets, not its column's.
+   *
+   * Seeing is mutual, so the pair is tested both ways -- and the reverse
+   * direction asks whether the target column can see THIS VOLUME. Handing it
+   * the whole column's targets asks whether the street can see the room's
+   * roof, which it can, and the room is admitted on the strength of it.
+   */
+  const volumeTargets: (Float64Array | null)[] = [];
+  const volumesOfRegion: number[][] = Array.from({ length: regionCount }, () => []);
   for (let region = 0; sampled && region < regionCount; region++) {
     // Sampling a region walks its footprint against the whole occluder set,
     // which on a dense zone is not cheap; an unsampled region has no eyes and
@@ -481,6 +537,7 @@ export function compileShadoWorldVisibility(
     const low = regionLow[region]!;
     const high = regionHigh[region]!;
     const known = Number.isFinite(low) && Number.isFinite(high);
+    const floorsHere: number[] = [];
     for (const [x, z] of footprint(region)) {
       /*
        * Every floor, not the roof. `floorsAt` comes back highest first, and a
@@ -495,9 +552,27 @@ export function compileShadoWorldVisibility(
         if (above - height >= MIN_FLOOR_CLEARANCE) floors.push(height);
       }
       const floor = floors.length ? floors[0]! : null;
-      if (floor === null) continue;
       for (const level of floors) {
         for (const eye of EYE_HEIGHTS) eyePoints.push(x, level + eye, z);
+        // Floors this region offers; the bands that tile them are built once
+        // the whole footprint has been walked.
+        if (useVolumes) floorsHere.push(level);
+      }
+      if (floor === null) {
+        /*
+         * Nowhere to stand here, so no eyes -- but a column with no floor
+         * still holds geometry: a wall, a ceiling, the outside of a vault.
+         * It has to be TESTABLE as something to look at, or every such
+         * region is admitted from everywhere untested, and on an interior
+         * zone most regions are exactly this.
+         */
+        if (known) {
+          const top = high + STAMP_HEADROOM;
+          for (let step = 0; step <= 3; step++) {
+            targetPoints.push(x, low + ((top - low) * step) / 3, z);
+          }
+        }
+        continue;
       }
       if (known) {
         // Bottom, middle and top of what is there, plus headroom for a stamp
@@ -514,17 +589,103 @@ export function compileShadoWorldVisibility(
     if (eyePoints.length) eyes[region] = Float64Array.from(eyePoints);
     else regionsWithoutFloor += 1;
     if (targetPoints.length) targets[region] = Float64Array.from(targetPoints);
+    if (useVolumes && eyePoints.length) {
+      /*
+       * The bands TILE the column: each runs from just under its floor to
+       * just under the next one, and the top one runs to the sky. Disjoint
+       * on purpose -- overlapping bands are unioned into each other by the
+       * neighbour flood, which quietly puts the rooftop view back inside the
+       * room and undoes the split.
+       *
+       * Two samples a metre apart on the same floor describe one place to
+       * stand, so floors within the clearance are merged first.
+       */
+      floorsHere.sort((left, right) => left - right);
+      const levels: number[] = [];
+      for (const level of floorsHere) {
+        const last = levels[levels.length - 1];
+        if (last !== undefined && level - last < MIN_FLOOR_CLEARANCE) continue;
+        levels.push(level);
+      }
+      const bands = levels.map((level, index) => [
+        level - BAND_FOOTING,
+        index + 1 < levels.length ? levels[index + 1]! - BAND_FOOTING : Number.POSITIVE_INFINITY,
+      ] as [number, number]);
+      for (const [minY, maxY] of bands) {
+        const volume = volumeRegion.length;
+        volumeRegion.push(region);
+        volumeMinY.push(minY);
+        volumeMaxY.push(maxY);
+        const within: number[] = [];
+        for (let offset = 0; offset < eyePoints.length; offset += 3) {
+          const y = eyePoints[offset + 1]!;
+          if (y >= minY && y < maxY) {
+            within.push(eyePoints[offset]!, y, eyePoints[offset + 2]!);
+          }
+        }
+        volumeEyes.push(within.length ? Float64Array.from(within) : null);
+        const targetsWithin: number[] = [];
+        for (let offset = 0; offset < targetPoints.length; offset += 3) {
+          const y = targetPoints[offset + 1]!;
+          if (y >= minY && y < maxY) {
+            targetsWithin.push(targetPoints[offset]!, y, targetPoints[offset + 2]!);
+          }
+        }
+        // A band with no target sample of its own still has its eyes; the
+        // reverse test then falls back to the column, which admits more.
+        volumeTargets.push(targetsWithin.length ? Float64Array.from(targetsWithin) : null);
+        volumesOfRegion[region]!.push(volume);
+      }
+    }
+  }
+  if (useVolumes) {
+    /*
+     * A region the sampler gave no floor -- or never reached, because the
+     * budget stopped it -- still needs a row, or the union row a reader
+     * lands on would be empty and would hide the whole world. It gets one
+     * full-column volume with whatever samples the region has, which is
+     * exactly the row an unsplit bake would have written.
+     */
+    for (let region = 0; region < regionCount; region += 1) {
+      if (volumesOfRegion[region]!.length) continue;
+      volumesOfRegion[region]!.push(volumeRegion.length);
+      volumeRegion.push(region);
+      volumeMinY.push(Number.NEGATIVE_INFINITY);
+      volumeMaxY.push(Number.POSITIVE_INFINITY);
+      volumeEyes.push(eyes[region] ?? null);
+      volumeTargets.push(targets[region] ?? null);
+    }
+  } else {
+    // One volume per region, covering every height: the row indexing every
+    // existing package uses.
+    for (let region = 0; region < regionCount; region += 1) {
+      volumeRegion.push(region);
+      volumeMinY.push(Number.NEGATIVE_INFINITY);
+      volumeMaxY.push(Number.POSITIVE_INFINITY);
+      volumeEyes.push(eyes[region] ?? null);
+      volumeTargets.push(targets[region] ?? null);
+      volumesOfRegion[region]!.push(region);
+    }
   }
   const regionSamplingMs = clock() - samplingStarted;
 
+  const volumeCount = volumeRegion.length;
+  /*
+   * Union rows exist only where volumes do. Without them a row IS a region,
+   * every reader indexes it that way, and the package keeps exactly the
+   * layout it has always had.
+   */
+  const rowCount = useVolumes ? volumeCount + regionCount : volumeCount;
+  words = new Uint32Array(rowCount * wordsPerRow);
   let occlusionTested = 0;
   let occluded = 0;
   let forcedLocalPairs = 0;
   const pairLoopStarted = clock();
   let pairsAdmittedAfterStop = 0;
   const geometry = { originX, originZ, size, width, height, maxDistance };
-  for (let from = 0; from < regionCount; from++) {
-    for (let to = from; to < regionCount; to++) {
+  for (let source = 0; source < volumeCount; source++) {
+    const from = volumeRegion[source]!;
+    for (let to = 0; to < regionCount; to++) {
       const local = isLocalPair(from, to, geometry);
       if (!local && !withinRange(from, to, geometry)) continue;
       if (local) {
@@ -540,41 +701,75 @@ export function compileShadoWorldVisibility(
           pairsAdmittedAfterStop++;
         } else {
           /*
-           * Symmetric by construction: the pair is tested once and set both
-           * ways. Seeing is mutual for a straight segment, and testing each
-           * direction separately would let sampling noise produce a row that
-           * disagrees with its own transpose -- which shows up as a region
-           * that pops in from one approach and not the other.
+           * Tested from THIS volume's eyes, and against the target column's
+           * samples. The reverse direction is tested too, because a straight
+           * segment is mutual and testing one way alone lets sampling noise
+           * produce a row that disagrees with itself.
            */
-          const source = eyes[from];
+          const eyePoints = volumeEyes[source];
           const target = targets[to];
           const back = eyes[to];
-          const forward = targets[from];
-          if (source && target && back && forward) {
+          const forward = volumeTargets[source] ?? targets[from];
+          /*
+           * Both directions when both are samplable, and whichever one is
+           * otherwise. Seeing is mutual, so agreement between the two is the
+           * better evidence -- but a target region with no floor has no eyes
+           * to look back from, and refusing to test it at all admits it from
+           * everywhere. One tested direction is weaker evidence than two and
+           * far stronger than none.
+           */
+          const canForward = eyePoints !== null && target !== null;
+          const canBack = back !== null && forward !== null;
+          if (canForward || canBack) {
             occlusionTested++;
-            if (
-              !anyClearSegment(grid, placed, source, target) &&
-              !anyClearSegment(grid, placed, back, forward)
-            ) {
+            const forwardBlocked =
+              !canForward || !anyClearSegment(grid, placed, eyePoints!, target!);
+            const backBlocked =
+              !canBack || !anyClearSegment(grid, placed, back!, forward!);
+            if (forwardBlocked && backBlocked) {
               occluded++;
               continue;
             }
           }
         }
       }
-      setVisible(from, to);
-      if (from !== to) setVisible(to, from);
+      setVisible(source, to);
+    }
+  }
+  /*
+   * The union row per region: what a camera at a height no volume covers is
+   * allowed to see. It admits everything any volume in that column admits,
+   * which costs draw calls and cannot hide anything -- the safe answer for
+   * debug flight, for a gap between bands, and for a reader that cannot place
+   * the camera at all.
+   */
+  if (useVolumes) {
+    for (let region = 0; region < regionCount; region++) {
+      const unionRow = (volumeCount + region) * wordsPerRow;
+      for (const volume of volumesOfRegion[region]!) {
+        const volumeRow = volume * wordsPerRow;
+        for (let word = 0; word < wordsPerRow; word++) {
+          words[unionRow + word] = (words[unionRow + word]! | words[volumeRow + word]!) >>> 0;
+        }
+      }
     }
   }
   const pairLoopMs = clock() - pairLoopStarted;
   const rawPairs = visibleRegionPairs;
   const rowFloodStarted = clock();
-  const floodedWords = floodCameraRows(
+  const floodedWords = floodVolumeRows(
     words,
     wordsPerRow,
+    volumeRegion,
+    volumeMinY,
+    volumeMaxY,
+    volumeCount,
+    regionCount,
+    volumeEyes.map((points) => points !== null),
+    useVolumes,
     width,
     height,
-    CAMERA_ROW_MARGIN
+    input.cameraRowMargin ?? CAMERA_ROW_MARGIN
   );
   visibleRegionPairs = countVisibleBits(floodedWords);
   const rowFloodMs = clock() - rowFloodStarted;
@@ -631,6 +826,16 @@ export function compileShadoWorldVisibility(
     cellRegion,
     persistentRegions,
     persistentCells,
+    ...(useVolumes
+      ? {
+          volumes: {
+            count: volumeCount,
+            region: volumeRegion,
+            minY: volumeMinY,
+            maxY: volumeMaxY,
+          },
+        }
+      : {}),
     pvs: { wordsPerRow, words: Array.from(floodedWords) },
   };
 }
@@ -703,6 +908,98 @@ function withinRange(from: number, to: number, grid: RegionGeometry): boolean {
   const source = center(fromX, fromZ);
   const target = center(toX, toZ);
   return Math.hypot(target[0] - source[0], target[1] - source[1]) <= grid.maxDistance;
+}
+
+/**
+ * Unions each row with the rows of neighbouring regions.
+ *
+ * The same conservative source flood as before, expressed over volumes: a
+ * player about to cross a region edge already sees what the next column
+ * admits, so nothing pops at the boundary. Rows are unioned from every volume
+ * of every neighbouring region, not only from the matching band, because a
+ * player crossing an edge may also be changing floor -- and because a row
+ * that admits too much is the safe kind of wrong.
+ */
+function floodVolumeRows(
+  source: Uint32Array,
+  wordsPerRow: number,
+  volumeRegion: readonly number[],
+  volumeMinY: readonly number[],
+  volumeMaxY: readonly number[],
+  volumeCount: number,
+  regionCount: number,
+  /**
+   * Whether each volume is a place a camera can actually be -- whether the
+   * sampler found a floor to stand on inside it.
+   */
+  volumeStandable: readonly boolean[],
+  /** Whether the layout carries a union row per region after the volumes. */
+  unionRows: boolean,
+  width: number,
+  height: number,
+  radius: number
+): Uint32Array {
+  const result = source.slice();
+  const volumesByRegion: number[][] = Array.from({ length: regionCount }, () => []);
+  for (let volume = 0; volume < volumeCount; volume += 1) {
+    volumesByRegion[volumeRegion[volume]!]!.push(volume);
+  }
+  const unionInto = (targetRow: number, sourceRow: number): void => {
+    for (let word = 0; word < wordsPerRow; word += 1) {
+      result[targetRow + word] = (result[targetRow + word]! | source[sourceRow + word]!) >>> 0;
+    }
+  };
+  for (let volume = 0; volume < volumeCount; volume += 1) {
+    const region = volumeRegion[volume]!;
+    const regionX = region % width;
+    const regionZ = Math.floor(region / width);
+    for (let deltaZ = -radius; deltaZ <= radius; deltaZ += 1) {
+      const neighbourZ = regionZ + deltaZ;
+      if (neighbourZ < 0 || neighbourZ >= height) continue;
+      for (let deltaX = -radius; deltaX <= radius; deltaX += 1) {
+        const neighbourX = regionX + deltaX;
+        if (neighbourX < 0 || neighbourX >= width) continue;
+        const neighbour = neighbourZ * width + neighbourX;
+        for (const other of volumesByRegion[neighbour]!) {
+          /*
+           * Only between bands that overlap. The flood exists so nothing pops
+           * when a player crosses a region edge, and crossing an edge does
+           * not change their height -- so a room has no reason to inherit
+           * what the roof above the next column can see. Unioning every band
+           * of every neighbour puts the rooftop view straight back into the
+           * room and undoes the split entirely.
+           */
+          if (volumeMinY[other]! >= volumeMaxY[volume]!) continue;
+          if (volumeMaxY[other]! <= volumeMinY[volume]!) continue;
+          /*
+           * And only FROM somewhere a camera can be. A volume with no floor
+           * holds no eyes, so its pairs went untested and its row admits
+           * everything -- and no player can cross an edge into it, because
+           * there is nothing there to stand on. Letting it donate that row
+           * makes every room beside solid rock fully visible, which on an
+           * interior zone is most of them.
+           *
+           * Only where volumes exist: an unsplit bake is the layout every
+           * shipped package already uses, and narrowing its flood here would
+           * change rows nothing in this work asked to change.
+           */
+          if (unionRows && !volumeStandable[other]) continue;
+          unionInto(volume * wordsPerRow, other * wordsPerRow);
+        }
+      }
+    }
+  }
+  // Union rows follow their column's volumes, after those have been flooded.
+  if (!unionRows) return result;
+  for (let region = 0; region < regionCount; region += 1) {
+    const unionRow = (volumeCount + region) * wordsPerRow;
+    for (const volume of volumesByRegion[region]!) {
+      for (let word = 0; word < wordsPerRow; word += 1) {
+        result[unionRow + word] = (result[unionRow + word]! | result[volume * wordsPerRow + word]!) >>> 0;
+      }
+    }
+  }
+  return result;
 }
 
 /**

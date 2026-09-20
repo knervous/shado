@@ -216,10 +216,13 @@ export class ShadoWorldVisibilityCoordinator {
   ): ShadoWorldVisibilityFrame {
     const cameraCell = this.locateCell(camera[0], camera[2]);
     const cameraRegion = this.locateRegion(camera[0], camera[2]);
+    // The row to read is the camera's VOLUME when the package has them: the
+    // room and the roof above it are different places to stand.
+    const cameraRow = this.locateSourceRow(camera[0], camera[1], camera[2], cameraRegion);
     const reduced = this.reducer.reduceWorld({
       planes,
       cameraCell,
-      cameraRegion,
+      cameraRegion: cameraRow,
       loadedCells: masks.loadedCells,
       phaseCells: masks.phaseCells,
       portalReachableCells: masks.portalReachableCells,
@@ -558,6 +561,27 @@ export class ShadoWorldVisibilityCoordinator {
     const tileX = Math.floor((x - this.world.tiles.originX) / this.world.tiles.size);
     const tileZ = Math.floor((z - this.world.tiles.originZ) / this.world.tiles.size);
     return this.tileByCoordinate.get(`${tileX},${tileZ}`) ?? -1;
+  }
+
+  /**
+   * The PVS row for a camera at this point.
+   *
+   * With vertical volumes the row is the volume the camera stands in. A
+   * height no volume covers -- debug flight, a gap between bands, a legacy
+   * package -- falls back to that region's union row, which admits everything
+   * any volume in the column admits. Falling back costs draw calls; guessing
+   * a volume would cost a hole.
+   */
+  public locateSourceRow(x: number, y: number, z: number, region = this.locateRegion(x, z)): number {
+    const volumes = this.world.visibility?.volumes;
+    if (!volumes || region < 0) return region;
+    for (let volume = 0; volume < volumes.count; volume += 1) {
+      if (volumes.region[volume] !== region) continue;
+      if (y >= volumes.minY[volume]! && y < volumes.maxY[volume]!) return volume;
+    }
+    const regionCount =
+      (this.world.visibility!.width ?? 0) * (this.world.visibility!.height ?? 0);
+    return volumes.count + Math.min(region, Math.max(0, regionCount - 1));
   }
 
   public locateRegion(x: number, z: number): number {
