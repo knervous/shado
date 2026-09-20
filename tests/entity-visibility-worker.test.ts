@@ -82,8 +82,15 @@ describe('Shado amortized entity-visibility worker', () => {
     });
 
     port.completeNext();
-    expect(port.reduceGenerations).toEqual([1, 3]);
+    /*
+     * The queued request does not go out on completion; it goes out when the
+     * caller takes the result. Until then the published output and the
+     * metadata describing it belong to the caller, and the worker has
+     * nowhere safe to write.
+     */
+    expect(port.reduceGenerations).toEqual([1]);
     expect(worker.acquireLatest()?.generation).toBe(1);
+    expect(port.reduceGenerations).toEqual([1, 3]);
 
     port.completeNext();
     const result = worker.acquireLatest();
@@ -151,6 +158,8 @@ describe('Shado amortized entity-visibility worker', () => {
     ).toBe(2);
 
     port.completeNext();
+    // The queued generation 2 goes out when generation 1 is given up.
+    worker.discardPublished();
     port.completeNext();
     const result = worker.acquireLatest();
     expect(result?.generation).toBe(2);
@@ -336,7 +345,14 @@ class FakeVisibilityWorker {
     );
     Atomics.store(control, ShadoVisibilityWorkerControl.PublishedOutputBuffer, output);
     Atomics.store(control, ShadoVisibilityWorkerControl.CompletedGeneration, request.generation);
-    this.emit({ type: 'complete', generation: request.generation });
+    // The real worker states what it published in the message itself.
+    this.emit({
+      type: 'complete',
+      generation: request.generation,
+      output,
+      count: visible,
+      entityCount: layout.flagsCapacity === layout.capacity ? count : 0,
+    });
   }
 
   private emit(data: unknown): void {

@@ -84,7 +84,23 @@ class OwningFakeWorker {
     this.terminated = true;
   }
 
+  /** A completion whose message is held back, as the real race does. */
+  private withheld: { type: 'complete'; generation: number; output: 0 | 1; count: number; entityCount: number } | null =
+    null;
+
   public completeNext(): void {
+    this.completeNextWithoutMessage();
+    this.emitWithheldCompletion();
+  }
+
+  /**
+   * Does everything the worker does except post.
+   *
+   * The control words are written first in the real worker too, so this is
+   * the window in which a reader polling them can see a finished generation
+   * whose request is still in flight on the controller's side.
+   */
+  public completeNextWithoutMessage(): void {
     const request = this.pending.shift();
     if (!request || !this.init) throw new Error('nothing pending');
     const { buffer, layout } = this.init;
@@ -118,7 +134,20 @@ class OwningFakeWorker {
     );
     Atomics.store(control, ShadoVisibilityWorkerControl.PublishedOutputBuffer, output);
     Atomics.store(control, ShadoVisibilityWorkerControl.CompletedGeneration, request.generation);
-    this.emit({ type: 'complete', generation: request.generation });
+    // The real worker states what it published in the message itself.
+    this.withheld = {
+      type: 'complete',
+      generation: request.generation,
+      output: output as 0 | 1,
+      count: visible,
+      entityCount: 0,
+    };
+  }
+
+  public emitWithheldCompletion(): void {
+    const message = this.withheld;
+    this.withheld = null;
+    if (message) this.emit(message);
   }
 
   /** Overwrites both output buffers, as a worker reusing them would. */
@@ -161,6 +190,12 @@ describe('worker input ownership', () => {
     expect(Array.from(port.seenDeltas[0]!.slots)).toEqual([0, 1, 2]);
 
     port.completeNext();
+    /*
+     * Taken, not merely completed. A published result owns the buffers until
+     * the caller consumes or discards it, so the next request would queue
+     * behind it rather than dispatch.
+     */
+    worker.discardPublished();
     // A camera move with nothing else changed carries no slot work at all.
     worker.request(PLANES, [0xff], CAMERA);
     expect(Array.from(port.seenDeltas[1]!.slots)).toEqual([]);
@@ -170,6 +205,7 @@ describe('worker input ownership', () => {
     const { port, worker } = await makeWorker();
     worker.request(PLANES, [0xff], CAMERA);
     port.completeNext();
+    worker.discardPublished();
 
     // Entity 1 crosses to the hidden side while a request is in flight, and
     // then the camera moves twice more before the worker frees up.
@@ -178,6 +214,7 @@ describe('worker input ownership', () => {
     worker.request(PLANES, [0xff], CAMERA);
     worker.request(PLANES, [0xff], CAMERA);
     port.completeNext();
+    worker.discardPublished();
 
     // The superseded request's batch was handed on, not dropped with it.
     const dispatched = port.seenDeltas[port.seenDeltas.length - 1]!;
@@ -193,6 +230,7 @@ describe('worker input ownership', () => {
     const { port, worker } = await makeWorker();
     worker.request(PLANES, [0xff], CAMERA);
     port.completeNext();
+    worker.discardPublished();
     worker.projection.setEntity(1, 10, 0, 0, 1);
     worker.projection.setEntity(1, 11, 0, 0, 1);
     worker.projection.setEntity(1, 12, 0, 0, 1);
@@ -222,6 +260,62 @@ describe('worker result ownership', () => {
     port.completeNext();
     const second = worker.acquireLatest()!;
     expect(Array.from(second.visibleGenerations)).toEqual([1, 2, 1]);
+  });
+
+  it('publishes nothing until the completion message arrives', async () => {
+    /*
+     * The audit's reproduction. The worker writes the control words and then
+     * posts; a reader watching the words alone sees the generation complete
+     * while the request that produced it is still in flight here. It then
+     * labelled the output with whatever epochs were CURRENT, at an age of
+     * zero and stale false -- old data wearing new metadata.
+     *
+     * Here the words are written and the message is withheld. Nothing may be
+     * acquired, and nothing may be inferred about what is not there.
+     */
+    const { port, worker } = await makeWorker();
+    worker.request(PLANES, [0xff], CAMERA);
+    port.completeNextWithoutMessage();
+    expect(worker.acquireLatest()).toBeNull();
+    expect(worker.hasPublishedResult).toBe(false);
+
+    // The epoch moves while the message is still in the air.
+    worker.setEpochs({ topology: 1 });
+    port.emitWithheldCompletion();
+
+    /*
+     * Now it publishes -- and is refused, because it answers the topology
+     * that was current when it was asked and no longer is. Refused is the
+     * correct outcome; relabelled is the bug.
+     */
+    expect(worker.acquireLatest()).toBeNull();
+    expect(worker.stats.staleEpochResults).toBe(1);
+  });
+
+  it('measures age from when the snapshot was taken, not from dispatch', async () => {
+    /*
+     * A request that waits behind an in-flight one describes a camera that
+     * old, however recently it reached the worker. Measuring from dispatch
+     * calls it fresh and hands the caller a stale hidden decision labelled
+     * as current.
+     */
+    const { port, worker } = await makeWorker();
+    worker.request(PLANES, [0xff], CAMERA);
+    const queued = worker.request(PLANES, [0xff], CAMERA);
+    expect(queued).toBe(2);
+
+    port.completeNext();
+    const first = worker.acquireLatest()!;
+    expect(first.generation).toBe(1);
+    const elapsed = first.ageMs;
+    port.completeNext();
+    const second = worker.acquireLatest()!;
+    expect(second.generation).toBe(2);
+    /*
+     * Generation 2's snapshot was taken at the same moment as generation
+     * 1's, so it cannot be the younger of the two.
+     */
+    expect(second.ageMs).toBeGreaterThanOrEqual(elapsed);
   });
 
   it('refuses a result computed against a topology that has since changed', async () => {

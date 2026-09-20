@@ -119,11 +119,30 @@ type WorkerRequest = {
   /** What this request is asking about; a result only applies to these. */
   epochs: ShadoEntityVisibilityEpochs;
   /** When it was dispatched, for the age the caller is allowed to accept. */
+  /**
+   * When the caller's snapshot was taken -- before any queue residence.
+   *
+   * Age is measured from here, not from dispatch: a request that waited
+   * behind an in-flight one describes a camera that old, however recently it
+   * reached the worker.
+   */
+  createdAtMs: number;
   dispatchedAtMs: number;
+  completedAtMs: number;
 };
 
 type WorkerMessage =
-  { type: 'ready' } | { type: 'complete'; generation: number } | { type: 'error'; message: string };
+  | { type: 'ready' }
+  | {
+      type: 'complete';
+      /** The request this answers, by the id the controller gave it. */
+      generation: number;
+      /** Which of the two output buffers holds it. */
+      output: 0 | 1;
+      count: number;
+      entityCount: number;
+    }
+  | { type: 'error'; message: string };
 
 export type ShadoVisibilityWorkerPort = {
   postMessage(message: unknown, transfer?: Transferable[]): void;
@@ -358,6 +377,8 @@ export class ShadoEntityVisibilityWorker {
   private readonly visibleIndices: readonly [Uint32Array, Uint32Array];
   private readonly resultGenerations: readonly [Uint32Array, Uint32Array];
   private readonly flags: readonly [Uint8Array, Uint8Array];
+  /** Whether this worker was built to publish per-entity reason flags. */
+  private readonly publishFlags: boolean;
   private inFlight = false;
   private pendingRequest: WorkerRequest | null = null;
   private consumedGeneration = 0;
@@ -368,7 +389,21 @@ export class ShadoEntityVisibilityWorker {
   private scheduledSkips = 0;
   private epochs: ShadoEntityVisibilityEpochs = { world: 0, topology: 0, policy: 0 };
   private inFlightRequest: WorkerRequest | null = null;
-  private completedRequest: WorkerRequest | null = null;
+  /**
+   * The one published result, data and metadata together.
+   *
+   * Null until a matching `complete` message arrives, and null again the
+   * moment it is consumed or discarded. There is no state in which data is
+   * readable and its metadata is not, which is what made a result come back
+   * describing a different request from the one it answers.
+   */
+  private published: {
+    request: WorkerRequest;
+    output: 0 | 1;
+    count: number;
+    entityCount: number;
+  } | null = null;
+  private lastConsumedCreatedAtMs = 0;
   private staleEpochResults = 0;
   private staleAgeResults = 0;
   private lastResultAgeMs = 0;
@@ -401,6 +436,7 @@ export class ShadoEntityVisibilityWorker {
       new Uint8Array(buffer, layout.flagsOffsets[0], layout.flagsCapacity),
       new Uint8Array(buffer, layout.flagsOffsets[1], layout.flagsCapacity),
     ];
+    this.publishFlags = layout.flagsCapacity === layout.capacity;
     worker.addEventListener('message', event => this.handleWorkerMessage(event.data));
     worker.addEventListener('error', event => {
       this.fail(event.error instanceof Error ? event.error.message : event.message);
@@ -535,15 +571,21 @@ export class ShadoEntityVisibilityWorker {
       activePhaseMask: (options.activePhaseMask ?? 0xffffffff) >>> 0,
       delta: this.projection.drainDelta(),
       epochs: { ...this.epochs },
+      createdAtMs: now(),
       dispatchedAtMs: 0,
+      completedAtMs: 0,
     };
-    if (this.inFlight) {
+    if (this.inFlight || this.published) {
       /*
        * A pending request is replaced by the newer camera, but its slot
        * changes are not: a spawn, a move or a despawn that arrived while the
        * worker was busy has to reach it, and dropping the batch with the
        * request it happened to ride on would lose the entity, not just delay
        * it.
+       *
+       * An unconsumed published result holds the queue as firmly as an
+       * in-flight request does: the buffers are the caller's until it takes
+       * or discards them.
        */
       const superseded = this.pendingRequest;
       if (superseded) request.delta = mergeDeltas(superseded.delta, request.delta);
@@ -589,44 +631,42 @@ export class ShadoEntityVisibilityWorker {
   }
 
   /**
-   * Acquires the latest complete shared output without waiting.
+   * Acquires the published result, or null.
    *
-   * Returned views are valid for immediate consumption. Do not retain them
-   * across multiple later generations because the worker reuses both buffers.
+   * Publication is the matching `complete` message, never the control words:
+   * those are written by the worker before it posts, so a reader watching
+   * them can see a generation finish while the request that produced it is
+   * still in flight here -- and then label the output with whatever epochs
+   * happen to be current, at an age of zero.
+   *
+   * Consuming also releases the buffers, which is what lets the next
+   * coalesced request go out. A caller that wants the slot freed without the
+   * data calls {@link discardPublished}.
    */
   public acquireLatest(): ShadoEntityVisibilityWorkerResult | null {
-    const generation = Atomics.load(this.control, ShadoVisibilityWorkerControl.CompletedGeneration);
-    if (generation === this.consumedGeneration) return null;
-    const output = Atomics.load(
-      this.control,
-      ShadoVisibilityWorkerControl.PublishedOutputBuffer
-    ) as 0 | 1;
-    const count = Atomics.load(
-      this.control,
-      output === 0
-        ? ShadoVisibilityWorkerControl.ResultCount0
-        : ShadoVisibilityWorkerControl.ResultCount1
-    );
-    const entityCount = Atomics.load(
-      this.control,
-      output === 0
-        ? ShadoVisibilityWorkerControl.ResultEntityCount0
-        : ShadoVisibilityWorkerControl.ResultEntityCount1
-    );
-    this.consumedGeneration = generation;
-    const request = this.completedRequest;
-    this.completedRequest = null;
+    const published = this.published;
+    if (!published) return null;
+    const { request, output, count, entityCount } = published;
+    this.published = null;
+    this.consumedGeneration = request.generation;
+    this.lastConsumedCreatedAtMs = request.createdAtMs;
     /*
      * A result belongs to the state it was asked about. If the package,
      * topology or policy has changed since it was dispatched, its hidden
      * decisions are wrong now rather than late, and it is dropped outright
      * so the caller falls back to conservative candidates.
      */
-    if (request && !sameEpochs(request.epochs, this.epochs)) {
+    if (!sameEpochs(request.epochs, this.epochs)) {
       this.staleEpochResults += 1;
+      this.releaseAndDispatch();
       return null;
     }
-    const ageMs = request ? now() - request.dispatchedAtMs : 0;
+    /*
+     * Age from when the caller's snapshot was TAKEN. A request that sat
+     * behind an in-flight one describes a camera that old however recently
+     * it reached the worker, and measuring from dispatch would call it fresh.
+     */
+    const ageMs = now() - request.createdAtMs;
     this.lastResultAgeMs = ageMs;
     const stale = ageMs > this.maxResultAgeMs;
     if (stale) this.staleAgeResults += 1;
@@ -635,14 +675,15 @@ export class ShadoEntityVisibilityWorker {
      * holding a view would find it rewritten underneath: the copy is what
      * makes the result the caller's own.
      */
-    return {
-      generation,
+    const result: ShadoEntityVisibilityWorkerResult = {
+      generation: request.generation,
       visibleIndices: this.visibleIndices[output].slice(0, count),
       visibleGenerations: this.resultGenerations[output].slice(0, count),
       ageMs,
-      epochs: request ? { ...request.epochs } : { ...this.epochs },
+      epochs: { ...request.epochs },
       stale,
-      flags: this.flags[output].slice(0, entityCount),
+      // Flags exist only when the caller asked for them.
+      flags: this.publishFlags ? this.flags[output].slice(0, entityCount) : EMPTY_FLAGS,
       workerDurationMs:
         Atomics.load(this.control, ShadoVisibilityWorkerControl.WorkerDurationMicros) / 1000,
       candidateCount: Atomics.load(this.control, ShadoVisibilityWorkerControl.CandidateCount),
@@ -654,6 +695,43 @@ export class ShadoEntityVisibilityWorker {
         ShadoVisibilityWorkerControl.PublishedFlagBytes
       ),
     };
+    this.releaseAndDispatch();
+    return result;
+  }
+
+  /**
+   * Gives up the published result without reading it.
+   *
+   * The same release path as consuming it, so a caller that decides it wants
+   * a fresh answer instead does not leave the worker idle holding buffers
+   * nobody will take.
+   */
+  public discardPublished(): boolean {
+    if (!this.published) return false;
+    this.consumedGeneration = this.published.request.generation;
+    this.lastConsumedCreatedAtMs = this.published.request.createdAtMs;
+    this.published = null;
+    this.releaseAndDispatch();
+    return true;
+  }
+
+  /** True while a result is published and not yet consumed or discarded. */
+  public get hasPublishedResult(): boolean {
+    return this.published !== null;
+  }
+
+  /**
+   * Age of what is published, or of the last thing consumed, right now.
+   *
+   * Callers recheck this every frame, including frames with no new result:
+   * a result that was fresh when it arrived expires while it is still being
+   * applied, and nothing else notices.
+   */
+  public currentResultAgeMs(): number {
+    if (this.published) return now() - this.published.request.createdAtMs;
+    return this.lastConsumedCreatedAtMs === 0
+      ? Number.POSITIVE_INFINITY
+      : now() - this.lastConsumedCreatedAtMs;
   }
 
   public get stats(): ShadoEntityVisibilityWorkerStats {
@@ -694,6 +772,19 @@ export class ShadoEntityVisibilityWorker {
     this.worker.terminate();
   }
 
+  /**
+   * Hands the buffers back and lets the queued request go.
+   *
+   * Dispatch happens HERE and nowhere else once something is in flight, so
+   * the worker cannot begin overwriting an output while the caller is still
+   * reading it, and cannot replace the metadata that describes it.
+   */
+  private releaseAndDispatch(): void {
+    const pending = this.pendingRequest;
+    this.pendingRequest = null;
+    if (pending && !this.disposed) this.dispatch(pending);
+  }
+
   private dispatch(request: WorkerRequest): void {
     this.inFlight = true;
     request.dispatchedAtMs = now();
@@ -732,11 +823,30 @@ export class ShadoEntityVisibilityWorker {
     }
     if (message.type !== 'complete') return;
     this.inFlight = false;
-    this.completedRequest = this.inFlightRequest;
+    const request = this.inFlightRequest;
     this.inFlightRequest = null;
-    const pending = this.pendingRequest;
-    this.pendingRequest = null;
-    if (pending && !this.disposed) this.dispatch(pending);
+    /*
+     * A completion that does not match the request in flight describes
+     * something this controller cannot account for, so nothing is published
+     * from it. Publishing anyway would mean labelling an output with a
+     * request that did not produce it.
+     */
+    if (!request || request.generation !== message.generation) {
+      this.releaseAndDispatch();
+      return;
+    }
+    request.completedAtMs = now();
+    this.published = {
+      request,
+      output: message.output,
+      count: message.count,
+      entityCount: message.entityCount,
+    };
+    /*
+     * The next request waits. The worker writes into the buffer it is about
+     * to be handed, and starting it now would overwrite an output the caller
+     * has not read and replace the metadata describing it.
+     */
   }
 
   private fail(message: string): void {
@@ -745,6 +855,9 @@ export class ShadoEntityVisibilityWorker {
     this.pendingRequest = null;
   }
 }
+
+/** What a compact-mode result carries in place of flags: nothing, not a slice. */
+const EMPTY_FLAGS = new Uint8Array(0);
 
 /** Monotonic milliseconds, wherever this runs. */
 function now(): number {
@@ -1462,6 +1575,19 @@ function reduce(message) {
   Atomics.store(state.control, 7, Math.max(0, Math.round((performance.now() - started) * 1000)));
   Atomics.store(state.control, 2, output);
   Atomics.store(state.control, 1, message.generation);
-  self.postMessage({ type: 'complete', generation: message.generation });
+  /*
+   * The message carries what it published, not just that it did. The control
+   * words are written before it and a reader polling them alone can see this
+   * generation complete while the request that produced it is still in
+   * flight on the other side -- which is how a result came back labelled
+   * with the CURRENT epochs and an age of zero.
+   */
+  self.postMessage({
+    type: 'complete',
+    generation: message.generation,
+    output,
+    count: visibleCount,
+    entityCount: state.publishFlags ? count : 0,
+  });
 }
 `;
