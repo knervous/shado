@@ -13,6 +13,7 @@ export * from './collision';
 export * from './occlusion';
 export * from './occluder-scene';
 export * from './occluder-bvh';
+export * from './occluder-gpu';
 export * from './region-membership';
 export * from './occluder-instances';
 export * from './visibility';

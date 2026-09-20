@@ -14,7 +14,7 @@
     "experimentalDecorators": true,
     "allowJs": true,
     "lib": ["ES2022", "DOM"],
-    "types": ["node", "@babylonjs/core"]
+    "types": ["node", "@babylonjs/core", "@webgpu/types"]
   },
   "include": [
     "src/**/*.ts",
