@@ -6,6 +6,8 @@ import {
   type Texture,
   type Material,
   type Ray,
+  type AbstractMesh,
+  type SubMesh,
 } from '../babylon';
 import { Shado } from '../core/Shado';
 import { VATBuilder } from '../extensions';
@@ -139,6 +141,24 @@ export class ShadoMaterial<T extends Shado> extends BABYLON.ShaderMaterial {
     for (const kind of mesh.getVerticesDataKinds()) {
       if (kind.startsWith('a') && !attributes.includes(kind)) attributes.push(kind);
     }
+    /*
+     * Babylon turns `INSTANCESCOLOR` on by itself whenever a mesh carries a
+     * per-instance colour buffer, and its instances include then reads
+     * `vertexInputs.instanceColor`. The attribute does not start with `a`, so
+     * the loop above never collected it, and the generated WGSL referenced a
+     * struct member that was never declared: Dawn rejected the shader, the
+     * material never became ready, and the mesh simply never drew. On
+     * Crownward that silently cost both grass rings and every thin-instanced
+     * prototype whose material is a ShadoMaterial.
+     *
+     * The presence of the buffer is the whole condition. Requiring instances
+     * as well reads a flag that is false while the material is being created
+     * and true by the time it is drawn, which fixes the meshes that are
+     * instanced up front and leaves the ones instanced afterwards broken.
+     */
+    if (mesh.isVerticesDataPresent('instanceColor')) {
+      attributes.push('instanceColor');
+    }
 
     const defines = new Set<string>(opts?.defines ?? []);
     if (mesh.isVerticesDataPresent('normal')) defines.add('SHADO_HAS_NORMAL');
@@ -231,6 +251,7 @@ export class ShadoMaterial<T extends Shado> extends BABYLON.ShaderMaterial {
     this.shadoScene = scene;
     this.shadoMesh = mesh;
     this.shadoSource = shado;
+    this.trackInstanceColorAttribute(mesh);
 
     if (usePosePalette) {
       const palette = opts!.posePalette!;
@@ -397,6 +418,54 @@ export class ShadoMaterial<T extends Shado> extends BABYLON.ShaderMaterial {
       hasAmbient ? ambient.b : 0.2
     );
     this.setVector3('uShadoAmbientColor', this._ambientColor);
+  }
+
+  /**
+   * Keeps the declared attributes in step with an instance colour buffer that
+   * arrives late.
+   *
+   * Babylon decides `INSTANCESCOLOR` per draw, from whether the mesh has a
+   * per-instance colour buffer at that moment; its instances include then
+   * reads `vertexInputs.instanceColor`. The attribute list, by contrast, is
+   * fixed when the material is constructed. A mesh instanced AFTER its
+   * material was built therefore compiles a shader that references a struct
+   * member nobody declared -- Dawn rejects it, the material never becomes
+   * ready, and the mesh silently never draws. Which meshes lose depends on
+   * the order things happened to load in, which is why the casualties moved
+   * between runs: a grass ring in one, a merged prototype in the next.
+   *
+   * Watching for the buffer and adding the attribute when it appears keeps
+   * the two in agreement whichever order they arrive in.
+   */
+  private trackInstanceColorAttribute(mesh: { isVerticesDataPresent(kind: string): boolean }): void {
+    const ensure = (): void => {
+      const attributes = this.options.attributes;
+      if (attributes.includes('instanceColor')) return;
+      if (!mesh.isVerticesDataPresent('instanceColor')) return;
+      attributes.push('instanceColor');
+      // The effect was built from the old list; it has to be built again.
+      this.markAsDirty(BABYLON.Material.AttributesDirtyFlag);
+    };
+    ensure();
+    /*
+     * Checked from the readiness test rather than from a bind: a material
+     * whose first compile failed never binds, so a bind hook would wait for
+     * an event that this very bug prevents. `isReadyForSubMesh` runs every
+     * frame whether the material is ready or not, which is exactly when the
+     * question needs asking.
+     */
+    this.instanceColorWatch = ensure;
+  }
+
+  private instanceColorWatch: (() => void) | null = null;
+
+  public override isReadyForSubMesh(
+    mesh: AbstractMesh,
+    subMesh: SubMesh,
+    useInstances?: boolean
+  ): boolean {
+    this.instanceColorWatch?.();
+    return super.isReadyForSubMesh(mesh, subMesh, useInstances);
   }
 
   public setAsyncPicking<TActor extends ShadoActor>(

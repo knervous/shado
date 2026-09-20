@@ -47,13 +47,96 @@ export type OccluderBvhCounters = {
   blockedQueries: number;
 };
 
+/** Why a build stopped, carried from the thing that noticed to the report. */
+export type OccluderBuildStop = 'seconds' | 'memory' | 'cancelled' | 'segment-queries';
+
 /** Bounds on construction itself, not on the queries it will later answer. */
 export type OccluderBuildLimits = {
   /** Ceiling on the structure's own allocation, checked before allocating. */
   maxBytes?: number;
-  /** Polled while reading geometry; true abandons the build. */
-  shouldStop?: () => boolean;
+  /**
+   * Polled while building. Returns the reason to stop, or null to continue.
+   *
+   * A reason rather than a boolean: a deadline reached inside the callback is
+   * a deadline, and reporting it as a generic cancellation loses the one fact
+   * the operator needs.
+   */
+  stopReason?: () => OccluderBuildStop | null;
 };
+
+/**
+ * The single place construction asks whether it may continue.
+ *
+ * Polling is counted in ELEMENTARY ITERATIONS -- triangles scanned, elements
+ * compared, slots written -- not in calls. A guard that polls once per call
+ * lets one call over five million triangles run to completion, which is
+ * exactly what a root partition or a root bounds scan is.
+ */
+class BuildGuard {
+  private pending = 0;
+  private stopped: OccluderBuildStop | null = null;
+
+  constructor(private readonly limits: OccluderBuildLimits) {}
+
+  /** Charges `workUnits` of work and polls when enough has accumulated. */
+  tick(workUnits: number): void {
+    if (!this.limits.stopReason) return;
+    this.pending += workUnits;
+    if (this.pending < CANCEL_STRIDE) return;
+    this.pending = 0;
+    this.poll();
+  }
+
+  /** Polls unconditionally; used on stage entry, where the cost is one call. */
+  poll(): void {
+    if (!this.limits.stopReason) return;
+    const reason = this.limits.stopReason();
+    if (reason) {
+      this.stopped = reason;
+      throw CANCELLED;
+    }
+  }
+
+  /**
+   * Refuses an allocation before it is made, while the memory is unclaimed.
+   * Called with every simultaneously live buffer the stage is about to add.
+   */
+  checkBeforeAllocation(bytes: number): void {
+    this.poll();
+    if (!Number.isFinite(bytes) || bytes < 0) {
+      throw new RangeError(`Occluder build asked for ${bytes} bytes`);
+    }
+    if (this.limits.maxBytes !== undefined && bytes > this.limits.maxBytes) {
+      this.stopped = 'memory';
+      throw CANCELLED;
+    }
+  }
+
+  get reason(): OccluderBuildStop {
+    return this.stopped ?? 'cancelled';
+  }
+}
+
+/** True when any bound at all was requested. */
+export function hasBoundedLimits(limits: OccluderBuildLimits | undefined): boolean {
+  if (!limits) return false;
+  return limits.maxBytes !== undefined || limits.stopReason !== undefined;
+}
+
+/**
+ * A backend was selected that cannot honour the limits the caller asked for.
+ *
+ * Thrown rather than silently dropping the limits or silently substituting a
+ * different backend: both of those answer a request for bounded execution
+ * with unbounded execution and say nothing.
+ */
+export class ShadoOccluderBackendError extends Error {
+  readonly code = 'unsupported-bounded-backend';
+  constructor(message: string) {
+    super(message);
+    this.name = 'ShadoOccluderBackendError';
+  }
+}
 
 /**
  * Peak bytes this structure allocates for n triangles.
@@ -86,7 +169,7 @@ export type OccluderBvh = {
    * when it was built. An abandoned build indexes nothing, and a caller that
    * uses it anyway simply finds no blockers -- which admits more, never less.
    */
-  readonly aborted: 'cancelled' | 'over-budget' | null;
+  readonly aborted: OccluderBuildStop | null;
   /** Triangle corners, nine doubles each, in build order. */
   readonly triangles: Float64Array;
   /**
@@ -120,46 +203,41 @@ export function buildOccluderBvh(
 ): OccluderBvh {
   let total = 0;
   for (const primitive of primitives) total += Math.floor(primitive.indices.length / 3);
-  /*
-   * Refuse the allocation before making it. A build that is going to exceed
-   * its budget should say so while the memory is still unclaimed, not after
-   * the process has already taken it: three Float64Arrays over the triangle
-   * set is the dominant cost and is exactly predictable from the count.
-   */
-  if (limits.maxBytes !== undefined && estimateBvhBytes(total) > limits.maxBytes) {
-    return emptyBvh('over-budget');
+  const guard = new BuildGuard(limits);
+  try {
+    return buildGuarded(primitives, total, guard);
+  } catch (error) {
+    if (error === CANCELLED) return emptyBvh(guard.reason);
+    throw error;
   }
-  if (limits.shouldStop?.()) return emptyBvh('cancelled');
+}
+
+function buildGuarded(
+  primitives: readonly ShadoWorldPrimitive[],
+  total: number,
+  guard: BuildGuard
+): OccluderBvh {
+  /*
+   * Refuse the allocation before making it, while the memory is unclaimed:
+   * every simultaneously live buffer this build will hold, priced from the
+   * triangle count, which is exactly known here.
+   */
+  guard.checkBeforeAllocation(estimateBvhBytes(total));
   const triangles = new Float64Array(total * 9);
   const sides = new Uint8Array(total);
   const centroids = new Float64Array(total * 3);
   const triangleBounds = new Float64Array(total * 6);
   let write = 0;
   let triangle = 0;
-  const stop = limits.shouldStop;
-  /*
-   * Asked often enough to interrupt one enormous primitive, rarely enough to
-   * cost nothing: a scene is not always many meshes, and a single
-   * ten-thousand-triangle mesh used to run to completion because the only
-   * check was between primitives.
-   */
-  let sinceCheck = 0;
-  const shouldStop = (): boolean => {
-    if (!stop) return false;
-    if (++sinceCheck < CANCEL_STRIDE) return false;
-    sinceCheck = 0;
-    return stop();
-  };
-  let aborted: OccluderBvh['aborted'] = null;
   for (const primitive of primitives) {
-    if (stop?.()) { aborted = 'cancelled'; break; }
+    guard.poll();
     const { positions, indices } = primitive;
     // Unknown sidedness blocks from both sides: that is what collision
     // geometry has always done, and narrowing it silently would change every
     // historical measurement.
     const bothFaces = primitive.doubleSided !== false;
     for (let index = 0; index + 2 < indices.length; index += 3) {
-      if (shouldStop()) { aborted = 'cancelled'; break; }
+      guard.tick(1);
       let minX = Infinity, minY = Infinity, minZ = Infinity;
       let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
       for (let corner = 0; corner < 3; corner += 1) {
@@ -186,11 +264,14 @@ export function buildOccluderBvh(
       sides[triangle] = bothFaces ? 1 : 0;
       triangle += 1;
     }
-    if (aborted) break;
   }
   const triangleCount = triangle;
   const order = new Int32Array(triangleCount);
-  for (let index = 0; index < triangleCount; index += 1) order[index] = index;
+  guard.poll();
+  for (let index = 0; index < triangleCount; index += 1) {
+    guard.tick(1);
+    order[index] = index;
+  }
 
   /*
    * Node storage grows rather than being predicted.
@@ -203,27 +284,35 @@ export function buildOccluderBvh(
    * queries that walked straight past real geometry. Growing cannot be wrong
    * by arithmetic.
    */
-  let capacity = Math.max(4, 2 * Math.ceil(triangleCount / 4) + 1);
-  let nodeBounds = new Float64Array(capacity * 6);
-  let nodeMeta = new Int32Array(capacity * 3);
+  const capacity = Math.max(4, 2 * Math.ceil(triangleCount / 4) + 1);
+  if (!Number.isSafeInteger(capacity * 6)) {
+    throw new RangeError(`Occluder hierarchy for ${triangleCount} triangles overflows its node array`);
+  }
+  const nodeBounds = new Float64Array(capacity * 6);
+  const nodeMeta = new Int32Array(capacity * 3);
   let nodeCount = 0;
   let maxDepth = 0;
+  /*
+   * The capacity is a bound, not a guess, so there is no growth path to
+   * budget for. A leaf forms at eight triangles or fewer and a split gives
+   * each side at least four, so there are at most ceil(n/4) leaves and
+   * 2*ceil(n/4)+1 nodes. Exceeding it would be a logic error, and typed
+   * arrays drop out-of-range writes in silence, so it throws rather than
+   * quietly building a tree with holes in it.
+   */
   const reserve = (): void => {
     if (nodeCount < capacity) return;
-    capacity *= 2;
-    const grownBounds = new Float64Array(capacity * 6);
-    grownBounds.set(nodeBounds);
-    nodeBounds = grownBounds;
-    const grownMeta = new Int32Array(capacity * 3);
-    grownMeta.set(nodeMeta);
-    nodeMeta = grownMeta;
+    throw new RangeError(
+      `Occluder hierarchy exceeded its ${capacity}-node bound at ${triangleCount} triangles`
+    );
   };
 
   const boundsOf = (start: number, count: number, node: number): void => {
-    if (stop && shouldStop()) throw CANCELLED;
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
     for (let index = start; index < start + count; index += 1) {
+      // Inside the scan, not before it: the root's scan is every triangle.
+      guard.tick(1);
       const base = order[index]! * 6;
       if (triangleBounds[base]! < minX) minX = triangleBounds[base]!;
       if (triangleBounds[base + 1]! < minY) minY = triangleBounds[base + 1]!;
@@ -242,7 +331,7 @@ export function buildOccluderBvh(
 
   /** Returns the node index; children are laid out immediately after it. */
   const build = (start: number, count: number, depth: number): number => {
-    if (stop && shouldStop()) throw CANCELLED;
+    guard.tick(1);
     reserve();
     const node = nodeCount++;
     if (depth > maxDepth) maxDepth = depth;
@@ -264,20 +353,14 @@ export function buildOccluderBvh(
      * level -- the largest of which was over every triangle in the zone -- and
      * gives cancellation somewhere to be checked inside the work.
      */
-    selectNth(order, centroids, axis, start, start + count - 1, start + half, shouldStop);
+    selectNth(order, centroids, axis, start, start + count - 1, start + half, guard);
     nodeMeta[node * 3] = start;
     nodeMeta[node * 3 + 1] = 0;
     build(start, half, depth + 1);
     nodeMeta[node * 3 + 2] = build(start + half, count - half, depth + 1);
     return node;
   };
-  if (aborted) return emptyBvh(aborted);
-  try {
-    if (triangleCount) build(0, triangleCount, 0);
-  } catch (error) {
-    if (error === CANCELLED) return emptyBvh('cancelled');
-    throw error;
-  }
+  if (triangleCount) build(0, triangleCount, 0);
   if (!triangleCount) {
     nodeCount = 1;
     nodeMeta[0] = 0;
@@ -286,11 +369,12 @@ export function buildOccluderBvh(
   }
 
   // Reorder the triangle payload into leaf order so a leaf reads contiguously.
+  guard.checkBeforeAllocation(triangleCount * 9 * 8 + triangleCount);
   const ordered = new Float64Array(triangleCount * 9);
   const orderedSides = new Uint8Array(triangleCount);
   for (let index = 0; index < triangleCount; index += 1) {
     // The reordering is a full pass over the payload and is interruptible too.
-    if (shouldStop()) return emptyBvh('cancelled');
+    guard.tick(1);
     ordered.set(triangles.subarray(order[index]! * 9, order[index]! * 9 + 9), index * 9);
     orderedSides[index] = sides[order[index]!]!;
   }
@@ -329,7 +413,7 @@ function selectNth(
   low: number,
   high: number,
   nth: number,
-  shouldStop: () => boolean
+  guard: BuildGuard
 ): void {
   const key = (index: number): number => centroids[order[index]! * 3 + axis]!;
   const swap = (left: number, right: number): void => {
@@ -338,7 +422,6 @@ function selectNth(
     order[right] = value;
   };
   while (low < high) {
-    if (shouldStop()) throw CANCELLED;
     // Median of three, which keeps sorted and reversed input off the worst case.
     const middle = (low + high) >> 1;
     if (key(middle) < key(low)) swap(middle, low);
@@ -348,9 +431,12 @@ function selectNth(
     let left = low;
     let right = high;
     while (left <= right) {
-      while (key(left) < pivot) left += 1;
-      while (key(right) > pivot) right -= 1;
+      // Charged inside the scans and the swap, because a root partition walks
+      // every triangle in the zone and one poll per pass is one poll for it.
+      while (key(left) < pivot) { guard.tick(1); left += 1; }
+      while (key(right) > pivot) { guard.tick(1); right -= 1; }
       if (left <= right) {
+        guard.tick(1);
         swap(left, right);
         left += 1;
         right -= 1;

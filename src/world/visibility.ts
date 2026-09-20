@@ -1,6 +1,20 @@
-import { buildOccluderGrid, columnSurfaces, highestSurfaceAt, segmentBlocked } from './occlusion';
-import { buildOccluderBvh, bvhColumnSurfaces, bvhHighestSurfaceAt, bvhSegmentBlocked } from './occluder-bvh';
-import type { OccluderBuildLimits, OccluderBvh } from './occluder-bvh';
+import {
+  buildOccluderGrid,
+  columnSurfaces,
+  estimateGridPayloadBytes,
+  highestSurfaceAt,
+  segmentBlocked,
+} from './occlusion';
+import {
+  ShadoOccluderBackendError,
+  buildOccluderBvh,
+  bvhColumnSurfaces,
+  bvhHighestSurfaceAt,
+  bvhSegmentBlocked,
+  estimateBvhBytes,
+  hasBoundedLimits,
+} from './occluder-bvh';
+import type { OccluderBuildLimits, OccluderBuildStop, OccluderBvh } from './occluder-bvh';
 import type { OccluderGrid } from './occlusion';
 import type {
   ShadoWorldBounds,
@@ -20,13 +34,15 @@ import type {
  * differentially testable and a regression in either is visible rather than
  * theoretical.
  */
-export type ShadoWorldOccluderIndex = 'bvh' | 'grid';
+export type ShadoWorldOccluderIndex = 'bvh' | 'grid' | 'auto';
 
 /** One question, two structures: can this segment reach that point? */
 type Occluders = {
-  readonly kind: ShadoWorldOccluderIndex;
+  readonly kind: 'bvh' | 'grid';
   /** Set when construction refused or was interrupted; the index is empty. */
-  readonly aborted?: 'cancelled' | 'over-budget' | null;
+  readonly aborted?: OccluderBuildStop | null;
+  /** Bytes the structure's own buffers hold, as distinct from process RSS. */
+  readonly trackedBytes: number;
   readonly triangleCount: number;
   readonly blocked: (
     ax: number, ay: number, az: number,
@@ -46,7 +62,7 @@ type Occluders = {
 };
 
 function buildOccluders(
-  kind: ShadoWorldOccluderIndex,
+  kind: 'bvh' | 'grid',
   primitives: readonly ShadoWorldPrimitive[],
   bounds: ShadoWorldBounds,
   cellSize: number,
@@ -57,6 +73,7 @@ function buildOccluders(
     return {
       kind,
       aborted: grid.aborted,
+      trackedBytes: estimateGridPayloadBytes(grid.triangleCount),
       triangleCount: grid.triangleCount,
       blocked: (ax, ay, az, bx, by, bz) => segmentBlocked(grid, ax, ay, az, bx, by, bz),
       floorAt: (x, z) => highestSurfaceAt(grid, x, z, bounds),
@@ -68,8 +85,9 @@ function buildOccluders(
   }
   const bvh: OccluderBvh = buildOccluderBvh(primitives, limits);
   return {
-    kind,
+    kind: 'bvh',
     aborted: bvh.aborted,
+    trackedBytes: bvh.aborted ? 0 : estimateBvhBytes(bvh.triangleCount),
     triangleCount: bvh.triangleCount,
     blocked: (ax, ay, az, bx, by, bz) => bvhSegmentBlocked(bvh, ax, ay, az, bx, by, bz),
     floorAt: (x, z) => bvhHighestSurfaceAt(bvh, x, z),
@@ -320,11 +338,31 @@ export function compileShadoWorldVisibility(
     ...(budget?.maxResidentBytes !== undefined && budget.residentBytes
       ? { maxBytes: Math.max(0, budget.maxResidentBytes - budget.residentBytes()) }
       : {}),
-    shouldStop: () => exhausted(0) !== 'none',
+    ...(budget
+      ? {
+          stopReason: () => {
+            const reason = exhausted(0);
+            return reason === 'none' ? null : reason;
+          },
+        }
+      : {}),
   });
+  /*
+   * Only the hierarchy can be bounded, so a caller asking for both bounded
+   * execution and the grid is refused here rather than at the CLI -- the
+   * compiler is the public entry point and has to hold the contract itself.
+   */
+  const requestedIndex = input.occluderIndex ?? 'auto';
+  const resolvedIndex: 'bvh' | 'grid' = requestedIndex === 'grid' ? 'grid' : 'bvh';
+  if (resolvedIndex === 'grid' && hasBoundedLimits(buildLimits())) {
+    throw new ShadoOccluderBackendError(
+      "A bounded bake cannot use the 'grid' occluder index: it has no memory " +
+        "or cancellation contract. Select 'bvh' or 'auto', or drop the budget."
+    );
+  }
   const built = requestedMode === 'sampled-occlusion' && !check('index-build', 0)
     ? buildOccluders(
-        input.occluderIndex ?? 'bvh',
+        resolvedIndex,
         input.collisionPrimitives,
         input.bounds,
         OCCLUDER_CELL_SIZE,
@@ -332,7 +370,9 @@ export function compileShadoWorldVisibility(
       )
     : null;
   if (built?.aborted) {
-    stop = built.aborted === 'cancelled' ? 'cancelled' : 'memory';
+    // The guard carries the exact reason; a deadline noticed inside a build
+    // is a deadline and must not be reported as a generic cancellation.
+    stop = built.aborted;
     stoppedDuring = 'index-build';
   }
   // An abandoned index holds nothing, so using it would silently mean "no
@@ -345,7 +385,7 @@ export function compileShadoWorldVisibility(
    */
   const groundBuilt = grid && input.groundPrimitives && !check('index-build', grid.counters.segmentQueries)
     ? buildOccluders(
-        input.occluderIndex ?? 'bvh',
+        resolvedIndex,
         input.groundPrimitives,
         input.bounds,
         OCCLUDER_CELL_SIZE,
@@ -353,7 +393,7 @@ export function compileShadoWorldVisibility(
       )
     : null;
   if (groundBuilt?.aborted) {
-    stop = groundBuilt.aborted === 'cancelled' ? 'cancelled' : 'memory';
+    stop = groundBuilt.aborted;
     stoppedDuring = 'index-build';
   }
   const ground = input.groundPrimitives
@@ -526,6 +566,7 @@ export function compileShadoWorldVisibility(
       },
       work: {
         index: grid?.kind ?? null,
+        indexTrackedBytes: (grid?.trackedBytes ?? 0) + (ground && ground !== grid ? ground.trackedBytes : 0),
         segmentQueries: grid?.counters.segmentQueries ?? 0,
         blockedQueries: grid?.counters.blockedQueries ?? 0,
         columnQueries: ground?.counters.columnQueries ?? 0,

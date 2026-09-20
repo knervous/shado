@@ -221,6 +221,13 @@ export function reduceEntityVisibility(descriptor: usize): i32 {
   const outsideVisible = load<i32>(descriptor + 76) != 0;
   const outputPtr = <usize>load<u32>(descriptor + 80);
   const flagsPtr = <usize>load<u32>(descriptor + 84);
+  /*
+   * Per-candidate topology admission, decided by the caller's membership over
+   * the entity's whole bound. Zero means "not supplied", and the centre-cell
+   * lookup below stands in -- which is the historical behaviour and is not
+   * conservative for anything wider than a region.
+   */
+  const admissionPtr = <usize>load<u32>(descriptor + 88);
   let visible: u32 = 0;
 
   for (let i: u32 = 0; i < count; i++) {
@@ -247,6 +254,15 @@ export function reduceEntityVisibility(descriptor: usize): i32 {
           ? requiredCellBits
           : 0
         : load<u8>(cellFlagsPtr + <usize>cell) & 0x73;
+    /*
+     * A candidate its caller already admitted by full-bounds membership must
+     * not be rejected here by the single cell its centre happens to sit in.
+     * The supplied byte carries the same bits the cell lookup would have, so
+     * everything downstream is unchanged.
+     */
+    if (admissionPtr != 0) {
+      reason = load<u8>(admissionPtr + <usize>i) & 0x73;
+    }
     const cellCandidate = (reason & requiredCellBits) == requiredCellBits;
     if (!cellCandidate) {
       store<u8>(flagsPtr + <usize>i, reason);

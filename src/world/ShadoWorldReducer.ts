@@ -31,7 +31,8 @@ type ReducerExports = {
 };
 
 const DESCRIPTOR_BYTES = 76;
-const ENTITY_DESCRIPTOR_BYTES = 88;
+// 92 since the per-candidate topology admission pointer was added at 88.
+const ENTITY_DESCRIPTOR_BYTES = 92;
 const WORLD_VISIBILITY_DESCRIPTOR_BYTES = 116;
 
 export type ShadoWasmSlice = {
@@ -79,6 +80,13 @@ export type ShadoWorldEntityReductionInput = {
   cellFlags?: ArrayLike<number>;
   /** Reuse resident region policy in this reducer instead of copying bytes. */
   cellFlagsPtr?: number;
+  /**
+   * Per-candidate topology admission, one byte each, already decided over the
+   * entity's whole bound. Supplying it stops the kernel re-deriving topology
+   * from the single cell the entity's centre falls in -- which is not
+   * conservative for anything wider than a region, and is most entities.
+   */
+  topologyAdmission?: ArrayLike<number>;
   camera: [number, number, number];
   maxDistance?: number;
   outsideWorldVisible?: boolean;
@@ -124,6 +132,7 @@ export class ShadoWorldReducer {
   private entityRadiusPtr = 0;
   private entityOutputPtr = 0;
   private entityFlagsPtr = 0;
+  private entityAdmissionPtr = 0;
 
   public static async create(
     world: ShadoWorldSpatialPackage,
@@ -387,6 +396,12 @@ export class ShadoWorldReducer {
     descriptor.setInt32(76, input.outsideWorldVisible === false ? 0 : 1, true);
     descriptor.setUint32(80, this.entityOutputPtr, true);
     descriptor.setUint32(84, this.entityFlagsPtr, true);
+    if (input.topologyAdmission) {
+      copyUint8(this.wasm.memory, this.entityAdmissionPtr, input.topologyAdmission, count);
+      descriptor.setUint32(88, this.entityAdmissionPtr >>> 0, true);
+    } else {
+      descriptor.setUint32(88, 0, true);
+    }
     const visibleCount = this.wasm.reduceEntityVisibility(this.entityDescriptorPtr);
     if (visibleCount < 0 || visibleCount > count) {
       throw new Error(`World entity reducer returned invalid visible count ${visibleCount}`);
@@ -441,6 +456,7 @@ export class ShadoWorldReducer {
     this.entityRadiusPtr = this.wasm.alloc(capacity * 4);
     this.entityOutputPtr = this.wasm.alloc(capacity * 4);
     this.entityFlagsPtr = this.wasm.alloc(capacity);
+    this.entityAdmissionPtr = this.wasm.alloc(capacity);
   }
 }
 

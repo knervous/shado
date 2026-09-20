@@ -148,6 +148,12 @@ export type ShadoWorldVisibilityBakeReport = {
   work: {
     /** Which acceleration structure answered the queries. */
     index: 'bvh' | 'grid' | null;
+    /**
+     * Bytes held by the index structures themselves. This is tracked
+     * allocation, not process RSS: neither number substitutes for the other,
+     * and the report carries both.
+     */
+    indexTrackedBytes: number;
     segmentQueries: number;
     blockedQueries: number;
     columnQueries: number;

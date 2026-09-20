@@ -1,6 +1,7 @@
 import {
   buildOccluderBvh,
   estimateBvhBytes,
+  estimateGridPayloadBytes,
   buildOccluderGrid,
   bvhHighestSurfaceAt,
   bvhSegmentBlocked,
@@ -194,46 +195,71 @@ describe('construction can be stopped while it is working', () => {
   /** One primitive big enough that stopping between primitives is no use. */
   const huge = scatter(10_000, 31337, 800);
 
-  it('aborts inside a single large primitive', () => {
-    let calls = 0;
-    const built = buildOccluderBvh([huge], { shouldStop: () => ++calls >= 3 });
-    expect(built.aborted).toBe('cancelled');
-    expect(built.triangleCount).toBe(0);
-    expect(calls).toBeGreaterThanOrEqual(3);
+  /** How many times a never-stopping guard is consulted for n triangles. */
+  function pollCount(triangles: number): number {
+    let polls = 0;
+    buildOccluderBvh([scatter(triangles, 4242, 800)], {
+      stopReason: () => { polls += 1; return null; },
+    });
+    return polls;
+  }
+
+  it('counts work in elementary iterations, not in calls', () => {
+    /*
+     * The distinction the review turned on. A guard polled once per call lets
+     * one call over every triangle in the zone -- a root bounds scan or a root
+     * partition -- run to completion. Polling charged per element scales with
+     * the geometry, so four times the triangles is about four times the polls.
+     */
+    const small = pollCount(4_000);
+    const large = pollCount(16_000);
+    expect(small).toBeGreaterThan(2);
+    expect(large / small).toBeGreaterThan(3);
   });
 
-  it('aborts during partitioning, not only while reading geometry', () => {
-    // Let the whole ingestion pass, then stop once the hierarchy starts.
-    const reads = Math.ceil((huge.indices.length / 3) / 4096) + 2;
-    let calls = 0;
-    const built = buildOccluderBvh([huge], { shouldStop: () => ++calls > reads });
-    expect(built.aborted).toBe('cancelled');
-    expect(built.triangleCount).toBe(0);
+  it('aborts wherever it happens to be when the answer changes', () => {
+    // Spread across ingestion, the order fill, bounds scans, partitioning and
+    // the payload reorder; every one of them must unwind.
+    for (const after of [1, 2, 4, 8, 16, 32]) {
+      let calls = 0;
+      const built = buildOccluderBvh([huge], {
+        stopReason: () => (++calls > after ? 'cancelled' : null),
+      });
+      expect(built.aborted).toBe('cancelled');
+      expect(built.triangleCount).toBe(0);
+      expect(built.nodeCount).toBe(1);
+    }
+  });
+
+  it('reports the reason it was given, not a generic cancellation', () => {
+    for (const reason of ['seconds', 'memory', 'segment-queries', 'cancelled'] as const) {
+      let calls = 0;
+      const built = buildOccluderBvh([huge], {
+        stopReason: () => (++calls > 3 ? reason : null),
+      });
+      expect(built.aborted).toBe(reason);
+    }
   });
 
   it('runs to completion when nothing asks it to stop', () => {
     let calls = 0;
-    const built = buildOccluderBvh([huge], { shouldStop: () => { calls += 1; return false; } });
+    const built = buildOccluderBvh([huge], {
+      stopReason: () => { calls += 1; return null; },
+    });
     expect(built.aborted).toBeNull();
     expect(built.triangleCount).toBe(10_000);
-    // It really was asked, repeatedly, rather than never polled at all.
     expect(calls).toBeGreaterThan(3);
   });
 
   it('refuses an allocation it can predict will not fit', () => {
     const built = buildOccluderBvh([huge], { maxBytes: 1024 });
-    expect(built.aborted).toBe('over-budget');
+    expect(built.aborted).toBe('memory');
     expect(built.triangleCount).toBe(0);
     // And the prediction covers every buffer it would have taken.
     expect(estimateBvhBytes(10_000)).toBeGreaterThan(10_000 * 9 * 8 * 2);
   });
 
   it('selects the same tree a full sort would have', () => {
-    /*
-     * Partitioning in place replaced a sort per level. The structure that
-     * comes out still has to answer identically, which the coverage invariant
-     * and a differential query check together establish.
-     */
     const built = buildOccluderBvh([huge]);
     const covered = new Uint8Array(built.triangleCount);
     for (let node = 0; node < built.nodeCount; node += 1) {
@@ -252,5 +278,40 @@ describe('construction can be stopped while it is working', () => {
         segmentBlocked(grid, a[0], a[1], a[2], b[0], b[1], b[2])
       );
     }
+  });
+});
+
+describe('the grid refuses bounded work instead of pretending', () => {
+  /**
+   * The review's reproduction: one triangle spanning the world diagonally.
+   * Its payload estimate is 153 bytes and it produces 35,937 buckets, so a
+   * triangle-count estimate cannot bound this backend at all.
+   */
+  const sprawling: ShadoWorldPrimitive = {
+    name: 'diagonal',
+    material: 'stone',
+    positions: new Float32Array([0, 0, 0, 1024, 0, 1024, 0, 1024, 1024]),
+    indices: new Uint32Array([0, 1, 2]),
+  };
+  const bounds = { min: [0, 0, 0] as [number, number, number], max: [1024, 1024, 1024] as [number, number, number] };
+
+  it('refuses a memory ceiling before inserting anything', () => {
+    expect(() => buildOccluderGrid([sprawling], bounds, 32, { maxBytes: 1024 }))
+      .toThrow(/cannot honour memory or cancellation limits/);
+  });
+
+  it('refuses a cancellation contract it cannot honour', () => {
+    expect(() => buildOccluderGrid([sprawling], bounds, 32, { stopReason: () => null }))
+      .toThrow(/bvh/);
+  });
+
+  it('still builds, unbounded, as the diagnostic it is', () => {
+    const grid = buildOccluderGrid([sprawling], bounds, 32);
+    expect(grid.aborted).toBeNull();
+    expect(grid.triangleCount).toBe(1);
+    // One triangle, tens of thousands of bucket references: the number the
+    // payload estimate never saw.
+    expect(grid.bucketReferences).toBeGreaterThan(30_000);
+    expect(estimateGridPayloadBytes(1)).toBeLessThan(1024);
   });
 });

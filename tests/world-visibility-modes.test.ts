@@ -228,7 +228,7 @@ describe('bounded bakes', () => {
   function bake(
     budget: Parameters<typeof compileShadoWorldVisibility>[0]['budget'],
     report: (value: ShadoWorldVisibilityBakeReport) => void,
-    occluderIndex: 'bvh' | 'grid' = 'bvh'
+    occluderIndex: 'bvh' | 'grid' | 'auto' = 'bvh'
   ) {
     const strip = groundStrip(LENGTH, DEPTH, 8);
     const blocker = wall(WALL_X, DEPTH, 200);
@@ -363,16 +363,27 @@ describe('bounded bakes', () => {
     expect(offered[1]!).toBeGreaterThan(offered[0]!);
   });
 
-  it('applies the same build limits to the grid backend', () => {
+  it('refuses a bounded bake that asks for the grid backend', () => {
+    /*
+     * The grid has no memory or cancellation contract, so a caller asking for
+     * both bounded execution and that backend is told, rather than silently
+     * given unbounded execution or silently switched to another structure.
+     * The refusal happens in the compiler, not only in the CLI.
+     */
+    expect(() =>
+      bake({ maxResidentBytes: 4096, residentBytes: () => 0 }, () => {}, 'grid')
+    ).toThrow(/bounded bake cannot use the 'grid'/);
+    // Unbounded, the same request is a legitimate diagnostic.
     const reports: ShadoWorldVisibilityBakeReport[] = [];
-    bake(
-      { maxResidentBytes: 4096, residentBytes: () => 0 },
-      (value) => reports.push(value),
-      'grid'
-    );
-    expect(reports[0]!.limit.stop).toBe('memory');
-    expect(reports[0]!.limit.stoppedDuring).toBe('index-build');
-    expect(reports[0]!.mode).toBe('distance-flood');
+    bake(undefined, (value) => reports.push(value), 'grid');
+    expect(reports[0]!.work.index).toBe('grid');
+  });
+
+  it('resolves auto to the bounded backend', () => {
+    const reports: ShadoWorldVisibilityBakeReport[] = [];
+    bake({ maxSeconds: 60 }, (value) => reports.push(value), 'auto');
+    expect(reports[0]!.work.index).toBe('bvh');
+    expect(reports[0]!.work.indexTrackedBytes).toBeGreaterThan(0);
   });
 
   it('stops on a memory ceiling the host reports', () => {

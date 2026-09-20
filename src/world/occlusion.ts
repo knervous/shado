@@ -28,6 +28,7 @@
  * occlude it, and a caller that cannot find geometry to sample is expected to
  * fall back to admitting the region.
  */
+import { ShadoOccluderBackendError, hasBoundedLimits } from './occluder-bvh';
 import type { OccluderBuildLimits } from './occluder-bvh';
 import type { ShadoWorldBounds, ShadoWorldPrimitive } from './types';
 
@@ -56,8 +57,8 @@ export type OccluderGridCounters = {
 };
 
 export type OccluderGrid = {
-  /** Set when construction refused or was interrupted; the grid indexes nothing. */
-  readonly aborted: 'cancelled' | 'over-budget' | null;
+  /** Always null: this backend refuses bounded requests rather than aborting. */
+  readonly aborted: null;
   /** One byte per triangle: non-zero where the surface draws both faces. */
   readonly doubleSided: Uint8Array;
   /**
@@ -94,21 +95,23 @@ export function buildOccluderGrid(
   let total = 0;
   for (const primitive of primitives) total += primitive.indices.length / 3;
   /*
-   * The same contract the hierarchy honours. Without it, asking for hard
-   * limits and selecting this backend silently got no limits at all.
+   * This backend cannot be bounded, and says so rather than pretending.
+   *
+   * Its buckets are `Map<number, number[]>`, whose real cost is set by how
+   * many cells each triangle spans -- not by the triangle count. One triangle
+   * spanning a zone diagonally produces 35,937 buckets and a quarter of a
+   * megabyte of reference numbers from an estimate of 153 bytes. Rather than
+   * spend this pass making JS map allocation precisely budgeted, a caller
+   * that asks for bounded execution and selects the grid is refused here,
+   * before any insertion, and can choose the hierarchy instead.
    */
-  if (limits.maxBytes !== undefined && estimateGridBytes(total) > limits.maxBytes) {
-    return emptyGrid(bounds, cellSize, 'over-budget');
+  if (hasBoundedLimits(limits)) {
+    throw new ShadoOccluderBackendError(
+      'The uniform grid cannot honour memory or cancellation limits; ' +
+        "select the 'bvh' backend for bounded execution, or drop the limits " +
+        'to use the grid as an unbounded diagnostic.'
+    );
   }
-  if (limits.shouldStop?.()) return emptyGrid(bounds, cellSize, 'cancelled');
-  const stop = limits.shouldStop;
-  let sinceCheck = 0;
-  const shouldStop = (): boolean => {
-    if (!stop) return false;
-    if (++sinceCheck < GRID_CANCEL_STRIDE) return false;
-    sinceCheck = 0;
-    return stop();
-  };
   const triangles = new Float64Array(total * 9);
   const doubleSided = new Uint8Array(total);
   let write = 0;
@@ -118,7 +121,6 @@ export function buildOccluderGrid(
     // Unknown sidedness blocks from both sides, as collision always has.
     const bothFaces = primitive.doubleSided !== false;
     for (let i = 0; i < indices.length; i += 3) {
-      if (shouldStop()) return emptyGrid(bounds, cellSize, 'cancelled');
       doubleSided[triangleIndex++] = bothFaces ? 1 : 0;
       for (let corner = 0; corner < 3; corner++) {
         const base = Number(indices[i + corner]) * 3;
@@ -161,7 +163,6 @@ export function buildOccluderGrid(
     countZ,
   };
   for (let triangle = 0; triangle < triangleCount; triangle++) {
-    if (shouldStop()) return emptyGrid(bounds, cellSize, 'cancelled');
     const offset = triangle * 9;
     let minX = Infinity, minY = Infinity, minZ = Infinity;
     let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
@@ -194,24 +195,17 @@ export function buildOccluderGrid(
   return { ...grid, bucketReferences };
 }
 
-/** How often construction asks whether it should stop. */
-const GRID_CANCEL_STRIDE = 4096;
-
 /**
- * Peak bytes the grid allocates for n triangles.
+ * Rough bytes the grid's triangle payload takes for n triangles.
  *
- * The payload is exact; the buckets are estimated at the duplication factor
- * these zones actually measure (about 1.15 references per triangle) plus the
- * per-array and Map overhead that a JS number array carries. It is an
- * estimate, and it is the honest kind: it is used only to refuse allocations
- * that are predictably too large.
+ * **This is not a memory ceiling and cannot be used as one.** It prices the
+ * payload, which is exact, and says nothing about the buckets, which are
+ * where the grid's cost actually lives: a triangle spanning many cells is
+ * referenced by each of them, and the factor is a property of the geometry
+ * rather than of the count. It exists for reporting.
  */
-export function estimateGridBytes(triangleCount: number): number {
-  const payload = triangleCount * 9 * 8;
-  const sides = triangleCount;
-  const references = Math.ceil(triangleCount * 1.15) * 8;
-  const bucketOverhead = Math.ceil(triangleCount / 8) * 64;
-  return payload + sides + references + bucketOverhead;
+export function estimateGridPayloadBytes(triangleCount: number): number {
+  return triangleCount * 9 * 8 + triangleCount;
 }
 
 /** A grid over nothing, which therefore blocks nothing. */

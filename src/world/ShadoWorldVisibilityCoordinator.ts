@@ -1,3 +1,5 @@
+import { MAX_REGIONS_PER_ENTITY, regionsForBounds } from './region-membership';
+import type { RegionGrid } from './region-membership';
 import type { ShadoWorldSpatialPackage, WorldVec3 } from './types';
 import type { ShadoWorldLightState } from './point-lights';
 import {
@@ -128,6 +130,10 @@ export class ShadoWorldVisibilityCoordinator {
   private lastCameraSignature = 0;
   private lastCellSignature = 0;
   private lastPolicySignature = 0;
+  private admissionScratch: Uint8Array | null = null;
+  private readonly membershipScratch = new Uint32Array(MAX_REGIONS_PER_ENTITY);
+  /** Entities whose membership could not be enumerated; conservative candidates. */
+  public overflowEntities = 0;
 
   private constructor(
     public readonly world: ShadoWorldSpatialPackage,
@@ -251,11 +257,98 @@ export class ShadoWorldVisibilityCoordinator {
       camera: options.camera,
       maxDistance: options.maxDistance,
       outsideWorldVisible: options.outsideWorldVisible,
+      topologyAdmission: this.topologyAdmission(
+        count,
+        entities,
+        radius,
+        frame,
+        options.outsideWorldVisible !== false
+      ),
     });
     // Growing the synchronous entity scratch slab can detach prior WASM views;
     // pointers remain stable, so refresh the frame without copying any bytes.
     this.reducer.refreshWorldReductionViews(frame);
     return result;
+  }
+
+  /**
+   * Topology admission per entity, decided over its whole bound.
+   *
+   * The kernel would otherwise derive it from the single region the entity's
+   * centre falls in, which is not conservative for anything wider than a
+   * region -- and on Crownward four stamps in five are. An entity is admitted
+   * when ANY region its XZ bound touches passes every required bit on its
+   * own; bits are never combined across regions, because a region that is in
+   * the PVS but not loaded and one that is loaded but not in the PVS are both
+   * places the entity cannot be seen from.
+   *
+   * Returns undefined when the world has no region grid, which leaves the
+   * kernel's historical behaviour exactly as it was.
+   */
+  private topologyAdmission(
+    count: number,
+    entities: ShadoEntityVisibilitySoA,
+    radius: ArrayLike<number>,
+    frame: ShadoWorldVisibilityFrame,
+    outsideVisible: boolean
+  ): Uint8Array | undefined {
+    const visibility = this.world.visibility;
+    if (!visibility) return undefined;
+    const grid: RegionGrid = {
+      originX: visibility.originX,
+      originZ: visibility.originZ,
+      size: visibility.size,
+      width: visibility.width,
+      height: visibility.height,
+    };
+    if (!this.admissionScratch || this.admissionScratch.length < count) {
+      this.admissionScratch = new Uint8Array(Math.max(count, 64));
+    }
+    const admission = this.admissionScratch;
+    const regionFlags = frame.regionFlags;
+    const required = ShadoVisibilityBits.Pvs |
+      ShadoVisibilityBits.Loaded |
+      ShadoVisibilityBits.Phase |
+      ShadoVisibilityBits.PortalReachable;
+    this.overflowEntities = 0;
+    for (let entity = 0; entity < count; entity += 1) {
+      const x = entities.positionX[entity]!;
+      const z = entities.positionZ[entity]!;
+      const r = radius[entity] ?? 0;
+      const membership = regionsForBounds(
+        grid,
+        x - r,
+        z - r,
+        x + r,
+        z + r,
+        this.membershipScratch
+      );
+      if (membership.overflow) {
+        /*
+         * An entity whose membership could not be fully enumerated is an
+         * always-candidate: it still faces the frustum, range, phase and
+         * enabled tests, and none of them can be skipped by not knowing
+         * which regions it is in.
+         */
+        this.overflowEntities += 1;
+        admission[entity] = required;
+        continue;
+      }
+      if (!membership.regions.length) {
+        admission[entity] = outsideVisible ? required : 0;
+        continue;
+      }
+      let granted = 0;
+      for (const region of membership.regions) {
+        const flags = regionFlags[region] ?? 0;
+        if ((flags & required) === required) {
+          granted = flags & 0x73;
+          break;
+        }
+      }
+      admission[entity] = granted;
+    }
+    return admission.subarray(0, count);
   }
 
   /**
