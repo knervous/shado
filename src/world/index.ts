@@ -11,6 +11,7 @@ export * from './authoring';
 export * from './compiler';
 export * from './collision';
 export * from './occlusion';
+export * from './occluder-scene';
 export * from './visibility';
 export * from './lighting';
 export * from './point-lights';
