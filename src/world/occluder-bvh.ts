@@ -382,6 +382,57 @@ export function bvhHighestSurfaceAt(
   return best;
 }
 
+/**
+ * Every surface under a column, highest first.
+ *
+ * `bvhHighestSurfaceAt` answers where the roof is, which indoors is the
+ * ceiling. A camera volume needs every floor a player can stand on: the
+ * street under an arcade, the room under a roof, both decks of a bridge, each
+ * storey of a crypt. Heights within `merge` of each other are one surface, so
+ * a floor built from many triangles is not reported many times.
+ */
+export function bvhColumnSurfaces(
+  bvh: OccluderBvh,
+  x: number,
+  z: number,
+  limit = 8,
+  merge = 0.5
+): number[] {
+  bvh.counters.columnQueries += 1;
+  const heights: number[] = [];
+  const stack = COLUMN_STACK;
+  let depth = 0;
+  stack[depth++] = 0;
+  while (depth > 0) {
+    const node = stack[--depth]!;
+    bvh.counters.nodeVisits += 1;
+    const base = node * 6;
+    if (x < bvh.nodeBounds[base]! || x > bvh.nodeBounds[base + 3]!) continue;
+    if (z < bvh.nodeBounds[base + 2]! || z > bvh.nodeBounds[base + 5]!) continue;
+    const count = bvh.nodeMeta[node * 3 + 1]!;
+    if (count === 0) {
+      if (depth + 2 >= stack.length) break;
+      stack[depth++] = node + 1;
+      stack[depth++] = bvh.nodeMeta[node * 3 + 2]!;
+      continue;
+    }
+    const first = bvh.nodeMeta[node * 3]!;
+    for (let index = first; index < first + count; index += 1) {
+      bvh.counters.triangleTests += 1;
+      const height = columnHeight(bvh.triangles, index * 9, x, z);
+      if (height !== null) heights.push(height);
+    }
+  }
+  if (!heights.length) return heights;
+  heights.sort((left, right) => right - left);
+  const surfaces: number[] = [heights[0]!];
+  for (const height of heights) {
+    if (surfaces.length >= limit) break;
+    if (surfaces[surfaces.length - 1]! - height > merge) surfaces.push(height);
+  }
+  return surfaces;
+}
+
 const SEGMENT_STACK = new Int32Array(256);
 const COLUMN_STACK = new Int32Array(256);
 

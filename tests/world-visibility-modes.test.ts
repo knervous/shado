@@ -1,5 +1,9 @@
 import {
   ShadoWorldVisibilityCoordinator,
+  buildOccluderBvh,
+  buildOccluderGrid,
+  bvhColumnSurfaces,
+  columnSurfaces,
   compileShadoWorld,
   compileShadoWorldVisibility,
   validateShadoWorldPackage,
@@ -359,5 +363,79 @@ describe('bounded bakes', () => {
     expect(work.indexEntries).toBeLessThan(reports[0]!.occluderTriangles);
     expect(stages.totalMs).toBeGreaterThanOrEqual(stages.pairLoopMs);
     expect(stages.occluderGridMs).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('vertical separation', () => {
+  /** A closed room with a roof, and open ground running away from it. */
+  function roomAndGround(length: number, depth: number, roomEnd: number) {
+    const positions: number[] = [];
+    const indices: number[] = [];
+    const quad = (corners: number[]) => {
+      const v = positions.length / 3;
+      positions.push(...corners);
+      indices.push(v, v + 1, v + 2, v, v + 2, v + 3);
+    };
+    for (let x = 0; x < length; x += 8) {
+      quad([x, 0, 0, x + 8, 0, 0, x + 8, 0, depth, x, 0, depth]);
+      // A roof over the first stretch only.
+      if (x < roomEnd) quad([x, 20, 0, x + 8, 20, 0, x + 8, 20, depth, x, 20, depth]);
+    }
+    // The room's far wall, closing it off from the rest of the strip.
+    quad([roomEnd, 0, 0, roomEnd, 0, depth, roomEnd, 20, depth, roomEnd, 20, 0]);
+    quad([roomEnd + 1, 0, 0, roomEnd + 1, 20, 0, roomEnd + 1, 20, depth, roomEnd + 1, 0, depth]);
+    return {
+      name: 'room',
+      material: 'stone',
+      positions: new Float32Array(positions),
+      indices: new Uint32Array(indices),
+    };
+  }
+
+  it('samples the floor under a roof as well as the roof itself', () => {
+    const scene = roomAndGround(160, 16, 48);
+    const grid = buildOccluderGrid([scene], { min: [0, 0, 0], max: [160, 20, 16] }, 32);
+    const bvh = buildOccluderBvh([scene]);
+    for (const surfaces of [
+      columnSurfaces(grid, 24, 8, { min: [0, 0, 0], max: [160, 20, 16] }),
+      bvhColumnSurfaces(bvh, 24, 8),
+    ]) {
+      // Roof and floor, both found; the old highest-surface query saw only the roof.
+      expect(surfaces).toHaveLength(2);
+      expect(surfaces[0]).toBeCloseTo(20, 5);
+      expect(surfaces[1]).toBeCloseTo(0, 5);
+    }
+  });
+
+  it('cannot hide a room from its own rooftop, because the region is both', () => {
+    /*
+     * This is the shape of the interior problem, and it is not eye placement.
+     * A source region is a 2D column spanning every height, so it contains the
+     * room AND the roof above it. The row has to hold for a camera anywhere in
+     * the region, including the one standing on the roof with a clear view --
+     * so the pair stays visible however well the roof hides the room from
+     * inside. Recovering interior occlusion needs vertically separated source
+     * volumes, not better sampling: adding the interior eye can only ever find
+     * MORE ways to see, never fewer.
+     */
+    const scene = roomAndGround(160, 16, 48);
+    const centers: [number, number][] = [];
+    for (let x = 8; x < 160; x += 16) centers.push([x, 8]);
+    const visibility = compileShadoWorldVisibility({
+      mode: 'sampled-occlusion',
+      bounds: { min: [0, 0, 0], max: [160, 20, 16] },
+      regionSize: 16,
+      maxDistance: 1024,
+      renderCellCenters: centers,
+      persistentRenderCells: new Uint8Array(centers.length),
+      collisionPrimitives: [scene],
+    });
+    const bit = (from: number, to: number) =>
+      ((visibility.pvs.words[from * visibility.pvs.wordsPerRow + (to >>> 5)]! >>> 0) &
+        (1 << (to & 31))) !== 0;
+    // Region 0 is inside the room; region 9 is far down the open strip. From
+    // the room's floor the wall and roof block it; from the room's roof they
+    // do not, and the roof is in the same region.
+    expect(bit(0, 9)).toBe(true);
   });
 });

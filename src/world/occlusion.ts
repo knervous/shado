@@ -289,6 +289,60 @@ function hitsAny(
 }
 
 /**
+ * Every surface under a column, highest first.
+ *
+ * The grid's counterpart to the hierarchy's. Both exist so the two indexes
+ * answer the same questions and stay differentially testable.
+ */
+export function columnSurfaces(
+  grid: OccluderGrid,
+  x: number,
+  z: number,
+  bounds: ShadoWorldBounds,
+  limit = 8,
+  merge = 0.5
+): number[] {
+  const heights: number[] = [];
+  const cx = clampIndex((x - grid.originX) / grid.size, grid.countX);
+  const cz = clampIndex((z - grid.originZ) / grid.size, grid.countZ);
+  for (let cy = grid.countY - 1; cy >= 0; cy -= 1) {
+    const list = grid.buckets.get(bucketKey(grid, cx, cy, cz));
+    if (!list) continue;
+    for (const triangle of list) {
+      const height = columnHeightAt(grid.triangles, triangle * 9, x, z);
+      if (height !== null && height >= bounds.min[1] - grid.size) heights.push(height);
+    }
+  }
+  if (!heights.length) return heights;
+  heights.sort((left, right) => right - left);
+  const surfaces: number[] = [heights[0]!];
+  for (const height of heights) {
+    if (surfaces.length >= limit) break;
+    if (surfaces[surfaces.length - 1]! - height > merge) surfaces.push(height);
+  }
+  return surfaces;
+}
+
+/** Height where a downward line through (x, z) meets this triangle, or null. */
+function columnHeightAt(
+  triangles: Float64Array,
+  offset: number,
+  x: number,
+  z: number
+): number | null {
+  const ax = triangles[offset]!, ay = triangles[offset + 1]!, az = triangles[offset + 2]!;
+  const bx = triangles[offset + 3]!, by = triangles[offset + 4]!, bz = triangles[offset + 5]!;
+  const cx = triangles[offset + 6]!, cy = triangles[offset + 7]!, cz = triangles[offset + 8]!;
+  const area = (bz - cz) * (ax - cx) + (cx - bx) * (az - cz);
+  if (Math.abs(area) < 1e-12) return null;
+  const w0 = ((bz - cz) * (x - cx) + (cx - bx) * (z - cz)) / area;
+  const w1 = ((cz - az) * (x - cx) + (ax - cx) * (z - cz)) / area;
+  const w2 = 1 - w0 - w1;
+  if (w0 < 0 || w1 < 0 || w2 < 0) return null;
+  return w0 * ay + w1 * by + w2 * cy;
+}
+
+/**
  * Highest occluder surface under a column, or null where there is none.
  *
  * Used to put sample viewpoints at plausible eye heights rather than at an

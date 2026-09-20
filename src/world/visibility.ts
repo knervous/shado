@@ -1,5 +1,5 @@
-import { buildOccluderGrid, highestSurfaceAt, segmentBlocked } from './occlusion';
-import { buildOccluderBvh, bvhHighestSurfaceAt, bvhSegmentBlocked } from './occluder-bvh';
+import { buildOccluderGrid, columnSurfaces, highestSurfaceAt, segmentBlocked } from './occlusion';
+import { buildOccluderBvh, bvhColumnSurfaces, bvhHighestSurfaceAt, bvhSegmentBlocked } from './occluder-bvh';
 import type { OccluderBuildLimits, OccluderBvh } from './occluder-bvh';
 import type { OccluderGrid } from './occlusion';
 import type {
@@ -33,6 +33,8 @@ type Occluders = {
     bx: number, by: number, bz: number
   ) => boolean;
   readonly floorAt: (x: number, z: number) => number | null;
+  /** Every surface under a column, highest first. */
+  readonly floorsAt: (x: number, z: number) => number[];
   readonly counters: {
     segmentQueries: number;
     blockedQueries: number;
@@ -57,6 +59,7 @@ function buildOccluders(
       triangleCount: grid.triangleCount,
       blocked: (ax, ay, az, bx, by, bz) => segmentBlocked(grid, ax, ay, az, bx, by, bz),
       floorAt: (x, z) => highestSurfaceAt(grid, x, z, bounds),
+      floorsAt: (x, z) => columnSurfaces(grid, x, z, bounds),
       counters: grid.counters,
       nodeVisits: () => grid.counters.cellVisits,
       references: grid.bucketReferences,
@@ -69,6 +72,7 @@ function buildOccluders(
     triangleCount: bvh.triangleCount,
     blocked: (ax, ay, az, bx, by, bz) => bvhSegmentBlocked(bvh, ax, ay, az, bx, by, bz),
     floorAt: (x, z) => bvhHighestSurfaceAt(bvh, x, z),
+    floorsAt: (x, z) => bvhColumnSurfaces(bvh, x, z),
     counters: bvh.counters,
     nodeVisits: () => bvh.counters.nodeVisits,
     references: bvh.nodeCount,
@@ -108,6 +112,18 @@ const CAMERA_ROW_MARGIN = 1;
  * coincident wall would make them ambiguous.
  */
 const EYE_HEIGHTS = [8] as const;
+/**
+ * How much clear space a floor needs above it to be somewhere a camera can be.
+ *
+ * Every surface under a column is a candidate floor, which is what makes the
+ * street under an arcade, the room under a roof and each storey of a crypt
+ * into camera volumes instead of one rooftop. A surface with a ceiling right
+ * on top of it is not a floor, it is the underside of something, and standing
+ * a viewer in the gap would sample a place no player reaches.
+ */
+const MIN_FLOOR_CLEARANCE = 6;
+/** Ceiling on floors sampled per column; deep stacks cost queries linearly. */
+const MAX_FLOORS_PER_COLUMN = 4;
 /** Used only when the caller supplies no cell bounds to sample instead. */
 const TARGET_HEIGHTS = [2, 40, 120, 240] as const;
 /**
@@ -382,9 +398,23 @@ export function compileShadoWorldVisibility(
     const high = regionHigh[region]!;
     const known = Number.isFinite(low) && Number.isFinite(high);
     for (const [x, z] of footprint(region)) {
-      const floor = ground!.floorAt(x, z);
+      /*
+       * Every floor, not the roof. `floorsAt` comes back highest first, and a
+       * surface counts as a floor only when the next surface above it leaves
+       * room to stand: the underside of a stair is a surface and not a place.
+       */
+      const surfaces = ground!.floorsAt(x, z);
+      const floors: number[] = [];
+      for (let index = 0; index < surfaces.length && floors.length < MAX_FLOORS_PER_COLUMN; index += 1) {
+        const height = surfaces[index]!;
+        const above = index === 0 ? Number.POSITIVE_INFINITY : surfaces[index - 1]!;
+        if (above - height >= MIN_FLOOR_CLEARANCE) floors.push(height);
+      }
+      const floor = floors.length ? floors[0]! : null;
       if (floor === null) continue;
-      for (const eye of EYE_HEIGHTS) eyePoints.push(x, floor + eye, z);
+      for (const level of floors) {
+        for (const eye of EYE_HEIGHTS) eyePoints.push(x, level + eye, z);
+      }
       if (known) {
         // Bottom, middle and top of what is there, plus headroom for a stamp
         // standing in the same region that this compiler cannot see.
