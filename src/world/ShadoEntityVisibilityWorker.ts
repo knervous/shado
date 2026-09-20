@@ -177,8 +177,16 @@ export type ShadoEntityVisibilityDelta = {
   generations: Uint32Array;
   /** x, y, z, radius per slot, in slot order. */
   transforms: Float32Array;
-  /** enabled in bit 0, the phase mask in the upper bits, per slot. */
+  /**
+   * The phase mask per slot, untouched.
+   *
+   * Deliberately not packed with `enabled`: bit 0 of a phase mask is a real
+   * phase, and borrowing it to carry a boolean made an entity in phase 2
+   * answer to a request for phase 1.
+   */
   policy: Uint32Array;
+  /** Whether each slot is enabled, in its own byte. */
+  enabled: Uint8Array;
   /** Entity count at drain time; the worker resizes to it. */
   count: number;
 };
@@ -283,6 +291,7 @@ export class ShadoEntityVisibilityProjection {
     const generations = new Uint32Array(slots.length);
     const transforms = new Float32Array(slots.length * 4);
     const policy = new Uint32Array(slots.length);
+    const enabled = new Uint8Array(slots.length);
     for (let index = 0; index < slots.length; index += 1) {
       const slot = slots[index]!;
       generations[index] = this.slotGeneration[slot]!;
@@ -290,11 +299,12 @@ export class ShadoEntityVisibilityProjection {
       transforms[index * 4 + 1] = this.positionY[slot]!;
       transforms[index * 4 + 2] = this.positionZ[slot]!;
       transforms[index * 4 + 3] = this.radius[slot]!;
-      policy[index] = ((this.phaseMask[slot]! >>> 0) & 0xfffffffe) | (this.enabled[slot] ? 1 : 0);
+      policy[index] = this.phaseMask[slot]! >>> 0;
+      enabled[index] = this.enabled[slot]!;
     }
     this.dirty.clear();
     this.dirtyAll = false;
-    return { slots, generations, transforms, policy, count };
+    return { slots, generations, transforms, policy, enabled, count };
   }
 
   /** One-time/bulk synchronization. Prefer setEntity for normal moving updates. */
@@ -677,6 +687,7 @@ export class ShadoEntityVisibilityWorker {
       request.delta.generations.buffer as ArrayBuffer,
       request.delta.transforms.buffer as ArrayBuffer,
       request.delta.policy.buffer as ArrayBuffer,
+      request.delta.enabled.buffer as ArrayBuffer,
     ]);
   }
 
@@ -747,6 +758,7 @@ function mergeDeltas(
   const generations = new Uint32Array(slots.length);
   const transforms = new Float32Array(slots.length * 4);
   const policy = new Uint32Array(slots.length);
+  const enabled = new Uint8Array(slots.length);
   for (let index = 0; index < slots.length; index += 1) {
     const slot = slots[index]!;
     const from = newerIndex.has(slot) ? newer : older;
@@ -754,12 +766,14 @@ function mergeDeltas(
     generations[index] = from.generations[at]!;
     transforms.set(from.transforms.subarray(at * 4, at * 4 + 4), index * 4);
     policy[index] = from.policy[at]!;
+    enabled[index] = from.enabled[at]!;
   }
   return {
     slots: Uint32Array.from(slots),
     generations,
     transforms,
     policy,
+    enabled,
     count: newer.count,
   };
 }
@@ -924,7 +938,8 @@ async function createState(message) {
     gridMinZ: minZ,
     tileLookup,
     tileLookupPtr: dense ? 0 : alloc(tileLookup),
-    descriptorPtr: wasm.alloc(88) >>> 0,
+    // 92: the entity descriptor grew when per-candidate admission was added.
+    descriptorPtr: wasm.alloc(92) >>> 0,
     planesPtr: wasm.alloc(24 * 4) >>> 0,
     cellFlagsPtr: wasm.alloc(Math.max(1, cellCount)) >>> 0,
     capacity: 0,
@@ -934,11 +949,19 @@ async function createState(message) {
     radiusPtr: 0,
     outputPtr: 0,
     flagsPtr: 0,
+    admissionPtr: 0,
     hierarchyRevision: -1,
     hierarchyCount: -1,
     cellOffsets: new Uint32Array(cellCount + 2),
     binMembers: new Uint32Array(layout.capacity),
     candidateIds: new Uint32Array(layout.capacity),
+    /*
+     * Query-generation stamps, so an entity listed in several admitted
+     * buckets is taken once. A Set per query would allocate per frame and a
+     * duplicate would draw the entity twice.
+     */
+    seenStamp: new Uint32Array(layout.capacity),
+    queryGeneration: 0,
   };
 }
 
@@ -953,6 +976,67 @@ function ensureCapacity(count) {
   state.radiusPtr = state.wasm.alloc(capacity * 4) >>> 0;
   state.outputPtr = state.wasm.alloc(capacity * 4) >>> 0;
   state.flagsPtr = state.wasm.alloc(capacity) >>> 0;
+  state.admissionPtr = state.wasm.alloc(capacity) >>> 0;
+}
+
+/**
+ * Topology admission per candidate, decided over the entity's whole bound.
+ *
+ * The same rule the synchronous path applies: a candidate is admitted when
+ * ANY region its XZ bound touches passes every required bit on its own, and
+ * bits are never combined across regions. Without this the kernel would fall
+ * back to the single region the entity's centre sits in, which is not
+ * conservative for anything wider than a region.
+ */
+function computeAdmission(candidateCount, message) {
+  const admission = new Uint8Array(state.wasm.memory.buffer, state.admissionPtr, candidateCount);
+  const size = state.tiles.size;
+  const required = 0x71;
+  if (!(size > 0) || !state.cellCount) {
+    admission.fill(message.outsideWorldVisible ? required : 0);
+    return;
+  }
+  const width = state.gridWidth;
+  const height = state.gridHeight;
+  const epsilon = 1e-4;
+  for (let local = 0; local < candidateCount; local++) {
+    const entity = state.candidateIds[local];
+    const x = state.positions[0][entity];
+    const z = state.positions[2][entity];
+    const radius = state.radius[entity] * message.radiusScale;
+    const firstX = Math.floor((x - radius - epsilon - state.tiles.originX) / size);
+    const lastX = Math.floor((x + radius + epsilon - state.tiles.originX) / size);
+    const firstZ = Math.floor((z - radius - epsilon - state.tiles.originZ) / size);
+    const lastZ = Math.floor((z + radius + epsilon - state.tiles.originZ) / size);
+    const clampedFirstX = Math.max(0, firstX - state.gridMinX);
+    const clampedLastX = Math.min(width - 1, lastX - state.gridMinX);
+    const clampedFirstZ = Math.max(0, firstZ - state.gridMinZ);
+    const clampedLastZ = Math.min(height - 1, lastZ - state.gridMinZ);
+    if (clampedFirstX > clampedLastX || clampedFirstZ > clampedLastZ) {
+      // Wholly outside the grid: there is no row out there to consult.
+      admission[local] = message.outsideWorldVisible ? required : 0;
+      continue;
+    }
+    const span = (clampedLastX - clampedFirstX + 1) * (clampedLastZ - clampedFirstZ + 1);
+    if (span > 64) {
+      // Too many regions to enumerate: a conservative candidate, which still
+      // faces the frustum, range, phase and enabled tests.
+      admission[local] = required;
+      continue;
+    }
+    let granted = 0;
+    for (let cz = clampedFirstZ; cz <= clampedLastZ && !granted; cz++) {
+      for (let cx = clampedFirstX; cx <= clampedLastX; cx++) {
+        const cell = state.tileLookupPtr === 0 ? cz * width + cx : -1;
+        const flags = cell >= 0 && cell < state.cellCount ? message.cellFlags[cell] : 0;
+        if ((flags & required) === required) {
+          granted = flags & 0x73;
+          break;
+        }
+      }
+    }
+    admission[local] = granted;
+  }
 }
 
 function locateCell(x, z) {
@@ -969,23 +1053,74 @@ function locateCell(x, z) {
   return state.dense ? denseCell : state.tileLookup[denseCell];
 }
 
+/**
+ * Visits every region an entity's bound touches, or the outside bucket.
+ *
+ * Binning by the entity's CENTRE is what let a building whose origin sits in
+ * a rejected region vanish while its body reached into an admitted one: it
+ * was never even a candidate, so no later test could save it.
+ */
+function forEachMembership(entity, outsideBucket, visit) {
+  const size = state.tiles.size;
+  if (!(size > 0) || !state.cellCount) {
+    visit(outsideBucket);
+    return;
+  }
+  const x = state.positions[0][entity];
+  const z = state.positions[2][entity];
+  const radius = state.radius[entity];
+  const epsilon = 1e-4;
+  const firstX = Math.floor((x - radius - epsilon - state.tiles.originX) / size) - state.gridMinX;
+  const lastX = Math.floor((x + radius + epsilon - state.tiles.originX) / size) - state.gridMinX;
+  const firstZ = Math.floor((z - radius - epsilon - state.tiles.originZ) / size) - state.gridMinZ;
+  const lastZ = Math.floor((z + radius + epsilon - state.tiles.originZ) / size) - state.gridMinZ;
+  const clampedFirstX = Math.max(0, firstX);
+  const clampedLastX = Math.min(state.gridWidth - 1, lastX);
+  const clampedFirstZ = Math.max(0, firstZ);
+  const clampedLastZ = Math.min(state.gridHeight - 1, lastZ);
+  if (clampedFirstX > clampedLastX || clampedFirstZ > clampedLastZ) {
+    visit(outsideBucket);
+    return;
+  }
+  const span = (clampedLastX - clampedFirstX + 1) * (clampedLastZ - clampedFirstZ + 1);
+  if (span > 64) {
+    // Too many to enumerate: an always-candidate rather than a dropped entity.
+    visit(outsideBucket);
+    return;
+  }
+  for (let cz = clampedFirstZ; cz <= clampedLastZ; cz++) {
+    for (let cx = clampedFirstX; cx <= clampedLastX; cx++) {
+      const dense = cz * state.gridWidth + cx;
+      const cell = state.tileLookupPtr === 0 ? dense : -1;
+      if (cell >= 0 && cell < state.cellCount) visit(cell);
+      else visit(outsideBucket);
+    }
+  }
+}
+
 function rebuildHierarchy(count, revision) {
   const bucketCount = state.cellCount + 1;
   const outsideBucket = bucketCount - 1;
   const counts = new Uint32Array(bucketCount);
+  let total = 0;
   for (let entity = 0; entity < count; entity++) {
-    const cell = locateCell(state.positions[0][entity], state.positions[2][entity]);
-    counts[cell < 0 ? outsideBucket : cell]++;
+    forEachMembership(entity, outsideBucket, bucket => {
+      counts[bucket]++;
+      total++;
+    });
   }
+  // An entity now sits in every bucket it touches, so the member list is
+  // longer than the population rather than equal to it.
+  if (state.binMembers.length < total) state.binMembers = new Uint32Array(total);
   state.cellOffsets[0] = 0;
   for (let bucket = 0; bucket < bucketCount; bucket++) {
     state.cellOffsets[bucket + 1] = state.cellOffsets[bucket] + counts[bucket];
   }
   const cursors = state.cellOffsets.slice(0, bucketCount);
   for (let entity = 0; entity < count; entity++) {
-    const cell = locateCell(state.positions[0][entity], state.positions[2][entity]);
-    const bucket = cell < 0 ? outsideBucket : cell;
-    state.binMembers[cursors[bucket]++] = entity;
+    forEachMembership(entity, outsideBucket, bucket => {
+      state.binMembers[cursors[bucket]++] = entity;
+    });
   }
   state.hierarchyRevision = revision;
   state.hierarchyCount = count;
@@ -1000,19 +1135,32 @@ function prepareCandidateIds(count, message) {
   }
   let candidateCount = 0;
   const requiredCellBits = 0x71;
+  /*
+   * One entity can be listed in several admitted buckets, so each is taken
+   * once. The stamp is bumped per query instead of clearing an array, and
+   * wraps back to a cleared array rather than colliding.
+   */
+  state.queryGeneration = (state.queryGeneration + 1) >>> 0;
+  if (state.queryGeneration === 0) {
+    state.seenStamp.fill(0);
+    state.queryGeneration = 1;
+  }
+  const stamp = state.queryGeneration;
+  const take = (start, end) => {
+    for (let index = start; index < end; index++) {
+      const entity = state.binMembers[index];
+      if (state.seenStamp[entity] === stamp) continue;
+      state.seenStamp[entity] = stamp;
+      state.candidateIds[candidateCount++] = entity;
+    }
+  };
   for (let cell = 0; cell < state.cellCount; cell++) {
     if ((message.cellFlags[cell] & requiredCellBits) !== requiredCellBits) continue;
-    const start = state.cellOffsets[cell];
-    const end = state.cellOffsets[cell + 1];
-    state.candidateIds.set(state.binMembers.subarray(start, end), candidateCount);
-    candidateCount += end - start;
+    take(state.cellOffsets[cell], state.cellOffsets[cell + 1]);
   }
   if (message.outsideWorldVisible) {
     const outsideBucket = state.cellCount;
-    const start = state.cellOffsets[outsideBucket];
-    const end = state.cellOffsets[outsideBucket + 1];
-    state.candidateIds.set(state.binMembers.subarray(start, end), candidateCount);
-    candidateCount += end - start;
+    take(state.cellOffsets[outsideBucket], state.cellOffsets[outsideBucket + 1]);
   }
   return candidateCount;
 }
@@ -1034,7 +1182,7 @@ function applyDelta(delta) {
     state.positions[1][slot] = delta.transforms[index * 4 + 1];
     state.positions[2][slot] = delta.transforms[index * 4 + 2];
     state.radius[slot] = delta.transforms[index * 4 + 3];
-    state.enabled[slot] = delta.policy[index] & 1;
+    state.enabled[slot] = delta.enabled[index];
     state.phaseMask[slot] = delta.policy[index] >>> 0;
     state.slotGeneration[slot] = delta.generations[index];
     membershipChanged = true;
@@ -1073,7 +1221,8 @@ function reduce(message) {
   }
   new Float32Array(memory, state.planesPtr, 24).set(message.planes);
   new Uint8Array(memory, state.cellFlagsPtr, state.cellCount).set(message.cellFlags);
-  const descriptor = new DataView(memory, state.descriptorPtr, 88);
+  computeAdmission(candidateCount, message);
+  const descriptor = new DataView(memory, state.descriptorPtr, 92);
   [
     candidateCount, state.xPtr, state.yPtr, state.zPtr, state.radiusPtr, state.planesPtr,
     state.cellFlagsPtr, state.tileLookupPtr,
@@ -1090,6 +1239,7 @@ function reduce(message) {
   descriptor.setInt32(76, message.outsideWorldVisible ? 1 : 0, true);
   descriptor.setUint32(80, state.outputPtr, true);
   descriptor.setUint32(84, state.flagsPtr, true);
+  descriptor.setUint32(88, state.admissionPtr, true);
   const wasmVisibleCount = state.wasm.reduceEntityVisibility(state.descriptorPtr);
   if (wasmVisibleCount < 0 || wasmVisibleCount > candidateCount) {
     throw new Error('WASM visibility reducer returned invalid count ' + wasmVisibleCount);

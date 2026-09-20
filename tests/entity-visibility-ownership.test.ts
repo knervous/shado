@@ -24,6 +24,7 @@ type Delta = {
   generations: Uint32Array;
   transforms: Float32Array;
   policy: Uint32Array;
+  enabled: Uint8Array;
   count: number;
 };
 
@@ -69,7 +70,7 @@ class OwningFakeWorker {
     for (let index = 0; index < delta.slots.length; index += 1) {
       const slot = delta.slots[index]!;
       this.x[slot] = delta.transforms[index * 4]!;
-      this.enabled[slot] = delta.policy[index]! & 1;
+      this.enabled[slot] = delta.enabled[index]!;
       this.generation[slot] = delta.generations[index]!;
     }
     this.pending.push({ generation: value.generation! });
