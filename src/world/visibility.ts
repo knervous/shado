@@ -4,6 +4,7 @@ import type {
   ShadoWorldPrimitive,
   ShadoWorldSpatialPackage,
   ShadoWorldVisibilityBakeReport,
+  ShadoWorldVisibilityBudget,
   ShadoWorldVisibilityMode,
 } from './types';
 
@@ -65,6 +66,8 @@ export type ShadoWorldVisibilityCompileInput = {
    * covered by it. Do not enable it for a promotion that ships.
    */
   mode?: ShadoWorldVisibilityMode;
+  /** Bounds enforced while the bake runs; exhaustion admits the rest. */
+  budget?: ShadoWorldVisibilityBudget;
   bounds: ShadoWorldBounds;
   regionSize: number;
   maxDistance: number;
@@ -151,9 +154,13 @@ export function compileShadoWorldVisibility(
    * advertise a test that never ran (and fail validation, which requires a
    * nonzero occluder count for that mode).
    */
+  const clock = () => (typeof performance === 'undefined' ? Date.now() : performance.now());
+  const bakeStarted = clock();
+  const gridStarted = clock();
   const grid = requestedMode === 'sampled-occlusion'
     ? buildOccluderGrid(input.collisionPrimitives, input.bounds, OCCLUDER_CELL_SIZE)
     : null;
+  const occluderGridMs = clock() - gridStarted;
   const sampled = grid !== null && grid.triangleCount > 0;
   const mode: ShadoWorldVisibilityMode = sampled ? 'sampled-occlusion' : 'distance-flood';
   const eyes: (Float64Array | null)[] = new Array(regionCount).fill(null);
@@ -183,6 +190,8 @@ export function compileShadoWorldVisibility(
     });
   }
 
+  const samplingStarted = clock();
+  let regionsWithoutFloor = 0;
   for (let region = 0; sampled && region < regionCount; region++) {
     const eyePoints: number[] = [];
     const targetPoints: number[] = [];
@@ -206,12 +215,22 @@ export function compileShadoWorldVisibility(
       }
     }
     if (eyePoints.length) eyes[region] = Float64Array.from(eyePoints);
+    else regionsWithoutFloor += 1;
     if (targetPoints.length) targets[region] = Float64Array.from(targetPoints);
   }
+  const regionSamplingMs = clock() - samplingStarted;
 
   let occlusionTested = 0;
   let occluded = 0;
   let forcedLocalPairs = 0;
+  const pairLoopStarted = clock();
+  const budget = input.budget;
+  const deadline = budget?.maxSeconds === undefined
+    ? Number.POSITIVE_INFINITY
+    : pairLoopStarted + budget.maxSeconds * 1000;
+  const maxSegmentQueries = budget?.maxSegmentQueries ?? Number.POSITIVE_INFINITY;
+  let stop: ShadoWorldVisibilityBakeReport['limit']['stop'] = 'none';
+  let pairsAdmittedAfterStop = 0;
   const geometry = { originX, originZ, size, width, height, maxDistance };
   for (let from = 0; from < regionCount; from++) {
     for (let to = from; to < regionCount; to++) {
@@ -221,24 +240,39 @@ export function compileShadoWorldVisibility(
         forcedLocalPairs++;
       } else if (sampled) {
         /*
-         * Symmetric by construction: the pair is tested once and set both
-         * ways. Seeing is mutual for a straight segment, and testing each
-         * direction separately would let sampling noise produce a row that
-         * disagrees with its own transpose -- which shows up as a region that
-         * pops in from one approach and not the other.
+         * The budget is checked before the work, not after it: a budget that
+         * reports a breach once the run is over has protected nothing. Once
+         * stopped, every remaining pair is ADMITTED untested, so a truncated
+         * bake is a worse PVS and never an unsafe one.
          */
-        const source = eyes[from];
-        const target = targets[to];
-        const back = eyes[to];
-        const forward = targets[from];
-        if (source && target && back && forward) {
-          occlusionTested++;
-          if (
-            !anyClearSegment(grid!, source, target) &&
-            !anyClearSegment(grid!, back, forward)
-          ) {
-            occluded++;
-            continue;
+        if (stop === 'none') {
+          if (budget?.signal?.aborted) stop = 'cancelled';
+          else if (grid!.counters.segmentQueries >= maxSegmentQueries) stop = 'segment-queries';
+          else if (clock() > deadline) stop = 'seconds';
+        }
+        if (stop !== 'none') {
+          pairsAdmittedAfterStop++;
+        } else {
+          /*
+           * Symmetric by construction: the pair is tested once and set both
+           * ways. Seeing is mutual for a straight segment, and testing each
+           * direction separately would let sampling noise produce a row that
+           * disagrees with its own transpose -- which shows up as a region
+           * that pops in from one approach and not the other.
+           */
+          const source = eyes[from];
+          const target = targets[to];
+          const back = eyes[to];
+          const forward = targets[from];
+          if (source && target && back && forward) {
+            occlusionTested++;
+            if (
+              !anyClearSegment(grid!, source, target) &&
+              !anyClearSegment(grid!, back, forward)
+            ) {
+              occluded++;
+              continue;
+            }
           }
         }
       }
@@ -246,7 +280,9 @@ export function compileShadoWorldVisibility(
       if (from !== to) setVisible(to, from);
     }
   }
+  const pairLoopMs = clock() - pairLoopStarted;
   const rawPairs = visibleRegionPairs;
+  const rowFloodStarted = clock();
   const floodedWords = floodCameraRows(
     words,
     wordsPerRow,
@@ -255,6 +291,7 @@ export function compileShadoWorldVisibility(
     CAMERA_ROW_MARGIN
   );
   visibleRegionPairs = countVisibleBits(floodedWords);
+  const rowFloodMs = clock() - rowFloodStarted;
   if (input.report) {
     input.report({
       requestedMode,
@@ -269,6 +306,23 @@ export function compileShadoWorldVisibility(
       occluded,
       pairsBeforeRowFlood: rawPairs,
       pairsAfterRowFlood: visibleRegionPairs,
+      stages: {
+        occluderGridMs,
+        regionSamplingMs,
+        pairLoopMs,
+        rowFloodMs,
+        totalMs: clock() - bakeStarted,
+      },
+      work: {
+        segmentQueries: grid?.counters.segmentQueries ?? 0,
+        blockedQueries: grid?.counters.blockedQueries ?? 0,
+        columnQueries: grid?.counters.columnQueries ?? 0,
+        cellVisits: grid?.counters.cellVisits ?? 0,
+        triangleTests: grid?.counters.triangleTests ?? 0,
+        bucketReferences: grid?.bucketReferences ?? 0,
+        regionsWithoutFloor,
+      },
+      limit: { stop, pairsAdmittedAfterStop },
     });
   }
   return {

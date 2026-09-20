@@ -131,6 +131,54 @@ export type ShadoWorldVisibilityBakeReport = {
   occluded: number;
   pairsBeforeRowFlood: number;
   pairsAfterRowFlood: number;
+  /**
+   * Milliseconds per stage of the bake itself. These do not include loading or
+   * decoding the package, weighting the result, validating it or writing it:
+   * a caller that wants an end-to-end figure has to time the end and the other
+   * end itself.
+   */
+  stages: {
+    occluderGridMs: number;
+    regionSamplingMs: number;
+    pairLoopMs: number;
+    rowFloodMs: number;
+    totalMs: number;
+  };
+  /** Query work, counted in the hot path rather than inferred from wall time. */
+  work: {
+    segmentQueries: number;
+    blockedQueries: number;
+    columnQueries: number;
+    cellVisits: number;
+    triangleTests: number;
+    /** Triangle references across grid buckets; over `occluderTriangles` by the duplication factor. */
+    bucketReferences: number;
+    /** Regions with no surface to stand on, which are sampled as unknown and admitted. */
+    regionsWithoutFloor: number;
+  };
+  /**
+   * How the bake stopped. Anything but `none` means the remaining pairs were
+   * ADMITTED without being tested -- a bounded bake gives up selectivity, never
+   * correctness, so a truncated run is publishable and merely worse.
+   */
+  limit: {
+    stop: 'none' | 'seconds' | 'segment-queries' | 'cancelled';
+    pairsAdmittedAfterStop: number;
+  };
+};
+
+/**
+ * Bounds on bake work, enforced while it runs.
+ *
+ * Checking a budget after the fact reports a number; it does not protect a
+ * machine. Reaching any of these stops occlusion testing and admits every
+ * remaining pair, which is the conservative direction.
+ */
+export type ShadoWorldVisibilityBudget = {
+  maxSeconds?: number;
+  maxSegmentQueries?: number;
+  /** Polled between pairs; an `AbortSignal` satisfies this shape. */
+  signal?: { readonly aborted: boolean };
 };
 
 /** Settings consumed by the headless world compiler unless a caller explicitly overrides them. */

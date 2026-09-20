@@ -4,7 +4,11 @@ import {
   compileShadoWorldVisibility,
   validateShadoWorldPackage,
 } from '../src/world';
-import type { ShadoWorldPrimitive, ShadoWorldVisibilityBakeReport } from '../src/world';
+import type {
+  ShadoWorldPrimitive,
+  ShadoWorldSpatialPackage,
+  ShadoWorldVisibilityBakeReport,
+} from '../src/world';
 
 /**
  * A strip of ground with one tall opaque wall standing across it.
@@ -180,5 +184,79 @@ describe('visibility modes', () => {
     // The reference is a superset: bypassing occlusion can only admit more.
     for (const cluster of bakedClusters) expect(referenceClusters.has(cluster)).toBe(true);
     expect(referenceClusters.size).toBeGreaterThan(bakedClusters.size);
+  });
+});
+
+describe('bounded bakes', () => {
+  /** The walled strip again, driven through the compiler directly. */
+  function bake(
+    budget: Parameters<typeof compileShadoWorldVisibility>[0]['budget'],
+    report: (value: ShadoWorldVisibilityBakeReport) => void
+  ) {
+    const strip = groundStrip(LENGTH, DEPTH, 8);
+    const blocker = wall(WALL_X, DEPTH, 200);
+    const centers: [number, number][] = [];
+    for (let x = REGION / 2; x < LENGTH; x += REGION) centers.push([x, DEPTH / 2]);
+    return compileShadoWorldVisibility({
+      mode: 'sampled-occlusion',
+      budget,
+      bounds: { min: [0, 0, 0], max: [LENGTH, 200, DEPTH] },
+      regionSize: REGION,
+      maxDistance: 1024,
+      renderCellCenters: centers,
+      persistentRenderCells: new Uint8Array(centers.length),
+      collisionPrimitives: [strip, blocker],
+      report,
+    });
+  }
+
+  it('admits everything it did not get to, and says how much that was', () => {
+    const full: ShadoWorldVisibilityBakeReport[] = [];
+    const stopped: ShadoWorldVisibilityBakeReport[] = [];
+    const complete = bake(undefined, (value) => full.push(value));
+    // One segment query is enough to start and not enough to finish.
+    const truncated = bake({ maxSegmentQueries: 1 }, (value) => stopped.push(value));
+
+    expect(full[0]!.limit).toEqual({ stop: 'none', pairsAdmittedAfterStop: 0 });
+    expect(stopped[0]!.limit.stop).toBe('segment-queries');
+    expect(stopped[0]!.limit.pairsAdmittedAfterStop).toBeGreaterThan(0);
+    expect(stopped[0]!.occluded).toBeLessThan(full[0]!.occluded);
+    // Giving up costs selectivity, never correctness: the truncated rows are a
+    // superset of the complete ones.
+    expect(truncated.visibleRegionPairs).toBeGreaterThan(complete.visibleRegionPairs);
+    for (let from = 0; from < truncated.width * truncated.height; from += 1) {
+      for (let to = 0; to < truncated.width * truncated.height; to += 1) {
+        const bit = (v: ShadoWorldSpatialPackage['visibility']) =>
+          ((v!.pvs.words[from * v!.pvs.wordsPerRow + (to >>> 5)]! >>> 0) & (1 << (to & 31))) !== 0;
+        if (bit(complete)) expect(bit(truncated)).toBe(true);
+      }
+    }
+  });
+
+  it('stops when cancelled, without producing a hidden row', () => {
+    const reports: ShadoWorldVisibilityBakeReport[] = [];
+    const visibility = bake({ signal: { aborted: true } }, (value) => reports.push(value));
+    expect(reports[0]!.limit.stop).toBe('cancelled');
+    expect(reports[0]!.occlusionTested).toBe(0);
+    expect(reports[0]!.occluded).toBe(0);
+    // Nothing was tested, so this is the flood's row count by another route.
+    const flood = bake(undefined, () => {});
+    expect(visibility.visibleRegionPairs).toBeGreaterThan(flood.visibleRegionPairs);
+  });
+
+  it('counts the query work it did, and the duplication its grid bought', () => {
+    const reports: ShadoWorldVisibilityBakeReport[] = [];
+    bake(undefined, (value) => reports.push(value));
+    const { work, stages } = reports[0]!;
+    expect(work.segmentQueries).toBeGreaterThan(0);
+    expect(work.blockedQueries).toBeGreaterThan(0);
+    expect(work.blockedQueries).toBeLessThanOrEqual(work.segmentQueries);
+    expect(work.columnQueries).toBeGreaterThan(0);
+    expect(work.cellVisits).toBeGreaterThanOrEqual(work.segmentQueries);
+    expect(work.triangleTests).toBeGreaterThan(0);
+    // A triangle spanning several cells is referenced by each of them.
+    expect(work.bucketReferences).toBeGreaterThanOrEqual(reports[0]!.occluderTriangles);
+    expect(stages.totalMs).toBeGreaterThanOrEqual(stages.pairLoopMs);
+    expect(stages.occluderGridMs).toBeGreaterThanOrEqual(0);
   });
 });

@@ -33,7 +33,35 @@ import type { ShadoWorldBounds, ShadoWorldPrimitive } from './types';
 /** Hits closer than this to either end are the endpoints' own surfaces. */
 const END_EPSILON = 1e-3;
 
+/**
+ * What the queries actually cost, counted rather than inferred.
+ *
+ * A bake time alone cannot say whether it was spent walking cells, testing
+ * triangles or re-testing the same triangle out of several buckets, and the
+ * three have different fixes. These are mutable on the grid so the hot path
+ * stays a plain increment and no signature carries a stats argument.
+ */
+export type OccluderGridCounters = {
+  /** Calls to {@link segmentBlocked}. */
+  segmentQueries: number;
+  /** Calls to {@link highestSurfaceAt}; these walk a column, not a segment. */
+  columnQueries: number;
+  /** Grid cells entered by a DDA walk, summed over all queries. */
+  cellVisits: number;
+  /** Möller-Trumbore evaluations, including the ones that miss. */
+  triangleTests: number;
+  /** Queries that returned true, i.e. found a blocker. */
+  blockedQueries: number;
+};
+
 export type OccluderGrid = {
+  /**
+   * Triangle references across all buckets. Larger than `triangleCount`
+   * because a triangle spanning several cells is referenced by each: the ratio
+   * is how much duplication this cell size is buying its early-outs with.
+   */
+  readonly bucketReferences: number;
+  readonly counters: OccluderGridCounters;
   readonly triangles: Float64Array;
   readonly triangleCount: number;
   readonly buckets: Map<number, number[]>;
@@ -80,7 +108,17 @@ export function buildOccluderGrid(
   const countY = Math.max(1, Math.ceil((bounds.max[1] - originY) / cellSize) + 1);
   const countZ = Math.max(1, Math.ceil((bounds.max[2] - originZ) / cellSize) + 1);
   const buckets = new Map<number, number[]>();
-  const grid: OccluderGrid = {
+  const counters: OccluderGridCounters = {
+    segmentQueries: 0,
+    columnQueries: 0,
+    cellVisits: 0,
+    triangleTests: 0,
+    blockedQueries: 0,
+  };
+  let bucketReferences = 0;
+  const grid = {
+    bucketReferences,
+    counters,
     triangles,
     triangleCount,
     buckets,
@@ -117,11 +155,12 @@ export function buildOccluderGrid(
           const list = buckets.get(key);
           if (list) list.push(triangle);
           else buckets.set(key, [triangle]);
+          bucketReferences += 1;
         }
       }
     }
   }
-  return grid;
+  return { ...grid, bucketReferences };
 }
 
 const clampIndex = (value: number, count: number): number =>
@@ -146,6 +185,7 @@ export function segmentBlocked(
   ax: number, ay: number, az: number,
   bx: number, by: number, bz: number
 ): boolean {
+  grid.counters.segmentQueries += 1;
   const dx = bx - ax, dy = by - ay, dz = bz - az;
   const length = Math.hypot(dx, dy, dz);
   if (length < END_EPSILON) return false;
@@ -177,8 +217,12 @@ export function segmentBlocked(
   // direction turning a bake into a hang.
   const limit = countX + countY + countZ + 3;
   for (let visited = 0; visited <= limit; visited++) {
+    grid.counters.cellVisits += 1;
     const list = grid.buckets.get(bucketKey(grid, cx, cy, cz));
-    if (list && hitsAny(grid, list, ax, ay, az, dx, dy, dz)) return true;
+    if (list && hitsAny(grid, list, ax, ay, az, dx, dy, dz)) {
+      grid.counters.blockedQueries += 1;
+      return true;
+    }
     if (cx === endX && cy === endY && cz === endZ) return false;
     if (tMaxX < tMaxY && tMaxX < tMaxZ) {
       if (tMaxX > 1) return false;
@@ -206,6 +250,9 @@ function hitsAny(
 ): boolean {
   const t = grid.triangles;
   for (const triangle of list) {
+    // Counted here rather than by bucket length: this loop returns on the
+    // first hit, so the remainder of the bucket is never evaluated.
+    grid.counters.triangleTests += 1;
     const o = triangle * 9;
     const e1x = t[o + 3]! - t[o]!, e1y = t[o + 4]! - t[o + 1]!, e1z = t[o + 5]! - t[o + 2]!;
     const e2x = t[o + 6]! - t[o]!, e2y = t[o + 7]! - t[o + 1]!, e2z = t[o + 8]! - t[o + 2]!;
@@ -245,6 +292,7 @@ export function highestSurfaceAt(
   z: number,
   bounds: ShadoWorldBounds
 ): number | null {
+  grid.counters.columnQueries += 1;
   const top = bounds.max[1] + grid.size;
   const bottom = bounds.min[1] - grid.size;
   const dy = bottom - top;
