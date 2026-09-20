@@ -5,6 +5,8 @@ import {
   highestSurfaceAt,
   segmentBlocked,
 } from './occlusion';
+import { buildInstancedOccluders, instancedSegmentBlocked } from './occluder-instances';
+import type { InstancedOccluders } from './occluder-instances';
 import {
   ShadoOccluderBackendError,
   buildOccluderBvh,
@@ -35,6 +37,14 @@ import type {
  * theoretical.
  */
 export type ShadoWorldOccluderIndex = 'bvh' | 'grid' | 'auto';
+
+/** Segment queries across both structures, for the budget and the report. */
+function segmentQueryCount(
+  grid: Occluders | null,
+  placed: InstancedOccluders | null
+): number {
+  return (grid?.counters.segmentQueries ?? 0) + (placed?.counters.segmentQueries ?? 0);
+}
 
 /** One question, two structures: can this segment reach that point? */
 type Occluders = {
@@ -170,6 +180,18 @@ export type ShadoWorldVisibilityCompileInput = {
   mode?: ShadoWorldVisibilityMode;
   /** Bounds enforced while the bake runs; exhaustion admits the rest. */
   budget?: ShadoWorldVisibilityBudget;
+  /**
+   * Occluders kept as prototypes and placements rather than expanded.
+   *
+   * Indexed once per prototype and queried through their transforms, which is
+   * the difference between indexing 145k triangles and 4.09M copies of them.
+   * `collisionPrimitives` still carries anything not instanced, and both are
+   * consulted.
+   */
+  instancedOccluders?: {
+    prototypes: readonly (readonly ShadoWorldPrimitive[])[];
+    instances: readonly { prototype: number; matrix: readonly number[] }[];
+  };
   /** Which acceleration structure answers segment queries. Defaults to `bvh`. */
   occluderIndex?: ShadoWorldOccluderIndex;
   bounds: ShadoWorldBounds;
@@ -401,7 +423,20 @@ export function compileShadoWorldVisibility(
     : grid;
   const occluderGridMs = clock() - gridStarted;
   // Without ground there is nothing to stand on, so nothing can be sampled.
-  const sampled = grid !== null && grid.triangleCount > 0 && ground !== null;
+  const instanced = requestedMode === 'sampled-occlusion' && input.instancedOccluders
+    ? buildInstancedOccluders(
+        input.instancedOccluders.prototypes,
+        input.instancedOccluders.instances as never,
+        buildLimits()
+      )
+    : null;
+  if (instanced?.aborted) {
+    stop = instanced.aborted;
+    stoppedDuring = 'index-build';
+  }
+  const placed = instanced && !instanced.aborted && instanced.instanceCount > 0 ? instanced : null;
+  const sampled =
+    ((grid !== null && grid.triangleCount > 0) || placed !== null) && ground !== null;
   const mode: ShadoWorldVisibilityMode = sampled ? 'sampled-occlusion' : 'distance-flood';
   const eyes: (Float64Array | null)[] = new Array(regionCount).fill(null);
   const targets: (Float64Array | null)[] = new Array(regionCount).fill(null);
@@ -437,7 +472,7 @@ export function compileShadoWorldVisibility(
     // Sampling a region walks its footprint against the whole occluder set,
     // which on a dense zone is not cheap; an unsampled region has no eyes and
     // is therefore admitted, so stopping here is safe and merely worse.
-    if ((region & 31) === 0 && check('region-sampling', grid!.counters.segmentQueries)) {
+    if ((region & 31) === 0 && check('region-sampling', segmentQueryCount(grid, placed))) {
       regionsLeftUnsampled = regionCount - region;
       break;
     }
@@ -501,7 +536,7 @@ export function compileShadoWorldVisibility(
          * stopped, every remaining pair is ADMITTED untested, so a truncated
          * bake is a worse PVS and never an unsafe one.
          */
-        if (check('pair-loop', grid!.counters.segmentQueries)) {
+        if (check('pair-loop', segmentQueryCount(grid, placed))) {
           pairsAdmittedAfterStop++;
         } else {
           /*
@@ -518,8 +553,8 @@ export function compileShadoWorldVisibility(
           if (source && target && back && forward) {
             occlusionTested++;
             if (
-              !anyClearSegment(grid!, source, target) &&
-              !anyClearSegment(grid!, back, forward)
+              !anyClearSegment(grid, placed, source, target) &&
+              !anyClearSegment(grid, placed, back, forward)
             ) {
               occluded++;
               continue;
@@ -551,7 +586,7 @@ export function compileShadoWorldVisibility(
         requestedMode === 'sampled-occlusion' && !sampled
           ? (stop === 'none' ? 'no-eligible-occluders' : 'budget-exhausted')
           : null,
-      occluderTriangles: sampled ? grid!.triangleCount : 0,
+      occluderTriangles: sampled ? (grid?.triangleCount ?? 0) + (placed?.uniqueTriangles ?? 0) : 0,
       forcedLocalPairs,
       occlusionTested,
       occluded,
@@ -565,13 +600,17 @@ export function compileShadoWorldVisibility(
         totalMs: clock() - bakeStarted,
       },
       work: {
-        index: grid?.kind ?? null,
+        index: grid?.kind ?? 'bvh',
+        instancedPrototypes: placed?.prototypes.length ?? 0,
+        instancedPlacements: placed?.instanceCount ?? 0,
+        instancedUniqueTriangles: placed?.uniqueTriangles ?? 0,
+        instancedPlacedTriangles: placed?.placedTriangles ?? 0,
         indexTrackedBytes: (grid?.trackedBytes ?? 0) + (ground && ground !== grid ? ground.trackedBytes : 0),
-        segmentQueries: grid?.counters.segmentQueries ?? 0,
-        blockedQueries: grid?.counters.blockedQueries ?? 0,
+        segmentQueries: segmentQueryCount(grid, placed),
+        blockedQueries: (grid?.counters.blockedQueries ?? 0) + (placed?.counters.blockedQueries ?? 0),
         columnQueries: ground?.counters.columnQueries ?? 0,
-        nodeVisits: grid ? grid.nodeVisits() : 0,
-        triangleTests: grid?.counters.triangleTests ?? 0,
+        nodeVisits: (grid ? grid.nodeVisits() : 0) + (placed?.counters.nodeVisits ?? 0),
+        triangleTests: (grid?.counters.triangleTests ?? 0) + (placed?.counters.triangleTests ?? 0),
         indexEntries: grid?.references ?? 0,
         regionsWithoutFloor,
       },
@@ -587,7 +626,7 @@ export function compileShadoWorldVisibility(
     width,
     height,
     maxDistance,
-    occluderCount: sampled ? grid!.triangleCount : 0,
+    occluderCount: sampled ? (grid?.triangleCount ?? 0) + (placed?.uniqueTriangles ?? 0) : 0,
     visibleRegionPairs,
     cellRegion,
     persistentRegions,
@@ -605,16 +644,24 @@ export function compileShadoWorldVisibility(
  * and the expensive all-blocked case is the rare one.
  */
 function anyClearSegment(
-  grid: Occluders,
+  grid: Occluders | null,
+  placed: InstancedOccluders | null,
   eyes: Float64Array,
   targets: Float64Array
 ): boolean {
   for (let t = targets.length - 3; t >= 0; t -= 3) {
     for (let e = 0; e < eyes.length; e += 3) {
-      if (!grid.blocked(
-        eyes[e]!, eyes[e + 1]!, eyes[e + 2]!,
-        targets[t]!, targets[t + 1]!, targets[t + 2]!
-      )) return true;
+      const blocked =
+        (grid !== null && grid.triangleCount > 0 && grid.blocked(
+          eyes[e]!, eyes[e + 1]!, eyes[e + 2]!,
+          targets[t]!, targets[t + 1]!, targets[t + 2]!
+        )) ||
+        (placed !== null && instancedSegmentBlocked(
+          placed,
+          eyes[e]!, eyes[e + 1]!, eyes[e + 2]!,
+          targets[t]!, targets[t + 1]!, targets[t + 2]!
+        ));
+      if (!blocked) return true;
     }
   }
   return false;

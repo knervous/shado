@@ -148,6 +148,12 @@ export type ShadoWorldVisibilityBakeReport = {
   work: {
     /** Which acceleration structure answered the queries. */
     index: 'bvh' | 'grid' | null;
+    /** Prototypes indexed once, and how many times they were placed. */
+    instancedPrototypes: number;
+    instancedPlacements: number;
+    /** Triangles the instanced structure holds, against what expanding cost. */
+    instancedUniqueTriangles: number;
+    instancedPlacedTriangles: number;
     /**
      * Bytes held by the index structures themselves. This is tracked
      * allocation, not process RSS: neither number substitutes for the other,

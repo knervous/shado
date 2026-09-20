@@ -14,6 +14,7 @@ export * from './occlusion';
 export * from './occluder-scene';
 export * from './occluder-bvh';
 export * from './region-membership';
+export * from './occluder-instances';
 export * from './visibility';
 export * from './lighting';
 export * from './point-lights';

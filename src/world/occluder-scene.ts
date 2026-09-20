@@ -561,6 +561,68 @@ function reverseWinding(indices: Uint32Array): Uint32Array {
   return out;
 }
 
+/**
+ * The same assembly, kept as prototypes and placements instead of expanded.
+ *
+ * Crownward's 9,521 stamps come from 249 prototypes holding 145,140 eligible
+ * triangles; expanding them writes 4,085,341. This returns the geometry once
+ * per prototype and a transform per stamp, for a caller that can place them
+ * itself.
+ */
+export function assembleInstancedOccluderScene(
+  input: OccluderSceneInput
+): {
+  prototypes: ShadoWorldPrimitive[][];
+  instances: { prototype: number; matrix: number[] }[];
+  manifest: OccluderSceneManifest;
+} {
+  const flat = assembleOccluderScene({ ...input, maxTriangles: Number.POSITIVE_INFINITY });
+  const stamps = input.world.objects?.stamps;
+  const prototypeIndex = new Map<number, number>();
+  const prototypes: ShadoWorldPrimitive[][] = [];
+  const instances: { prototype: number; matrix: number[] }[] = [];
+  if (!stamps) return { prototypes, instances, manifest: flat.manifest };
+
+  /*
+   * The flat pass already decided eligibility, phase, enablement and the
+   * budget; this re-walks the same decisions to group them, so one contract
+   * still answers what may block.
+   */
+  const included = new Set(flat.primitives.map((primitive) => primitive.name.split(':')[0]));
+  const quaternion = new Float32Array(4);
+  const cache = new Map<number, GlbPrimitive[] | null>();
+  for (let stamp = 0; stamp < stamps.id.length; stamp += 1) {
+    const id = stamps.id[stamp] ?? `stamp-${stamp}`;
+    if (!included.has(id)) continue;
+    const prototype = stamps.prototype[stamp]!;
+    let parts = cache.get(prototype);
+    if (parts === undefined) {
+      const bytes = input.loadPrototype(
+        input.world.objects!.prototypes.source[prototype] ?? '',
+        input.world.objects!.prototypes.id[prototype] ?? ''
+      );
+      parts = bytes ? readGlbPrimitives(bytes).filter((part) => !occluderEligibility(part)) : null;
+      cache.set(prototype, parts);
+      if (parts?.length) {
+        prototypeIndex.set(prototype, prototypes.length);
+        prototypes.push(
+          parts.map((part) => ({
+            name: `${input.world.objects!.prototypes.id[prototype]}:${part.node}`,
+            material: part.material,
+            doubleSided: part.doubleSided,
+            positions: Float32Array.from(part.positions),
+            indices: part.indices,
+          }))
+        );
+      }
+    }
+    const index = prototypeIndex.get(prototype);
+    if (index === undefined) continue;
+    instances.push({ prototype: index, matrix: stampMatrix(stamps, stamp, quaternion) });
+  }
+  return { prototypes, instances, manifest: flat.manifest };
+}
+
 /** The runtime's stamp transform, column-major, as thin instances receive it. */
 function stampMatrix(
   stamps: NonNullable<ShadoWorldSpatialPackage['objects']>['stamps'],
