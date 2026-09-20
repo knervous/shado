@@ -44,7 +44,13 @@ describe('entity membership spans an entity, not its centre', () => {
         count: entities.length,
         positionX: Float32Array.from(entities.map((entry) => entry.x)),
         positionY: new Float32Array(entities.length),
-        positionZ: Float32Array.from(entities.map((entry) => entry.z ?? 0.5)),
+        /*
+         * Mid-region in Z, not on its edge. The fixture grid is one region
+         * deep, so an actor at z = 0.5 with any radius straddles the edge of
+         * the supported domain and is UNKNOWN -- correctly, but it would
+         * make every case here test the unknown path instead of membership.
+         */
+        positionZ: Float32Array.from(entities.map((entry) => entry.z ?? 8)),
         radius: Float32Array.from(entities.map((entry) => entry.radius)),
       },
       PLANES,
@@ -97,7 +103,8 @@ describe('entity membership spans an entity, not its centre', () => {
         count: 1,
         positionX: Float32Array.from([31]),
         positionY: new Float32Array(1),
-        positionZ: Float32Array.from([0.5]),
+        // Mid-region in Z, for the same reason as `reduce` above.
+        positionZ: Float32Array.from([8]),
         radius: Float32Array.from([3]),
       },
       PLANES,
@@ -109,10 +116,11 @@ describe('entity membership spans an entity, not its centre', () => {
 
   it('admits an entity far larger than the world it stands in', async () => {
     /*
-     * Its bound covers every region, so some region admits it and it survives.
-     * The enumeration cap itself is exercised in the membership unit tests,
-     * which can build a grid large enough to exceed it; this world has four
-     * regions and cannot.
+     * Its bound reaches far past the grid, so its membership cannot be
+     * enumerated and it is UNKNOWN -- an always-candidate that still faces
+     * every other test. It must not be rejected for being too big to
+     * classify, and `outsideWorldVisible: false` must not govern it: that
+     * flag speaks only for bounds PROVED to be outside.
      */
     const { visible } = await reduce([{ x: 20, radius: 100000 }], [1, 0, 1, 1]);
     expect(visible).toEqual([0]);

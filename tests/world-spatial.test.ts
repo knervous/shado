@@ -589,8 +589,12 @@ describe('Shado world spatial compiler', () => {
     world.visibility!.pvs.words = [0b01, 0b10];
     world.visibility!.visibleRegionPairs = 2;
     stampShadoWorldIntegrity(world);
+    /*
+     * Wide in Z, because the actors below stand mid-region rather than on the
+     * z = 0 plane. Membership, not the frustum, is what this case is about.
+     */
     const planes = new Float32Array([
-      1, 0, 0, 2, -1, 0, 0, 32, 0, 1, 0, 2, 0, -1, 0, 2, 0, 0, 1, 2, 0, 0, -1, 2,
+      1, 0, 0, 2, -1, 0, 0, 32, 0, 1, 0, 2, 0, -1, 0, 2, 0, 0, 1, 32, 0, 0, -1, 32,
     ]);
     const coordinator = await ShadoWorldVisibilityCoordinator.create(world);
     const frame = coordinator.reduceWorld(planes, [1, 0, 0]);
@@ -599,7 +603,13 @@ describe('Shado world spatial compiler', () => {
         count: 2,
         positionX: new Float32Array([1, 20]),
         positionY: new Float32Array([0, 0]),
-        positionZ: new Float32Array([0, 0]),
+        /*
+         * Mid-region in Z. These worlds are one region deep, so an actor on
+         * the z = 0 plane straddles the edge of the supported domain and is
+         * UNKNOWN -- an always-candidate, which would make these topology
+         * cases test the unknown path instead.
+         */
+        positionZ: new Float32Array([8, 8]),
       },
       planes,
       frame,
@@ -640,7 +650,13 @@ describe('Shado world spatial compiler', () => {
         count: 2,
         positionX: new Float32Array([1, 200]),
         positionY: new Float32Array(2),
-        positionZ: new Float32Array(2),
+        /*
+         * Mid-region in Z. These worlds are one region deep, so an actor on
+         * the z = 0 plane straddles the edge of the supported domain and is
+         * UNKNOWN -- an always-candidate, which would make these topology
+         * cases test the unknown path instead.
+         */
+        positionZ: new Float32Array([8, 8]),
       },
       planes,
       frame,
@@ -707,7 +723,13 @@ describe('Shado world spatial compiler', () => {
         count: 2,
         positionX: new Float32Array([1, 20]),
         positionY: new Float32Array(2),
-        positionZ: new Float32Array(2),
+        /*
+         * Mid-region in Z. These worlds are one region deep, so an actor on
+         * the z = 0 plane straddles the edge of the supported domain and is
+         * UNKNOWN -- an always-candidate, which would make these topology
+         * cases test the unknown path instead.
+         */
+        positionZ: new Float32Array([8, 8]),
       },
       planes,
       frame,
@@ -744,7 +766,13 @@ describe('Shado world spatial compiler', () => {
         count,
         positionX: new Float32Array(count).fill(1),
         positionY: new Float32Array(count),
-        positionZ: new Float32Array(count),
+        /*
+         * Mid-region in Z. These worlds are one region deep, so an actor on
+         * the z = 0 plane straddles the edge of the supported domain and is
+         * UNKNOWN -- an always-candidate, which would make these topology
+         * cases test the unknown path instead.
+         */
+        positionZ: new Float32Array(count).fill(8),
       },
       planes,
       frame,

@@ -29,38 +29,125 @@ export type RegionGrid = {
 };
 
 /**
- * Regions touched by an XZ box, and whether the list had to be truncated.
+ * Regions touched by an XZ box, and which of three states the box is in.
  *
- * `overflow` is never a dropped entity. A caller that sees it treats the thing
- * as an always-candidate and falls back to the tests that do not need
- * membership, which admits more and hides nothing.
+ * The three are not interchangeable and collapsing any two of them loses an
+ * entity:
+ *
+ * - `enumerated` -- every region the box touches is listed. The box lies
+ *   wholly inside the supported grid.
+ * - `unknown` -- the box could not be enumerated: its bounds are not finite,
+ *   it touches more regions than the cap holds, or it reaches past the edge
+ *   of the supported grid. Nothing here has been proved about what can see
+ *   it, so it is an always-candidate: topology admits it and the frustum,
+ *   range, phase and enabled tests still decide.
+ * - `whollyOutside` -- valid bounds, entirely beyond the grid. This is the
+ *   only state `outsideWorldVisible` governs, because it is the only one
+ *   where the box has been PROVED to be somewhere the rows do not describe.
  */
+export type RegionMembershipState = 'enumerated' | 'unknown' | 'whollyOutside';
+
 export type RegionMembership = {
   readonly regions: Uint32Array;
+  readonly state: RegionMembershipState;
+  /** True for `unknown`: kept so callers reading one field cannot under-admit. */
   readonly overflow: boolean;
 };
 
-/**
- * Boundary contact counts as membership.
- *
- * A bound that ends exactly on a region edge touches the region beyond it, and
- * floating-point positions land on edges more often than intuition suggests --
- * stamps are placed on round numbers and regions are powers of two. The
- * epsilon widens the box rather than narrowing it, so the error is towards
- * more regions.
- */
-const BOUNDARY_EPSILON = 1e-4;
 
 /** Ceiling on stored regions per entity; beyond it the caller uses overflow. */
 export const MAX_REGIONS_PER_ENTITY = 64;
 
-/**
- * Enumerates every region an XZ box intersects, clipped to the grid.
+/*
+ * The classifier itself, as ONE self-contained function.
  *
- * The box is half-open in neither direction: a box touching the boundary
- * between two regions is in both. Out-of-grid extents are clipped rather than
- * wrapped, and a box entirely outside the grid returns nothing -- which the
- * caller must read as "unknown", not "hidden".
+ * It closes over nothing -- no imports, no module constants, not even the
+ * epsilon -- because the entity worker runs as a standalone source string and
+ * embeds this function's own text. Two hand-maintained copies of this
+ * arithmetic is exactly how the worker came to answer differently from the
+ * synchronous reducer for a >64-region actor, so there is one copy and the
+ * worker gets it by construction rather than by review.
+ *
+ * Returns the number of dense region indices written to `into`, or a negative
+ * code: -1 unknown, -2 wholly outside. Allocation-free on purpose; the worker
+ * calls it per entity per frame.
+ */
+export function classifyRegionMembership(
+  originX: number,
+  originZ: number,
+  size: number,
+  minTileX: number,
+  minTileZ: number,
+  width: number,
+  height: number,
+  minX: number,
+  minZ: number,
+  maxX: number,
+  maxZ: number,
+  cap: number,
+  into: Uint32Array
+): number {
+  if (!(size > 0) || !(width > 0) || !(height > 0)) return -1;
+  if (
+    !Number.isFinite(minX) || !Number.isFinite(minZ) ||
+    !Number.isFinite(maxX) || !Number.isFinite(maxZ)
+  ) {
+    return -1;
+  }
+  /*
+   * Boundary contact counts as membership. A bound ending exactly on a region
+   * edge touches the region beyond it, and positions land on edges more often
+   * than intuition suggests -- stamps sit on round numbers and regions are
+   * powers of two. The epsilon widens the box, so the error is towards more
+   * regions.
+   */
+  const epsilon = 1e-4;
+  /*
+   * Whether the box lies in the supported domain is asked of the box itself,
+   * in world units, and NOT of the epsilon-widened one. The epsilon exists so
+   * a bound resting on an interior region edge counts as touching both sides;
+   * at the domain edge it would instead manufacture an overhang out of
+   * nothing, and every actor standing against the first region would be
+   * unknown because its bound began exactly at the origin.
+   */
+  const lowX = originX + minTileX * size;
+  const lowZ = originZ + minTileZ * size;
+  const highX = lowX + width * size;
+  const highZ = lowZ + height * size;
+  if (maxX < lowX - epsilon || maxZ < lowZ - epsilon || minX > highX + epsilon || minZ > highZ + epsilon) {
+    // Valid bounds, no part of them inside the domain: proved outside.
+    return -2;
+  }
+  if (minX < lowX - epsilon || minZ < lowZ - epsilon || maxX > highX + epsilon || maxZ > highZ + epsilon) {
+    /*
+     * Straddling the edge. Clipping to the grid and enumerating what is left
+     * would claim the remaining regions describe everything that can see this
+     * box, which is a claim about where a camera can be -- and third-person
+     * offsets, debug flight and boundary crossings all put one outside. So it
+     * is unknown until a content/camera contract says otherwise.
+     */
+    return -1;
+  }
+  const firstX = Math.max(0, Math.floor((minX - epsilon - originX) / size) - minTileX);
+  const lastX = Math.min(width - 1, Math.floor((maxX + epsilon - originX) / size) - minTileX);
+  const firstZ = Math.max(0, Math.floor((minZ - epsilon - originZ) / size) - minTileZ);
+  const lastZ = Math.min(height - 1, Math.floor((maxZ + epsilon - originZ) / size) - minTileZ);
+  if (firstX > lastX || firstZ > lastZ) return -1;
+  const span = (lastX - firstX + 1) * (lastZ - firstZ + 1);
+  if (span > cap || span > into.length) return -1;
+  let written = 0;
+  for (let z = firstZ; z <= lastZ; z += 1) {
+    const row = z * width;
+    for (let x = firstX; x <= lastX; x += 1) {
+      into[written++] = row + x;
+    }
+  }
+  return written;
+}
+
+/**
+ * Enumerates every region an XZ box intersects, as a package-space wrapper
+ * around {@link classifyRegionMembership}.
  */
 export function regionsForBounds(
   grid: RegionGrid,
@@ -71,40 +158,29 @@ export function regionsForBounds(
   into: Uint32Array,
   cap = MAX_REGIONS_PER_ENTITY
 ): RegionMembership {
-  if (!Number.isFinite(minX) || !Number.isFinite(minZ) || !Number.isFinite(maxX) || !Number.isFinite(maxZ)) {
-    return { regions: into.subarray(0, 0), overflow: true };
+  const written = classifyRegionMembership(
+    grid.originX, grid.originZ, grid.size,
+    0, 0, grid.width, grid.height,
+    minX, minZ, maxX, maxZ,
+    cap, into
+  );
+  if (written === -2) {
+    return { regions: into.subarray(0, 0), state: 'whollyOutside', overflow: false };
   }
-  const firstX = Math.floor((minX - BOUNDARY_EPSILON - grid.originX) / grid.size);
-  const lastX = Math.floor((maxX + BOUNDARY_EPSILON - grid.originX) / grid.size);
-  const firstZ = Math.floor((minZ - BOUNDARY_EPSILON - grid.originZ) / grid.size);
-  const lastZ = Math.floor((maxZ + BOUNDARY_EPSILON - grid.originZ) / grid.size);
-  const clampedFirstX = Math.max(0, firstX);
-  const clampedLastX = Math.min(grid.width - 1, lastX);
-  const clampedFirstZ = Math.max(0, firstZ);
-  const clampedLastZ = Math.min(grid.height - 1, lastZ);
-  if (clampedFirstX > clampedLastX || clampedFirstZ > clampedLastZ) {
-    return { regions: into.subarray(0, 0), overflow: false };
+  if (written < 0) {
+    return { regions: into.subarray(0, 0), state: 'unknown', overflow: true };
   }
-  /*
-   * Reaching past the grid edge is not overflow. There are no rows out there
-   * and no camera either -- a viewpoint outside the grid has no region to
-   * look from -- so the regions that do exist describe everything that can
-   * see this entity. Treating the overhang as unknown would make every
-   * entity along a zone's border permanently visible.
-   */
-  const span = (clampedLastX - clampedFirstX + 1) * (clampedLastZ - clampedFirstZ + 1);
-  if (span > cap || span > into.length) {
-    return { regions: into.subarray(0, 0), overflow: true };
-  }
-  let written = 0;
-  for (let z = clampedFirstZ; z <= clampedLastZ; z += 1) {
-    const row = z * grid.width;
-    for (let x = clampedFirstX; x <= clampedLastX; x += 1) {
-      into[written++] = row + x;
-    }
-  }
-  return { regions: into.subarray(0, written), overflow: false };
+  return { regions: into.subarray(0, written), state: 'enumerated', overflow: false };
 }
+
+/**
+ * The classifier's own source, for the entity worker to embed.
+ *
+ * `toString()` rather than a duplicated string literal: whatever the bundler
+ * did to the function is what the worker runs, and the two cannot drift
+ * because there is only one of them.
+ */
+export const REGION_MEMBERSHIP_SOURCE = `const classifyRegionMembership = ${classifyRegionMembership.toString()};`;
 
 /**
  * Is any single region in the membership admitted on its own?

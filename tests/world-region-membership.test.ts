@@ -35,27 +35,36 @@ describe('region membership', () => {
   });
 
   it('covers every region under a large footprint', () => {
-    const { regions, overflow } = regionsForBounds(grid, -100, -100, 40, 40, scratch);
+    const { regions, overflow, state } = regionsForBounds(grid, -100, -100, 40, 40, scratch);
     expect(regions.length).toBe(9);
     expect(overflow).toBe(false);
+    expect(state).toBe('enumerated');
   });
 
-  it('clips at the grid edge without calling it unknown', () => {
+  it('calls a box straddling the grid edge unknown, not clipped', () => {
     /*
-     * There are no rows outside the grid and no camera either, so the regions
-     * that exist describe everything that can see this entity. Calling the
-     * overhang unknown would make every entity along a zone's border
-     * permanently visible.
+     * This asserted the opposite until the D1-D8 audit. Clipping to the grid
+     * and enumerating what is left claims the remaining regions describe
+     * everything that can see this box -- which is a claim about where a
+     * camera can be, and third-person offsets, debug flight and boundary
+     * crossings all put one outside the grid. Until a content/camera
+     * contract says otherwise it is unknown, which admits and never hides.
      */
-    const { regions, overflow } = regionsForBounds(grid, -200, -100, -90, -90, scratch);
-    expect(Array.from(regions)).toEqual([at(0, 0)]);
-    expect(overflow).toBe(false);
+    const { regions, overflow, state } = regionsForBounds(grid, -200, -100, -90, -90, scratch);
+    expect(state).toBe('unknown');
+    expect(overflow).toBe(true);
+    expect(regions.length).toBe(0);
   });
 
-  it('returns nothing, without overflow, for a box wholly off the grid', () => {
-    const { regions, overflow } = regionsForBounds(grid, 500, 500, 600, 600, scratch);
+  it('proves a box wholly off the grid is outside, which is not unknown', () => {
+    const { regions, overflow, state } = regionsForBounds(grid, 500, 500, 600, 600, scratch);
     expect(regions.length).toBe(0);
     expect(overflow).toBe(false);
+    /*
+     * The one state 'outsideWorldVisible' may govern: valid bounds, proved
+     * entirely beyond the grid. Unknown bounds are never governed by it.
+     */
+    expect(state).toBe('whollyOutside');
   });
 
   it('overflows rather than truncating when the footprint exceeds the cap', () => {

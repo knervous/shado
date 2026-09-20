@@ -1,4 +1,5 @@
 import { SHADO_WORLD_REDUCER_WASM_BASE64 } from './world-reducer-wasm.generated';
+import { REGION_MEMBERSHIP_SOURCE } from './region-membership';
 import type { ShadoWorldSpatialPackage, WorldVec3 } from './types';
 import type {
   ShadoEntityVisibilitySoA,
@@ -113,7 +114,6 @@ type WorkerRequest = {
   maxDistance: number;
   outsideWorldVisible: boolean;
   activePhaseMask: number;
-  radiusScale: number;
   /** Slot changes this request carries; applied before it reduces. */
   delta: ShadoEntityVisibilityDelta;
   /** What this request is asking about; a result only applies to these. */
@@ -492,10 +492,9 @@ export class ShadoEntityVisibilityWorker {
        *
        * Deprecated and defaulted to 1. Bucket membership is decided from the
        * STORED radius, so a scale applied here would make membership and the
-       * final test disagree about the entity's size -- with membership using
-       * the smaller one, which is the unsafe direction. Callers put the
-       * envelope in the radius they write; this remains only so an older one
-       * keeps working.
+       * final test disagree about the entity's size. Any value other than 1
+       * is now REFUSED; the option remains so an older caller gets an error
+       * rather than silently unsafe rows.
        */
       radiusScale?: number;
     }
@@ -504,6 +503,22 @@ export class ShadoEntityVisibilityWorker {
     if (this.error) throw new Error(`Visibility worker failed: ${this.error}`);
     if (planes.length < 24) {
       throw new Error('Entity visibility requires six vec4 frustum planes');
+    }
+    /*
+     * Refused rather than honoured, and refused BEFORE the delta is drained
+     * so a rejected request costs no slot changes.
+     *
+     * Buckets are built from the stored radius; only the final test would see
+     * a scaled one. Any scale above 1 therefore makes the final radius larger
+     * than the radius the entity was binned by, so an actor can be admitted
+     * by a test whose membership never put it in the admitting region -- and
+     * a scale below 1 hides it. The adapter writes its effective radius and
+     * has no use for this.
+     */
+    if (options.radiusScale !== undefined && options.radiusScale !== 1) {
+      throw new Error(
+        'Entity visibility no longer supports radiusScale; write the effective radius instead'
+      );
     }
     const generation =
       Atomics.add(this.control, ShadoVisibilityWorkerControl.RequestedGeneration, 1) + 1;
@@ -518,7 +533,6 @@ export class ShadoEntityVisibilityWorker {
       maxDistance: Math.max(0, options.maxDistance ?? 0),
       outsideWorldVisible: options.outsideWorldVisible !== false,
       activePhaseMask: (options.activePhaseMask ?? 0xffffffff) >>> 0,
-      radiusScale: Math.max(0, options.radiusScale ?? 1),
       delta: this.projection.drainDelta(),
       epochs: { ...this.epochs },
       dispatchedAtMs: 0,
@@ -850,8 +864,18 @@ function decodeBase64(value: string): Uint8Array {
   return Uint8Array.from(binary, character => character.charCodeAt(0));
 }
 
+/*
+ * The worker's source, with the shared region classifier spliced in.
+ *
+ * The worker is a standalone script -- it cannot import -- so the one
+ * implementation of membership arithmetic arrives as its own text. Splicing
+ * rather than restating it is the point: the synchronous reducer and the
+ * worker are then the same function by construction, which is the only way
+ * they cannot answer differently for the same entity.
+ */
 const SHADO_ENTITY_VISIBILITY_WORKER_SOURCE = String.raw`
 let state;
+` + REGION_MEMBERSHIP_SOURCE + String.raw`
 
 /**
  * Regions stored inline per entity before spilling to a map.
@@ -978,8 +1002,16 @@ async function createState(message) {
      * has its record repaired, so nothing walks the population to maintain
      * the index.
      */
-    bucketMembers: new Array(cellCount + 1).fill(null),
-    bucketCounts: new Uint32Array(cellCount + 1),
+    /*
+     * Two buckets past the cells, not one. the cellCount bucket holds things PROVED
+     * wholly outside the grid, which 'outsideWorldVisible' governs;
+     * the one past it holds things whose membership could not be enumerated
+     * at all, which nothing governs -- they are always candidates. Sharing
+     * one bucket is what hid a 600-unit actor from a client that had a world
+     * coordinator and therefore passed outsideWorldVisible: false.
+     */
+    bucketMembers: new Array(cellCount + 2).fill(null),
+    bucketCounts: new Uint32Array(cellCount + 2),
     entityRegionCount: new Uint8Array(layout.capacity),
     entityRegions: new Int32Array(layout.capacity * INLINE_MEMBERSHIPS),
     entitySlotIn: new Int32Array(layout.capacity * INLINE_MEMBERSHIPS),
@@ -988,6 +1020,10 @@ async function createState(message) {
     membershipChanges: 0,
     bucketsTouched: 0,
     candidateIds: new Uint32Array(layout.capacity),
+    /* Scratch for the shared classifier and for reading a stored membership. */
+    membershipScratch: new Uint32Array(64),
+    admissionRegions: new Int32Array(64),
+    admissionSlots: new Int32Array(64),
     /*
      * Query-generation stamps, so an entity listed in several admitted
      * buckets is taken once. A Set per query would allocate per frame and a
@@ -1023,50 +1059,45 @@ function ensureCapacity(count) {
  */
 function computeAdmission(candidateCount, message) {
   const admission = new Uint8Array(state.wasm.memory.buffer, state.admissionPtr, candidateCount);
-  const size = state.tiles.size;
   const required = 0x71;
-  if (!(size > 0) || !state.cellCount) {
-    admission.fill(message.outsideWorldVisible ? required : 0);
+  if (!(state.tiles.size > 0) || !state.cellCount) {
+    admission.fill(required);
     return;
   }
-  const width = state.gridWidth;
-  const height = state.gridHeight;
-  const epsilon = 1e-4;
+  const outsideBucket = state.cellCount;
+  const unknownBucket = outsideBucket + 1;
+  const regions = state.admissionRegions;
+  const slots = state.admissionSlots;
   for (let local = 0; local < candidateCount; local++) {
     const entity = state.candidateIds[local];
-    const x = state.positions[0][entity];
-    const z = state.positions[2][entity];
-    const radius = state.radius[entity] * message.radiusScale;
-    const firstX = Math.floor((x - radius - epsilon - state.tiles.originX) / size);
-    const lastX = Math.floor((x + radius + epsilon - state.tiles.originX) / size);
-    const firstZ = Math.floor((z - radius - epsilon - state.tiles.originZ) / size);
-    const lastZ = Math.floor((z + radius + epsilon - state.tiles.originZ) / size);
-    const clampedFirstX = Math.max(0, firstX - state.gridMinX);
-    const clampedLastX = Math.min(width - 1, lastX - state.gridMinX);
-    const clampedFirstZ = Math.max(0, firstZ - state.gridMinZ);
-    const clampedLastZ = Math.min(height - 1, lastZ - state.gridMinZ);
-    if (clampedFirstX > clampedLastX || clampedFirstZ > clampedLastZ) {
-      // Wholly outside the grid: there is no row out there to consult.
-      admission[local] = message.outsideWorldVisible ? required : 0;
-      continue;
+    /*
+     * The membership the buckets were built from, not a second computation
+     * of it. Recomputing here is how the two could classify one entity
+     * differently within a single request -- enqueued as unknown, then
+     * admitted as if it were inside the grid, or the reverse.
+     */
+    const count = readMembership(entity, regions, slots);
+    let granted = 0;
+    let unknown = false;
+    let outside = false;
+    for (let index = 0; index < count; index++) {
+      const bucket = regions[index];
+      if (bucket === unknownBucket) { unknown = true; break; }
+      if (bucket === outsideBucket) { outside = true; continue; }
+      const flags = bucket < state.cellCount ? message.cellFlags[bucket] : 0;
+      if ((flags & required) === required) {
+        granted = flags & 0x73;
+        break;
+      }
     }
-    const span = (clampedLastX - clampedFirstX + 1) * (clampedLastZ - clampedFirstZ + 1);
-    if (span > 64) {
-      // Too many regions to enumerate: a conservative candidate, which still
-      // faces the frustum, range, phase and enabled tests.
+    if (unknown || count === 0) {
+      // Nothing was proved about this one, so nothing may be rejected on it.
       admission[local] = required;
       continue;
     }
-    let granted = 0;
-    for (let cz = clampedFirstZ; cz <= clampedLastZ && !granted; cz++) {
-      for (let cx = clampedFirstX; cx <= clampedLastX; cx++) {
-        const cell = state.tileLookupPtr === 0 ? cz * width + cx : -1;
-        const flags = cell >= 0 && cell < state.cellCount ? message.cellFlags[cell] : 0;
-        if ((flags & required) === required) {
-          granted = flags & 0x73;
-          break;
-        }
-      }
+    if (!granted && outside) {
+      admission[local] = message.outsideWorldVisible ? required : 0;
+      continue;
     }
     admission[local] = granted;
   }
@@ -1094,40 +1125,37 @@ function locateCell(x, z) {
  * was never even a candidate, so no later test could save it.
  */
 function forEachMembership(entity, outsideBucket, visit) {
-  const size = state.tiles.size;
-  if (!(size > 0) || !state.cellCount) {
-    visit(outsideBucket);
+  const unknownBucket = outsideBucket + 1;
+  if (!(state.tiles.size > 0) || !state.cellCount) {
+    visit(unknownBucket);
     return;
   }
   const x = state.positions[0][entity];
   const z = state.positions[2][entity];
   const radius = state.radius[entity];
-  const epsilon = 1e-4;
-  const firstX = Math.floor((x - radius - epsilon - state.tiles.originX) / size) - state.gridMinX;
-  const lastX = Math.floor((x + radius + epsilon - state.tiles.originX) / size) - state.gridMinX;
-  const firstZ = Math.floor((z - radius - epsilon - state.tiles.originZ) / size) - state.gridMinZ;
-  const lastZ = Math.floor((z + radius + epsilon - state.tiles.originZ) / size) - state.gridMinZ;
-  const clampedFirstX = Math.max(0, firstX);
-  const clampedLastX = Math.min(state.gridWidth - 1, lastX);
-  const clampedFirstZ = Math.max(0, firstZ);
-  const clampedLastZ = Math.min(state.gridHeight - 1, lastZ);
-  if (clampedFirstX > clampedLastX || clampedFirstZ > clampedLastZ) {
+  const written = classifyRegionMembership(
+    state.tiles.originX, state.tiles.originZ, state.tiles.size,
+    state.gridMinX, state.gridMinZ, state.gridWidth, state.gridHeight,
+    x - radius, z - radius, x + radius, z + radius,
+    64, state.membershipScratch
+  );
+  if (written === -2) {
     visit(outsideBucket);
     return;
   }
-  const span = (clampedLastX - clampedFirstX + 1) * (clampedLastZ - clampedFirstZ + 1);
-  if (span > 64) {
-    // Too many to enumerate: an always-candidate rather than a dropped entity.
-    visit(outsideBucket);
+  if (written < 0) {
+    visit(unknownBucket);
     return;
   }
-  for (let cz = clampedFirstZ; cz <= clampedLastZ; cz++) {
-    for (let cx = clampedFirstX; cx <= clampedLastX; cx++) {
-      const dense = cz * state.gridWidth + cx;
-      const cell = state.tileLookupPtr === 0 ? dense : -1;
-      if (cell >= 0 && cell < state.cellCount) visit(cell);
-      else visit(outsideBucket);
-    }
+  for (let index = 0; index < written; index++) {
+    const dense = state.membershipScratch[index];
+    const cell = state.tileLookupPtr === 0 ? dense : -1;
+    /*
+     * A dense index with no cell behind it is not an outside entity -- it is
+     * one whose region this worker cannot resolve, which is unknown.
+     */
+    if (cell >= 0 && cell < state.cellCount) visit(cell);
+    else visit(unknownBucket);
   }
 }
 
@@ -1303,6 +1331,12 @@ function prepareCandidateIds(count, message) {
     if ((message.cellFlags[cell] & requiredCellBits) !== requiredCellBits) continue;
     take(cell);
   }
+  /*
+   * The unknown bucket is taken unconditionally. It holds everything whose
+   * membership could not be enumerated, and skipping it is a rejection made
+   * on the strength of not knowing.
+   */
+  take(state.cellCount + 1);
   if (message.outsideWorldVisible) take(state.cellCount);
   return candidateCount;
 }
@@ -1372,7 +1406,7 @@ function reduce(message) {
     wasmX[local] = state.positions[0][entity];
     wasmY[local] = state.positions[1][entity];
     wasmZ[local] = state.positions[2][entity];
-    wasmRadius[local] = state.radius[entity] * message.radiusScale;
+    wasmRadius[local] = state.radius[entity];
   }
   new Float32Array(memory, state.planesPtr, 24).set(message.planes);
   new Uint8Array(memory, state.cellFlagsPtr, state.cellCount).set(message.cellFlags);

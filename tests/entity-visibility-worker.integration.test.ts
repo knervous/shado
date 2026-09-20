@@ -180,8 +180,8 @@ describe('the shipped worker and the shipped reducer agree with the oracle', () 
   it('agrees on two adjacent regions with different PVS bits', async () => {
     const { worker: got, oracle } = await run(
       [
-        { x: 8, z: 0.5, radius: 1 },
-        { x: 24, z: 0.5, radius: 1 },
+        { x: 8, z: 8, radius: 1 },
+        { x: 24, z: 8, radius: 1 },
       ],
       [1, 0, 1, 1]
     );
@@ -190,7 +190,7 @@ describe('the shipped worker and the shipped reducer agree with the oracle', () 
   }, 20000);
 
   it('agrees on an actor spanning a rejected and an admitted region', async () => {
-    const { worker: got, oracle } = await run([{ x: 20, z: 0.5, radius: 6 }], [1, 0, 1, 1]);
+    const { worker: got, oracle } = await run([{ x: 20, z: 8, radius: 6 }], [1, 0, 1, 1]);
     expect(got).toEqual(oracle);
     expect(got).toEqual([0]);
   }, 20000);
@@ -198,8 +198,8 @@ describe('the shipped worker and the shipped reducer agree with the oracle', () 
   it('agrees when a phase mask excludes an entity', async () => {
     const { worker: got, oracle } = await run(
       [
-        { x: 8, z: 0.5, radius: 1, phase: 0b10 },
-        { x: 8, z: 0.5, radius: 1, phase: 0b01 },
+        { x: 8, z: 8, radius: 1, phase: 0b10 },
+        { x: 8, z: 8, radius: 1, phase: 0b01 },
       ],
       [1, 1, 1, 1],
       0b01
@@ -211,8 +211,8 @@ describe('the shipped worker and the shipped reducer agree with the oracle', () 
   it('agrees when an entity is disabled', async () => {
     const { worker: got, oracle } = await run(
       [
-        { x: 8, z: 0.5, radius: 1, enabled: false },
-        { x: 8, z: 0.5, radius: 1 },
+        { x: 8, z: 8, radius: 1, enabled: false },
+        { x: 8, z: 8, radius: 1 },
       ],
       [1, 1, 1, 1]
     );
@@ -227,7 +227,7 @@ describe('the shipped worker and the shipped reducer agree with the oracle', () 
   }, 20000);
 
   it('publishes the slot generation the shipped worker computed against', async () => {
-    const { generations, worker: got } = await run([{ x: 8, z: 0.5, radius: 1 }], [1, 1, 1, 1]);
+    const { generations, worker: got } = await run([{ x: 8, z: 8, radius: 1 }], [1, 1, 1, 1]);
     expect(got).toEqual([0]);
     expect(generations).toEqual([1]);
   }, 20000);
@@ -242,7 +242,7 @@ describe('the shipped worker and the shipped reducer agree with the oracle', () 
       count: 1,
       positionX: [8],
       positionY: [0],
-      positionZ: [0.5],
+      positionZ: [8],
       radius: [1],
     });
     const regionFlags = new Uint8Array(world.visibility!.width * world.visibility!.height);
