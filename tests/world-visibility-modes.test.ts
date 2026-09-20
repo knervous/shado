@@ -1,4 +1,5 @@
 import {
+  ShadoWorldVisibilityCoordinator,
   compileShadoWorld,
   compileShadoWorldVisibility,
   validateShadoWorldPackage,
@@ -152,5 +153,32 @@ describe('visibility modes', () => {
     expect(report.occluded).toBeLessThanOrEqual(report.occlusionTested);
     expect(report.forcedLocalPairs).toBeGreaterThan(0);
     expect(report.pairsAfterRowFlood).toBeGreaterThanOrEqual(report.pairsBeforeRowFlood);
+  });
+
+  it('bypasses baked occlusion in the reference authority, and nothing else', async () => {
+    const world = walledZone('sampled-occlusion');
+    // Wide enough to reject nothing: the difference between these two runs is
+    // the visibility rows, not the frustum.
+    const planes = new Float32Array([
+      1, 0, 0, 4096, -1, 0, 0, 4096, 0, 1, 0, 4096,
+      0, -1, 0, 4096, 0, 0, 1, 4096, 0, 0, -1, 4096,
+    ]);
+    const camera: [number, number, number] = [8, 8, 8];
+    const baked = await ShadoWorldVisibilityCoordinator.create(world);
+    const reference = await ShadoWorldVisibilityCoordinator.create(world, {
+      visibilityAuthority: 'flood-reference',
+    });
+    expect(baked.visibilityAuthority).toBe('package');
+    expect(reference.visibilityAuthority).toBe('flood-reference');
+
+    const bakedFrame = baked.reduceWorld(planes, camera);
+    const referenceFrame = reference.reduceWorld(planes, camera);
+    expect(bakedFrame.cameraRegion).toBe(referenceFrame.cameraRegion);
+
+    const bakedClusters = new Set(bakedFrame.visibleClusters);
+    const referenceClusters = new Set(referenceFrame.visibleClusters);
+    // The reference is a superset: bypassing occlusion can only admit more.
+    for (const cluster of bakedClusters) expect(referenceClusters.has(cluster)).toBe(true);
+    expect(referenceClusters.size).toBeGreaterThan(bakedClusters.size);
   });
 });

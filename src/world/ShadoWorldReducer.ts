@@ -1,5 +1,26 @@
 import { SHADO_WORLD_REDUCER_WASM_BASE64 } from './world-reducer-wasm.generated';
+import { compileShadoWorldVisibility } from './visibility';
 import type { ShadoWorldSpatialPackage } from './types';
+
+/**
+ * Which rows the reducer consults.
+ *
+ * `package` is the shipped behaviour: the rows the bake produced. `flood-reference`
+ * is a diagnostic authority that rebuilds the SAME package's rows in
+ * `distance-flood` mode at load, so a capture differs from the package run by
+ * occlusion and nothing else -- same regions, same envelope, same persistence,
+ * same everything downstream. It is not a substitute for the flood package: it
+ * exists so an A/B has a reference that cannot drift from the compiler, since
+ * it is produced by calling the compiler.
+ *
+ * Rebuilding costs one pair sweep over the region grid at construction. That
+ * is diagnostic-only work and is never on a promotion path.
+ */
+export type ShadoWorldReducerVisibilityAuthority = 'package' | 'flood-reference';
+
+export type ShadoWorldReducerOptions = {
+  visibilityAuthority?: ShadoWorldReducerVisibilityAuthority;
+};
 
 type ReducerExports = {
   memory: WebAssembly.Memory;
@@ -104,7 +125,11 @@ export class ShadoWorldReducer {
   private entityOutputPtr = 0;
   private entityFlagsPtr = 0;
 
-  public static async create(world: ShadoWorldSpatialPackage): Promise<ShadoWorldReducer> {
+  public static async create(
+    world: ShadoWorldSpatialPackage,
+    options: ShadoWorldReducerOptions = {}
+  ): Promise<ShadoWorldReducer> {
+    const authority = options.visibilityAuthority ?? 'package';
     const bytes = decodeBase64(SHADO_WORLD_REDUCER_WASM_BASE64);
     const module = await WebAssembly.compile(new Uint8Array(bytes).buffer as ArrayBuffer);
     const instance = await WebAssembly.instantiate(module, {});
@@ -131,7 +156,7 @@ export class ShadoWorldReducer {
     );
     view.setUint32(68, world.clusters.radius.length, true);
     view.setUint32(72, stackPtr, true);
-    const visibility = world.visibility;
+    const visibility = referenceVisibility(world, authority);
     const minTileX = visibility ? 0 : world.tiles.x.length ? Math.min(...world.tiles.x) : 0;
     const maxTileX = visibility
       ? visibility.width - 1
@@ -417,6 +442,43 @@ export class ShadoWorldReducer {
     this.entityOutputPtr = this.wasm.alloc(capacity * 4);
     this.entityFlagsPtr = this.wasm.alloc(capacity);
   }
+}
+
+/**
+ * The rows this reducer should use, given its authority.
+ *
+ * For `flood-reference` the package's own geometry is handed back to the
+ * compiler in `distance-flood` mode. No collision primitives are passed
+ * because the flood does not consult any -- that is precisely what makes it
+ * the reference.
+ */
+function referenceVisibility(
+  world: ShadoWorldSpatialPackage,
+  authority: ShadoWorldReducerVisibilityAuthority
+): ShadoWorldSpatialPackage['visibility'] {
+  const packaged = world.visibility;
+  if (authority === 'package' || !packaged) return packaged;
+  const cells = world.cells;
+  const centers: [number, number][] = [];
+  const persistent = new Uint8Array(cells.minX.length);
+  for (let cell = 0; cell < cells.minX.length; cell += 1) {
+    centers.push([
+      (cells.minX[cell] + cells.maxX[cell]) / 2,
+      (cells.minZ[cell] + cells.maxZ[cell]) / 2,
+    ]);
+  }
+  for (const cell of packaged.persistentCells ?? []) {
+    if (cell >= 0 && cell < persistent.length) persistent[cell] = 1;
+  }
+  return compileShadoWorldVisibility({
+    mode: 'distance-flood',
+    bounds: world.bounds,
+    regionSize: packaged.size,
+    maxDistance: packaged.maxDistance,
+    renderCellCenters: centers,
+    persistentRenderCells: persistent,
+    collisionPrimitives: [],
+  });
 }
 
 function allocate(

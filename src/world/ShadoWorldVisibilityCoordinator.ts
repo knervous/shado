@@ -1,6 +1,10 @@
 import type { ShadoWorldSpatialPackage, WorldVec3 } from './types';
 import type { ShadoWorldLightState } from './point-lights';
-import { ShadoWorldReducer, type ShadoWorldReductionView } from './ShadoWorldReducer';
+import {
+  ShadoWorldReducer,
+  type ShadoWorldReducerVisibilityAuthority,
+  type ShadoWorldReductionView,
+} from './ShadoWorldReducer';
 import {
   ShadoEntityVisibilityWorker,
   type ShadoEntityVisibilityWorkerResult,
@@ -88,6 +92,13 @@ export type ShadoWorldVisibilityCoordinatorOptions = {
   workerFactory?: (source: string) => ShadoVisibilityWorkerPort;
   /** Retain entity-indexed reason flags, or publish compact visible IDs only. */
   worldObjectVisibilityFlags?: 'full' | 'compact-only';
+  /**
+   * Which visibility rows to reduce against. `package` (default) is what
+   * players get. `flood-reference` bypasses whatever occlusion the package
+   * baked, keeping range, phase, residency, portals, frustum and camera
+   * identical, so an A/B capture isolates occlusion. Diagnostic only.
+   */
+  visibilityAuthority?: ShadoWorldReducerVisibilityAuthority;
   /** Optional worker request cadence. Omit or set to zero for legacy every-call requests. */
   worldObjectVisibilityHz?: number;
 };
@@ -122,7 +133,9 @@ export class ShadoWorldVisibilityCoordinator {
     public readonly world: ShadoWorldSpatialPackage,
     private readonly reducer: ShadoWorldReducer,
     private worldObjectWorker: ShadoEntityVisibilityWorker | null,
-    private readonly worldObjectMinimumIntervalMs: number
+    private readonly worldObjectMinimumIntervalMs: number,
+    /** Which rows this coordinator reduced against; goes in every capture. */
+    public readonly visibilityAuthority: ShadoWorldReducerVisibilityAuthority
   ) {
     world.tiles.x.forEach((x, cell) => {
       this.tileByCoordinate.set(`${x},${world.tiles.z[cell]}`, cell);
@@ -133,7 +146,9 @@ export class ShadoWorldVisibilityCoordinator {
     world: ShadoWorldSpatialPackage,
     options: ShadoWorldVisibilityCoordinatorOptions = {}
   ): Promise<ShadoWorldVisibilityCoordinator> {
-    const reducer = await ShadoWorldReducer.create(world);
+    const reducer = await ShadoWorldReducer.create(world, {
+      visibilityAuthority: options.visibilityAuthority,
+    });
     const mode = options.entityVisibilityWorker ?? 'auto';
     const stamps = world.objects?.stamps;
     let worker: ShadoEntityVisibilityWorker | null = null;
@@ -171,7 +186,13 @@ export class ShadoWorldVisibilityCoordinator {
       );
     }
     const hz = Math.max(0, options.worldObjectVisibilityHz ?? 0);
-    return new ShadoWorldVisibilityCoordinator(world, reducer, worker, hz > 0 ? 1000 / hz : 0);
+    return new ShadoWorldVisibilityCoordinator(
+      world,
+      reducer,
+      worker,
+      hz > 0 ? 1000 / hz : 0,
+      options.visibilityAuthority ?? 'package'
+    );
   }
 
   public get worldObjectVisibilityMode(): 'worker' | 'synchronous' {
