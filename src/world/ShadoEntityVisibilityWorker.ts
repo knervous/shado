@@ -487,7 +487,16 @@ export class ShadoEntityVisibilityWorker {
     cellFlags: ArrayLike<number>,
     options: ShadoEntityVisibilityOptions & {
       activePhaseMask?: number;
-      /** Multiplies projected radii inside the worker; useful when rows store scale. */
+      /**
+       * Legacy multiplier applied to radii at request time.
+       *
+       * Deprecated and defaulted to 1. Bucket membership is decided from the
+       * STORED radius, so a scale applied here would make membership and the
+       * final test disagree about the entity's size -- with membership using
+       * the smaller one, which is the unsafe direction. Callers put the
+       * envelope in the radius they write; this remains only so an older one
+       * keeps working.
+       */
       radiusScale?: number;
     }
   ): number {
@@ -844,6 +853,17 @@ function decodeBase64(value: string): Uint8Array {
 const SHADO_ENTITY_VISIBILITY_WORKER_SOURCE = String.raw`
 let state;
 
+/**
+ * Regions stored inline per entity before spilling to a map.
+ *
+ * Eight covers a bound up to three regions across in each axis, which is
+ * every ordinary actor and most props; the rare wider thing spills rather
+ * than forcing every entity to reserve room for it. At 65k entities the
+ * inline arrays are 4 MB, where reserving the 64-region cap for everyone
+ * would be 33 MB.
+ */
+const INLINE_MEMBERSHIPS = 8;
+
 self.onmessage = async event => {
   try {
     const message = event.data;
@@ -952,8 +972,21 @@ async function createState(message) {
     admissionPtr: 0,
     hierarchyRevision: -1,
     hierarchyCount: -1,
-    cellOffsets: new Uint32Array(cellCount + 2),
-    binMembers: new Uint32Array(layout.capacity),
+    /*
+     * Buckets as dense id arrays, plus each entity's record of where it sits
+     * in each of them. Removal is swap-with-last, and the entity that moved
+     * has its record repaired, so nothing walks the population to maintain
+     * the index.
+     */
+    bucketMembers: new Array(cellCount + 1).fill(null),
+    bucketCounts: new Uint32Array(cellCount + 1),
+    entityRegionCount: new Uint8Array(layout.capacity),
+    entityRegions: new Int32Array(layout.capacity * INLINE_MEMBERSHIPS),
+    entitySlotIn: new Int32Array(layout.capacity * INLINE_MEMBERSHIPS),
+    /** Entities touching more regions than fit inline; rare and bounded. */
+    entitySpill: new Map(),
+    membershipChanges: 0,
+    bucketsTouched: 0,
     candidateIds: new Uint32Array(layout.capacity),
     /*
      * Query-generation stamps, so an entity listed in several admitted
@@ -1098,32 +1131,142 @@ function forEachMembership(entity, outsideBucket, visit) {
   }
 }
 
-function rebuildHierarchy(count, revision) {
-  const bucketCount = state.cellCount + 1;
-  const outsideBucket = bucketCount - 1;
-  const counts = new Uint32Array(bucketCount);
-  let total = 0;
-  for (let entity = 0; entity < count; entity++) {
-    forEachMembership(entity, outsideBucket, bucket => {
-      counts[bucket]++;
-      total++;
-    });
+/** Reads an entity's stored membership into 'regions' and 'slots'. */
+function readMembership(entity, regions, slots) {
+  const count = state.entityRegionCount[entity];
+  if (count <= INLINE_MEMBERSHIPS) {
+    const base = entity * INLINE_MEMBERSHIPS;
+    for (let index = 0; index < count; index++) {
+      regions[index] = state.entityRegions[base + index];
+      slots[index] = state.entitySlotIn[base + index];
+    }
+    return count;
   }
-  // An entity now sits in every bucket it touches, so the member list is
-  // longer than the population rather than equal to it.
-  if (state.binMembers.length < total) state.binMembers = new Uint32Array(total);
-  state.cellOffsets[0] = 0;
-  for (let bucket = 0; bucket < bucketCount; bucket++) {
-    state.cellOffsets[bucket + 1] = state.cellOffsets[bucket] + counts[bucket];
+  const spill = state.entitySpill.get(entity);
+  for (let index = 0; index < count; index++) {
+    regions[index] = spill.regions[index];
+    slots[index] = spill.slots[index];
   }
-  const cursors = state.cellOffsets.slice(0, bucketCount);
-  for (let entity = 0; entity < count; entity++) {
-    forEachMembership(entity, outsideBucket, bucket => {
-      state.binMembers[cursors[bucket]++] = entity;
-    });
+  return count;
+}
+
+function writeMembership(entity, regions, slots, count) {
+  state.entityRegionCount[entity] = count;
+  if (count <= INLINE_MEMBERSHIPS) {
+    state.entitySpill.delete(entity);
+    const base = entity * INLINE_MEMBERSHIPS;
+    for (let index = 0; index < count; index++) {
+      state.entityRegions[base + index] = regions[index];
+      state.entitySlotIn[base + index] = slots[index];
+    }
+    return;
   }
-  state.hierarchyRevision = revision;
-  state.hierarchyCount = count;
+  state.entitySpill.set(entity, {
+    regions: regions.slice(0, count),
+    slots: slots.slice(0, count),
+  });
+}
+
+/** Repairs one entity's record of where it sits in one bucket. */
+function repairSlot(entity, bucket, slot) {
+  const count = state.entityRegionCount[entity];
+  if (count <= INLINE_MEMBERSHIPS) {
+    const base = entity * INLINE_MEMBERSHIPS;
+    for (let index = 0; index < count; index++) {
+      if (state.entityRegions[base + index] === bucket) {
+        state.entitySlotIn[base + index] = slot;
+        return;
+      }
+    }
+    return;
+  }
+  const spill = state.entitySpill.get(entity);
+  for (let index = 0; index < count; index++) {
+    if (spill.regions[index] === bucket) {
+      spill.slots[index] = slot;
+      return;
+    }
+  }
+}
+
+function bucketAdd(bucket, entity) {
+  let members = state.bucketMembers[bucket];
+  const count = state.bucketCounts[bucket];
+  if (!members) {
+    members = new Uint32Array(8);
+    state.bucketMembers[bucket] = members;
+  } else if (count >= members.length) {
+    const grown = new Uint32Array(members.length * 2);
+    grown.set(members);
+    state.bucketMembers[bucket] = grown;
+    members = grown;
+  }
+  members[count] = entity;
+  state.bucketCounts[bucket] = count + 1;
+  state.bucketsTouched++;
+  return count;
+}
+
+function bucketRemove(bucket, slot) {
+  const members = state.bucketMembers[bucket];
+  const last = state.bucketCounts[bucket] - 1;
+  if (!members || last < 0) return;
+  if (slot !== last) {
+    // Swap-with-last, then tell the entity that moved where it now sits.
+    const moved = members[last];
+    members[slot] = moved;
+    repairSlot(moved, bucket, slot);
+  }
+  state.bucketCounts[bucket] = last;
+  state.bucketsTouched++;
+}
+
+const MEMBERSHIP_SCRATCH_A = { regions: new Int32Array(64), slots: new Int32Array(64) };
+const MEMBERSHIP_SCRATCH_B = { regions: new Int32Array(64), slots: new Int32Array(64) };
+
+/**
+ * Brings one entity's bucket membership up to date.
+ *
+ * Returns without touching a bucket when the region list has not changed,
+ * which is the common case for ordinary motion: an actor takes many steps
+ * inside one region for every step that leaves it.
+ */
+function updateMembership(entity, outsideBucket) {
+  const wanted = MEMBERSHIP_SCRATCH_A.regions;
+  let wantedCount = 0;
+  forEachMembership(entity, outsideBucket, bucket => {
+    if (wantedCount < 64) wanted[wantedCount++] = bucket;
+  });
+  const current = MEMBERSHIP_SCRATCH_B.regions;
+  const currentSlots = MEMBERSHIP_SCRATCH_B.slots;
+  const currentCount = readMembership(entity, current, currentSlots);
+
+  let identical = currentCount === wantedCount;
+  for (let index = 0; identical && index < wantedCount; index++) {
+    if (current[index] !== wanted[index]) identical = false;
+  }
+  if (identical) return false;
+
+  state.membershipChanges++;
+  for (let index = 0; index < currentCount; index++) {
+    bucketRemove(current[index], currentSlots[index]);
+  }
+  const slots = MEMBERSHIP_SCRATCH_A.slots;
+  for (let index = 0; index < wantedCount; index++) {
+    slots[index] = bucketAdd(wanted[index], entity);
+  }
+  writeMembership(entity, wanted, slots, wantedCount);
+  return true;
+}
+
+/** Drops an entity out of every bucket, for a slot that left the population. */
+function clearMembership(entity) {
+  const regions = MEMBERSHIP_SCRATCH_B.regions;
+  const slots = MEMBERSHIP_SCRATCH_B.slots;
+  const count = readMembership(entity, regions, slots);
+  for (let index = 0; index < count; index++) bucketRemove(regions[index], slots[index]);
+  state.entityRegionCount[entity] = 0;
+  state.entitySpill.delete(entity);
 }
 
 function prepareCandidateIds(count, message) {
@@ -1146,9 +1289,11 @@ function prepareCandidateIds(count, message) {
     state.queryGeneration = 1;
   }
   const stamp = state.queryGeneration;
-  const take = (start, end) => {
-    for (let index = start; index < end; index++) {
-      const entity = state.binMembers[index];
+  const take = (bucket) => {
+    const members = state.bucketMembers[bucket];
+    const total = state.bucketCounts[bucket];
+    for (let index = 0; index < total; index++) {
+      const entity = members[index];
       if (state.seenStamp[entity] === stamp) continue;
       state.seenStamp[entity] = stamp;
       state.candidateIds[candidateCount++] = entity;
@@ -1156,12 +1301,9 @@ function prepareCandidateIds(count, message) {
   };
   for (let cell = 0; cell < state.cellCount; cell++) {
     if ((message.cellFlags[cell] & requiredCellBits) !== requiredCellBits) continue;
-    take(state.cellOffsets[cell], state.cellOffsets[cell + 1]);
+    take(cell);
   }
-  if (message.outsideWorldVisible) {
-    const outsideBucket = state.cellCount;
-    take(state.cellOffsets[outsideBucket], state.cellOffsets[outsideBucket + 1]);
-  }
+  if (message.outsideWorldVisible) take(state.cellCount);
   return candidateCount;
 }
 
@@ -1172,9 +1314,16 @@ function prepareCandidateIds(count, message) {
  * request carried rather than a mixture of that and whatever arrived since.
  */
 function applyDelta(delta) {
-  if (!delta) return false;
-  let membershipChanged = delta.count !== state.entityCount;
+  if (!delta) return;
+  const outsideBucket = state.cellCount;
+  const previousCount = state.entityCount;
   state.entityCount = delta.count;
+  /*
+   * A slot that left the population is removed from its buckets. Leaving it
+   * in would keep a departed entity as a candidate, and worse, a later
+   * occupant of the slot would inherit its membership.
+   */
+  for (let slot = delta.count; slot < previousCount; slot++) clearMembership(slot);
   for (let index = 0; index < delta.slots.length; index++) {
     const slot = delta.slots[index];
     if (slot >= state.layout.capacity) continue;
@@ -1185,26 +1334,32 @@ function applyDelta(delta) {
     state.enabled[slot] = delta.enabled[index];
     state.phaseMask[slot] = delta.policy[index] >>> 0;
     state.slotGeneration[slot] = delta.generations[index];
-    membershipChanged = true;
+    /*
+     * Transform and membership are separate facts. Only the slots this batch
+     * describes are considered, and of those only the ones whose region list
+     * actually changed touch a bucket -- an actor takes many steps inside one
+     * region for every step that leaves it.
+     */
+    if (state.cellCount) updateMembership(slot, outsideBucket);
   }
-  return membershipChanged;
+  // Slots appended since the last batch that this batch did not describe.
+  for (let slot = previousCount; slot < delta.count; slot++) {
+    if (state.cellCount && !state.entityRegionCount[slot]) {
+      updateMembership(slot, outsideBucket);
+    }
+  }
 }
 
 function reduce(message) {
   const started = performance.now();
-  const changed = applyDelta(message.delta);
+  const membershipStarted = performance.now();
+  state.membershipChanges = 0;
+  state.bucketsTouched = 0;
+  applyDelta(message.delta);
   const count = state.entityCount;
-  const revision = changed ? Atomics.add(state.control, 6, 1) + 1 : state.hierarchyRevision;
-  let hierarchyRebuildMs = 0;
-  if (
-    !state.publishFlags &&
-    state.cellCount &&
-    (revision !== state.hierarchyRevision || count !== state.hierarchyCount)
-  ) {
-    const rebuildStarted = performance.now();
-    rebuildHierarchy(count, revision);
-    hierarchyRebuildMs = performance.now() - rebuildStarted;
-  }
+  // Kept under the old name in the control block: it is still "time spent
+  // maintaining the spatial index", it is simply no longer a rebuild.
+  const hierarchyRebuildMs = performance.now() - membershipStarted;
   const candidateCount = prepareCandidateIds(count, message);
   ensureCapacity(candidateCount);
   const memory = state.wasm.memory.buffer;
