@@ -102,7 +102,7 @@ export function computeShadoWorldLayoutHash(world: ShadoWorldSpatialPackage): st
   }
   if (world.visibility) {
     feed(world.visibility.version);
-    feed(world.visibility.mode === 'distance-flood' ? 1 : 0);
+    feed(world.visibility.mode === 'sampled-occlusion' ? 2 : 1);
     feedFloatArray([
       world.visibility.size,
       world.visibility.originX,
@@ -457,7 +457,8 @@ export function validateShadoWorldPackage(world: ShadoWorldSpatialPackage): void
     const visibilityRegionCount = visibility.width * visibility.height;
     if (
       visibility.version !== 1 ||
-      visibility.mode !== 'distance-flood' ||
+      (visibility.mode !== 'distance-flood' &&
+        visibility.mode !== 'sampled-occlusion') ||
       !Number.isFinite(visibility.size) ||
       visibility.size <= 0 ||
       !Number.isFinite(visibility.originX) ||
@@ -468,7 +469,12 @@ export function validateShadoWorldPackage(world: ShadoWorldSpatialPackage): void
       visibility.width <= 0 ||
       !Number.isInteger(visibility.height) ||
       visibility.height <= 0 ||
-      visibility.occluderCount !== 0 ||
+      // Zero only makes sense for a flood; an occlusion bake must have tested
+      // against something, and a silent zero there would mean the occluders
+      // never reached the compiler and every row came back fully visible.
+      (visibility.mode === 'sampled-occlusion'
+        ? !Number.isInteger(visibility.occluderCount) || visibility.occluderCount <= 0
+        : visibility.occluderCount !== 0) ||
       !Number.isInteger(visibility.visibleRegionPairs) ||
       visibility.visibleRegionPairs <= 0 ||
       visibility.pvs.wordsPerRow !== Math.ceil(visibilityRegionCount / 32)

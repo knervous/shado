@@ -662,6 +662,9 @@ describe('Shado world spatial compiler', () => {
       maxClusterTriangles: 2,
     });
     const visibility = world.visibility!;
+    // Compiling without an explicit mode must still produce the shipped
+    // baseline: occlusion is opt-in, and a promotion that does not ask for it
+    // gets rows no weaker than the ones it had before.
     expect(visibility.mode).toBe('distance-flood');
     expect(visibility.occluderCount).toBe(0);
     const regionVisible = (from: number, to: number) => {

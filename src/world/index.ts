@@ -10,6 +10,8 @@ export * from './grass-field';
 export * from './authoring';
 export * from './compiler';
 export * from './collision';
+export * from './occlusion';
+export * from './visibility';
 export * from './lighting';
 export * from './point-lights';
 export * from './audio-emitters';

@@ -100,6 +100,39 @@ export type ShadoWorldTerrainMaterialAuthoring = {
   settings?: ShadoWorldTerrainSettings;
 };
 
+/**
+ * How a visibility package's rows were built.
+ *
+ * `distance-flood` admits every region inside `maxDistance`: it culls by range
+ * only, and is the shipped baseline. `sampled-occlusion` additionally drops
+ * pairs where no sampled viewpoint in one region reached any sampled point in
+ * the other without crossing occluder geometry. Sampling finds witnesses; the
+ * absence of a witness is evidence rather than proof, so that mode is
+ * experimental and is never chosen for a package implicitly.
+ */
+export type ShadoWorldVisibilityMode = 'distance-flood' | 'sampled-occlusion';
+
+/**
+ * What a bake did, as opposed to what it was asked to do.
+ *
+ * `mode` is the authority that actually produced the rows, and it differs from
+ * `requestedMode` whenever the bake could not run what was asked: a zone with
+ * no eligible occluders cannot be occlusion-tested, and returning fully
+ * visible rows labelled `sampled-occlusion` would claim a test that never ran.
+ */
+export type ShadoWorldVisibilityBakeReport = {
+  requestedMode: ShadoWorldVisibilityMode;
+  mode: ShadoWorldVisibilityMode;
+  fallbackReason: 'no-eligible-occluders' | null;
+  occluderTriangles: number;
+  /** Pairs admitted by the local guarantee, never offered to an occlusion test. */
+  forcedLocalPairs: number;
+  occlusionTested: number;
+  occluded: number;
+  pairsBeforeRowFlood: number;
+  pairsAfterRowFlood: number;
+};
+
 /** Settings consumed by the headless world compiler unless a caller explicitly overrides them. */
 export type ShadoWorldBakeSettings = {
   tileSize: number;
@@ -860,6 +893,17 @@ export type ShadoWorldCompileOptions = {
    * distant geometry resident whenever any part of it is on screen.
    */
   maxRenderChunkExtent?: number;
+  /**
+   * Which visibility authority to bake. Defaults to `distance-flood`.
+   * `sampled-occlusion` is experimental and never selected implicitly.
+   */
+  visibilityMode?: ShadoWorldVisibilityMode;
+  /**
+   * Bake diagnostics for the visibility pass: which authority actually ran,
+   * what it rejected and why it fell back. Reported rather than stored, so
+   * package bytes stay deterministic.
+   */
+  visibilityReport?: (report: ShadoWorldVisibilityBakeReport) => void;
   /** Width/depth of continuous camera/entity visibility regions. */
   visibilityRegionSize?: number;
   /** Ordinary-region first-pass envelope. Persistent vista cells bypass it. */
@@ -1118,15 +1162,15 @@ export type ShadoWorldSpatialPackage = {
    */
   visibility?: {
     version: 1;
-    /** Conservative authority used to construct region rows. */
-    mode: 'distance-flood';
+    /** How the rows were built. See {@link ShadoWorldVisibilityMode}. */
+    mode: ShadoWorldVisibilityMode;
     size: number;
     originX: number;
     originZ: number;
     width: number;
     height: number;
     maxDistance: number;
-    /** Reserved for future authored/height-aware occluders; zero in distance-flood mode. */
+    /** Occluder triangles the bake tested against; zero in distance-flood mode. */
     occluderCount: number;
     /** Directed set-bit count across all conservative PVS rows. */
     visibleRegionPairs: number;

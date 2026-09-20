@@ -388,12 +388,15 @@ export function compileShadoWorld(
   }
   const visibility = compileShadoWorldVisibility({
     bounds: worldBounds,
+    mode: options.visibilityMode ?? 'distance-flood',
+    report: options.visibilityReport,
     regionSize: visibilityRegionSize,
     maxDistance: visibilityMaxDistance,
     renderCellCenters: tileKeys.map(([x, z]) => [
       originX + (x + 0.5) * tileSize,
       originZ + (z + 0.5) * tileSize,
     ]),
+    renderCellBounds: cellBounds,
     persistentRenderCells,
     collisionPrimitives: options.collisionPrimitives ?? primitives,
   });
