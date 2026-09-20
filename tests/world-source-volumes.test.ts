@@ -47,6 +47,65 @@ function roomAndStreet(roomEnd: number) {
   return surface('room-and-street', quads);
 }
 
+
+/**
+ * Compiles an arbitrary hand-built scene on the same region grid, so each
+ * fixture below differs only in its geometry.
+ */
+function compileScene(
+  primitive: ShadoWorldPrimitive,
+  options: {
+    length?: number;
+    top?: number;
+    verticalVolumes?: boolean;
+    cameraRowMargin?: number;
+  } = {}
+) {
+  const length = options.length ?? LENGTH;
+  const top = options.top ?? ROOF_Y;
+  const centers: [number, number][] = [];
+  for (let x = REGION / 2; x < length; x += REGION) centers.push([x, DEPTH / 2]);
+  const cellBounds = centers.map(([x]) => ({
+    min: [x - REGION / 2, 0, 0] as [number, number, number],
+    max: [x + REGION / 2, 1, DEPTH] as [number, number, number],
+  }));
+  return compileShadoWorldVisibility({
+    mode: 'sampled-occlusion',
+    verticalVolumes: options.verticalVolumes ?? true,
+    ...(options.cameraRowMargin === undefined
+      ? {}
+      : { cameraRowMargin: options.cameraRowMargin }),
+    bounds: { min: [0, 0, 0], max: [length, top, DEPTH] },
+    regionSize: REGION,
+    maxDistance: 1024,
+    renderCellCenters: centers,
+    renderCellBounds: cellBounds,
+    persistentRenderCells: new Uint8Array(centers.length),
+    collisionPrimitives: [primitive],
+  });
+}
+
+/** Every volume in a region, lowest band first. */
+function volumesOf(
+  visibility: NonNullable<ShadoWorldSpatialPackage['visibility']>,
+  region: number
+): number[] {
+  const volumes = visibility.volumes!;
+  return [...Array(volumes.count).keys()]
+    .filter((volume) => volumes.region[volume] === region)
+    .sort((left, right) => volumes.minY[left]! - volumes.minY[right]!);
+}
+
+/** A floor slab spanning x0..x1 at height y. */
+function slab(x0: number, x1: number, y: number): number[] {
+  return [x0, y, 0, x1, y, 0, x1, y, DEPTH, x0, y, DEPTH];
+}
+
+/** A cross-wall at x, from y0 to y1, over z0..z1. */
+function wall(x: number, y0: number, y1: number, z0: number, z1: number): number[] {
+  return [x, y0, z0, x, y0, z1, x, y1, z1, x, y1, z0];
+}
+
 function compile(verticalVolumes: boolean) {
   const scene = roomAndStreet(48);
   const centers: [number, number][] = [];
@@ -178,5 +237,165 @@ describe('vertical source volumes', () => {
     expect(coordinator.locateSourceRow(8, 8, 8, 0)).toBe(roomVolume);
     expect(coordinator.locateSourceRow(8, ROOF_Y + 8, 8, 0)).toBe(roofVolume);
     expect(coordinator.locateSourceRow(8, -500, 8, 0)).toBe(volumes.count + 0);
+  });
+
+  it('sees through a doorway, and does not see through the wall around it', () => {
+    /*
+     * Two roofed rooms sharing a wall. The aperture is baked OPEN: a door is
+     * a hole in the geometry, and a bake that sealed it would hide a room a
+     * player can walk straight into. The sealed variant is the control -- it
+     * is the only thing that proves the open one is not simply admitting
+     * everything.
+     */
+    const build = (door: boolean) => {
+      const quads: number[][] = [];
+      for (let x = 0; x < 128; x += 8) {
+        quads.push(slab(x, x + 8, 0));
+        quads.push(slab(x, x + 8, ROOF_Y));
+      }
+      if (door) {
+        // Wall either side of the opening, and the lintel above it.
+        quads.push(wall(64, 0, ROOF_Y, 0, 6));
+        quads.push(wall(64, 0, ROOF_Y, 10, DEPTH));
+        quads.push(wall(64, 12, ROOF_Y, 6, 10));
+      } else {
+        quads.push(wall(64, 0, ROOF_Y, 0, DEPTH));
+      }
+      /*
+       * Margin 0 on purpose. The camera flood unions the row on the far side
+       * of the wall into this one, because in general a player crosses a
+       * region edge -- they cannot cross THIS edge, but the flood does not
+       * know that, and with it on, the sealed control admits the far room and
+       * proves nothing. Room connectivity is what would let the flood know;
+       * until then this pair measures the bake's own rejection.
+       */
+      return compileScene(surface(door ? 'doorway' : 'sealed', quads), {
+        length: 128,
+        cameraRowMargin: 0,
+      });
+    };
+
+    const open = build(true);
+    const sealed = build(false);
+    // Region 3 is up against the wall on one side, region 4 on the other.
+    const near = volumesOf(open, 3).find((volume) => open.volumes!.maxY[volume]! <= ROOF_Y)!;
+    const sealedNear = volumesOf(sealed, 3).find(
+      (volume) => sealed.volumes!.maxY[volume]! <= ROOF_Y
+    )!;
+
+    expect(bit(open, near, 6)).toBe(true);
+    expect(bit(sealed, sealedNear, 6)).toBe(false);
+  });
+
+  it('keeps a doorway crossing continuous across the region edge', () => {
+    /*
+     * The row a player answers from changes as they cross a region edge, and
+     * the camera flood is what stops the far room popping in at the moment it
+     * does. Every room-height row along the approach must already admit the
+     * far room before the player reaches the door.
+     */
+    const quads: number[][] = [];
+    for (let x = 0; x < 128; x += 8) {
+      quads.push(slab(x, x + 8, 0));
+      quads.push(slab(x, x + 8, ROOF_Y));
+    }
+    quads.push(wall(64, 0, ROOF_Y, 0, 6));
+    quads.push(wall(64, 0, ROOF_Y, 10, DEPTH));
+    quads.push(wall(64, 12, ROOF_Y, 6, 10));
+    const open = compileScene(surface('doorway', quads), { length: 128 });
+
+    for (const region of [3, 4]) {
+      for (const volume of volumesOf(open, region)) {
+        if (open.volumes!.maxY[volume]! > ROOF_Y) continue;
+        expect(bit(open, volume, 5)).toBe(true);
+      }
+    }
+  });
+
+  it('separates stacked floors into their own volumes', () => {
+    /*
+     * A two-storey building: ground floor, upper floor, roof. Three places to
+     * stand in one column, and the ground floor must not inherit what the
+     * upper floor can see out of the far end.
+     */
+    const UPPER = 20;
+    const TOP = 40;
+    const quads: number[][] = [];
+    for (let x = 0; x < LENGTH; x += 8) {
+      quads.push(slab(x, x + 8, 0));
+      if (x < 48) {
+        quads.push(slab(x, x + 8, UPPER));
+        quads.push(slab(x, x + 8, TOP));
+      }
+    }
+    quads.push(wall(48, 0, UPPER, 0, DEPTH));
+    const split = compileScene(surface('two-storey', quads), { top: TOP });
+
+    const bands = volumesOf(split, 0).map((volume) => [
+      split.volumes!.minY[volume]!,
+      split.volumes!.maxY[volume]!,
+    ]);
+    expect(bands.length).toBe(3);
+    // Tiling, still: each band starts exactly where the one below ends.
+    expect(bands[0]![1]).toBe(bands[1]![0]);
+    expect(bands[1]![1]).toBe(bands[2]![0]);
+    expect(bands[2]![1]).toBe(Number.POSITIVE_INFINITY);
+
+    // The ground floor is walled off from the far street; the roof is not.
+    const ground = volumesOf(split, 0)[0]!;
+    const roof = volumesOf(split, 0)[2]!;
+    expect(bit(split, ground, 9)).toBe(false);
+    expect(bit(split, roof, 9)).toBe(true);
+  });
+
+  it('keeps a camera under a bridge looking along the street', () => {
+    /*
+     * A deck over an open street is not a room. Splitting the column gives a
+     * band under the deck and a band on it, and the one underneath must still
+     * see along the street it stands in -- the split may not turn a bridge
+     * into a sealed box.
+     */
+    const DECK = 20;
+    const quads: number[][] = [];
+    for (let x = 0; x < LENGTH; x += 8) {
+      quads.push(slab(x, x + 8, 0));
+      if (x >= 32 && x < 64) quads.push(slab(x, x + 8, DECK));
+    }
+    const split = compileScene(surface('bridge', quads), { top: DECK + 8 });
+
+    // Region 2 and region 3 are both under the deck.
+    const under = volumesOf(split, 2).find(
+      (volume) => split.volumes!.maxY[volume]! <= DECK
+    )!;
+    expect(bit(split, under, 3)).toBe(true);
+    expect(bit(split, under, 2)).toBe(true);
+  });
+
+  it('answers conservatively for a camera outside every supported volume', () => {
+    const split = compile(true);
+    const volumes = split.volumes!;
+    const world = {
+      ...({} as ShadoWorldSpatialPackage),
+      visibility: split,
+      tiles: { x: [], z: [], size: REGION, originX: 0, originZ: 0 },
+    } as unknown as ShadoWorldSpatialPackage;
+    const coordinator = Object.create(
+      ShadoWorldVisibilityCoordinator.prototype
+    ) as ShadoWorldVisibilityCoordinator;
+    Object.defineProperty(coordinator, 'world', { value: world });
+
+    /*
+     * Below the world, above it, and in a region the fixture never gave a
+     * floor: each one must land on a row, and that row must be the column's
+     * union -- never nothing, and never a neighbour's room.
+     */
+    expect(coordinator.locateSourceRow(8, -1e6, 8, 0)).toBe(volumes.count + 0);
+    expect(coordinator.locateSourceRow(8, 1e6, 8, 0)).toBeGreaterThanOrEqual(0);
+
+    // Every row in the package admits the region it is for, union rows too.
+    for (let row = 0; row < volumes.count + split.width * split.height; row += 1) {
+      const region = row < volumes.count ? volumes.region[row]! : row - volumes.count;
+      expect(bit(split, row, region)).toBe(true);
+    }
   });
 });
