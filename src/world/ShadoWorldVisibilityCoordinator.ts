@@ -1,4 +1,5 @@
 import { MAX_REGIONS_PER_ENTITY, regionsForBounds } from './region-membership';
+import { referenceAdmits } from './visibility';
 import type { RegionGrid } from './region-membership';
 import type { ShadoWorldSpatialPackage, WorldVec3 } from './types';
 import type { ShadoWorldLightState } from './point-lights';
@@ -43,6 +44,15 @@ export type ShadoWorldVisibilityMasks = {
 export type ShadoWorldVisibilityFrame = ShadoWorldReductionView & {
   cameraCell: number;
   cameraRegion: number;
+  /**
+   * Per render cell, 1 where the row rejected the cell AND the distance-flood
+   * reference would have admitted it -- a POSITIVELY identified occlusion
+   * rejection. Zero everywhere else, including every cell a range rejection
+   * dropped. A consumer that suppresses coverage (a far proxy) may do so
+   * only on a 1 here; inferring the reason from its own distance test used
+   * live camera and cell centres the bake never used.
+   */
+  occlusionRejected: Uint8Array;
 };
 
 export type ShadoEntityVisibilitySoA = {
@@ -237,8 +247,30 @@ export class ShadoWorldVisibilityCoordinator {
       ...reduced,
       cameraCell,
       cameraRegion,
+      occlusionRejected: this.classifyRejections(reduced.cellFlags, cameraRegion),
     };
   }
+
+  /** See ShadoWorldVisibilityFrame.occlusionRejected. */
+  private classifyRejections(cellFlags: ArrayLike<number>, cameraRegion: number): Uint8Array {
+    const visibility = this.world.visibility;
+    const cellRegion = visibility?.cellRegion;
+    const count = cellRegion?.length ?? 0;
+    if (!this.rejectionScratch || this.rejectionScratch.length !== count) {
+      this.rejectionScratch = new Uint8Array(count);
+    }
+    const out = this.rejectionScratch;
+    out.fill(0);
+    // A flood's rows ARE the reference: nothing in them is an occlusion result.
+    if (!visibility || visibility.mode !== 'sampled-occlusion' || !cellRegion) return out;
+    for (let cell = 0; cell < count; cell += 1) {
+      if ((Number(cellFlags[cell]) & ShadoVisibilityBits.Pvs) !== 0) continue;
+      if (referenceAdmits(cameraRegion, cellRegion[cell]!, visibility)) out[cell] = 1;
+    }
+    return out;
+  }
+
+  private rejectionScratch: Uint8Array | null = null;
 
   public reduceEntities(
     entities: ShadoEntityVisibilitySoA,

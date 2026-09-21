@@ -1061,6 +1061,43 @@ function isLocalPair(from: number, to: number, grid: RegionGeometry): boolean {
   );
 }
 
+/**
+ * Would the distance-flood REFERENCE row for a camera in `cameraRegion` admit
+ * `target`? The same local and range rules the compiler applies, over the
+ * same region centres, flooded by the same camera margin.
+ *
+ * This is what lets a consumer name a rejection's reason instead of guessing
+ * it: a target the shipped row rejects but this admits was rejected by the
+ * occlusion bake. A target this rejects was out of range. Rows only ever
+ * shrink from the reference, so there is no third case.
+ *
+ * Staged packages are always built at the default margin (a bake at any
+ * other margin is diagnostic and refused for --write), which is why that is
+ * the margin used here.
+ */
+export function referenceAdmits(
+  cameraRegion: number,
+  target: number,
+  grid: { originX: number; originZ: number; size: number; width: number; height: number; maxDistance: number },
+  margin = CAMERA_ROW_MARGIN
+): boolean {
+  if (cameraRegion < 0 || target < 0) return true;
+  const cameraX = cameraRegion % grid.width;
+  const cameraZ = Math.floor(cameraRegion / grid.width);
+  for (let dz = -margin; dz <= margin; dz += 1) {
+    const z = cameraZ + dz;
+    if (z < 0 || z >= grid.height) continue;
+    for (let dx = -margin; dx <= margin; dx += 1) {
+      const x = cameraX + dx;
+      if (x < 0 || x >= grid.width) continue;
+      const source = z * grid.width + x;
+      if (isLocalPair(source, target, grid as RegionGeometry)) return true;
+      if (withinRange(source, target, grid as RegionGeometry)) return true;
+    }
+  }
+  return false;
+}
+
 /** The distance envelope, which is not an occlusion result and never reported as one. */
 function withinRange(from: number, to: number, grid: RegionGeometry): boolean {
   const fromX = from % grid.width, fromZ = Math.floor(from / grid.width);
