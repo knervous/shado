@@ -390,8 +390,10 @@ export class BabylonHiZAdapter {
       const material = binding.subMesh.getMaterial();
       const perSubMesh = !!material && (material as any)._storeEffectOnSubMeshes;
       if (binding.kind === 'mesh') {
-        if (!perSubMesh) {
-          // The material changed to one with a shared draw wrapper.
+        // A shared draw wrapper (material swapped), or a mesh that started
+        // driving its own instance count on the GPU: its bound and count are
+        // not ours to vouch for, so it goes back to the ordinary draw.
+        if (!perSubMesh || mesh.forcedInstanceCount > 0) {
           this.release(binding);
           continue;
         }
