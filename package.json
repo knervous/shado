@@ -198,6 +198,12 @@
       "import": "./dist/world/index.js",
       "require": "./dist/world/index.cjs",
       "default": "./dist/world/index.js"
+    },
+    "./world/hiz": {
+      "source": "./src/world/hiz/index.ts",
+      "types": "./dist/world/hiz/index.d.ts",
+      "import": "./dist/world/hiz/index.js",
+      "default": "./dist/world/hiz/index.js"
     }
   },
   "bin": {
