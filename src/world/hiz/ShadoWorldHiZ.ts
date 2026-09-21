@@ -69,6 +69,7 @@ export class ShadoWorldHiZ {
   private candidateCount = 0;
   private batchCount = 0;
   private segments: number[] = [];
+  private visibleWords = 0;
   private errors: string[] = [];
   public bias = SHADO_HIZ_DEPTH_BIAS;
 
@@ -152,6 +153,17 @@ export class ShadoWorldHiZ {
     return total / 1e6;
   }
 
+  /** GPU bytes this instance holds (pyramid, tables, outputs, parameters). */
+  public gpuBytes(): number {
+    const words = (this.layout?.words ?? 0) + this.levelParams.length * SHADO_HIZ_LEVEL_PARAM_WORDS;
+    const tables =
+      this.candidateCount * SHADO_HIZ_CANDIDATE_WORDS +
+      this.batchCount * (SHADO_HIZ_BATCH_WORDS + SHADO_HIZ_DRAW_ARGS_WORDS + 1) +
+      this.candidateCount /* flags */ +
+      SHADO_HIZ_VIEW_WORDS;
+    return (words + tables + this.visibleWords) * 4;
+  }
+
   public segmentOffset(batch: number): number {
     return this.segments[batch] ?? 0;
   }
@@ -183,6 +195,7 @@ export class ShadoWorldHiZ {
       segment += batch.capacity;
     });
     this.batchWords = batchWords;
+    this.visibleWords = segment;
     const words = new Float32Array(Math.max(1, candidates.length) * SHADO_HIZ_CANDIDATE_WORDS);
     const bits = new Uint32Array(words.buffer);
     candidates.forEach((c, i) => {

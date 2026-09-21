@@ -18,6 +18,7 @@ import { DepthRenderer } from '@babylonjs/core/Rendering/depthRenderer.js';
 // over HTTP.
 import '@babylonjs/core/ShadersWGSL/ShadersInclude/sceneUboDeclaration.js';
 import { ShadoWorldHiZ, type ShadoWorldHiZRunResult } from '../world/hiz/ShadoWorldHiZ';
+import { probeHiZCapability, type HiZCapabilityReport } from './hiz-capability-probe';
 import { SHADO_HIZ_DRAW_ARGS_WORDS } from '../world/hiz/wgsl';
 import type { ShadoHiZBatch, ShadoHiZCandidate, ShadoHiZViewInput } from '../world/hiz/types';
 
@@ -80,6 +81,11 @@ export interface BabylonHiZStatus {
   readonly depthSize: readonly [number, number];
   /** Depth prepass renders so far; stays flat while off. */
   readonly depthRenders: number;
+  /** H0.5 capability probe on this device ('pending' until it finishes). */
+  readonly capability: HiZCapabilityReport | 'pending';
+  readonly deviceLosses: number;
+  /** GPU bytes held by the pyramid, tables and outputs (not the depth target). */
+  readonly gpuBytes: number;
   /** Hi-Z depth targets registered on the camera: 1 while on, 0 while off. */
   readonly depthTargets: number;
   /**
@@ -118,11 +124,21 @@ interface BatchBinding {
 const MIN_BABYLON = [9, 27, 1];
 
 export class BabylonHiZAdapter {
-  public readonly hiz?: ShadoWorldHiZ;
+  private hizCore?: ShadoWorldHiZ;
+  /** The GPU core (undefined when the backend is unsupported). */
+  public get hiz(): ShadoWorldHiZ | undefined {
+    return this.hizCore;
+  }
+  /** H0.5: nothing is rejected until the device proved compute -> indirect draw. */
+  private capability: HiZCapabilityReport | 'pending' = 'pending';
+  private contextObservers: Array<() => void> = [];
+  private lastTargets: { meshes: readonly BabylonHiZMeshTarget[]; instanced: readonly BabylonHiZInstancedTarget[] } | null = null;
+  private deviceLosses = 0;
   private depth?: DepthRenderer;
   private readonly engine: WebGPUEngine;
   private bindings: BatchBinding[] = [];
   private instanced: Array<{ target: BabylonHiZInstancedTarget; batch: number; matrices: StorageBuffer }> = [];
+  private retired: Array<{ target: BabylonHiZInstancedTarget; batch: number; matrices: StorageBuffer }> = [];
   private candidateIds: number[] = [];
   private occluders: AbstractMesh[] = [];
   private mode: BabylonHiZMode = 'off';
@@ -179,7 +195,22 @@ export class BabylonHiZAdapter {
       return;
     }
     if ((this.engine as any).useReverseDepthBuffer) this.convention = 'reversed';
-    this.hiz = new ShadoWorldHiZ(this.engine);
+    this.hizCore = new ShadoWorldHiZ(this.engine);
+    this.runProbe();
+    // Device loss (Babylon rebuilds its own device when it handles loss):
+    // every draw context and GPU object of ours is gone. Admit, then rebuild
+    // on restore and prove the new device before culling again.
+    const lost = this.engine.onContextLostObservable.add(() => {
+      this.deviceLosses++;
+      this.capability = 'pending';
+      for (const binding of this.bindings) binding.context = undefined;
+      this.reason = 'device lost';
+    });
+    const restored = this.engine.onContextRestoredObservable.add(() => this.rebuildAfterDeviceLoss());
+    this.contextObservers.push(
+      () => this.engine.onContextLostObservable.remove(lost),
+      () => this.engine.onContextRestoredObservable.remove(restored)
+    );
     // No depth target until Hi-Z is switched on: off costs no rendering work.
     this.resizeObserver = this.engine.onResizeObservable.add(() => {
       if (this.mode === 'hiz') this.createDepth();
@@ -257,9 +288,18 @@ export class BabylonHiZAdapter {
    */
   public setTargets(meshes: readonly BabylonHiZMeshTarget[], instanced: readonly BabylonHiZInstancedTarget[] = []): void {
     if (!this.hiz) return;
+    this.lastTargets = { meshes: [...meshes], instanced: [...instanced] };
     this.targetGeneration++;
     this.detachAll();
-    for (const entry of this.instanced) entry.matrices.dispose();
+    // An instanced target dropped from the set still draws every member
+    // through its material, so it keeps its matrices and stays bound (to the
+    // new tables, uncompacted) until it is published again or disposed.
+    const kept = new Set(instanced.map((target) => target.mesh));
+    for (const entry of [...this.instanced, ...this.retired]) {
+      if (kept.has(entry.target.mesh)) entry.matrices.dispose();
+      else if (!this.retired.includes(entry)) this.retired.push(entry);
+    }
+    this.retired = this.retired.filter((entry) => !kept.has(entry.target.mesh) && !entry.target.mesh.isDisposed());
     this.instanced = [];
     const candidates: ShadoHiZCandidate[] = [];
     const batches: ShadoHiZBatch[] = [];
@@ -362,7 +402,16 @@ export class BabylonHiZAdapter {
     return {
       backend: (this.engine as any).isWebGPU ? 'webgpu' : (this.engine as any).webGLVersion === 2 ? 'webgl2' : 'other',
       requested: this.mode,
-      actual: this.hiz && this.mode === 'hiz' && this.lastRun?.complete && !this.lastRun.admitAll ? 'hiz' : 'off',
+      actual:
+        this.hiz &&
+        this.mode === 'hiz' &&
+        this.capability !== 'pending' &&
+        this.capability.ok &&
+        this.bindings.some((binding) => binding.context) &&
+        this.lastRun?.complete &&
+        !this.lastRun.admitAll
+          ? 'hiz'
+          : 'off',
       reason: this.reason,
       babylonVersion: BABYLON.Engine.Version,
       frameId: this.engine.frameId,
@@ -372,6 +421,9 @@ export class BabylonHiZAdapter {
       lastRun: this.lastRun,
       depthSize: [size?.width ?? 0, size?.height ?? 0],
       depthRenders: this.depthRenders,
+      capability: this.capability,
+      deviceLosses: this.deviceLosses,
+      gpuBytes: this.hiz?.gpuBytes() ?? 0,
       cost: {
         cpuDepthMs: this.costDepth,
         cpuCullMs: this.costCull,
@@ -390,16 +442,50 @@ export class BabylonHiZAdapter {
     return this.depth?.getDepthMap();
   }
 
+  private runProbe(): void {
+    const device = (this.engine as any)._device as GPUDevice | undefined;
+    if (!device) {
+      this.capability = { ok: false, reason: 'no WebGPU device', limits: {}, optional: { timestampQuery: false, indirectFirstInstance: false }, ms: 0 };
+      return;
+    }
+    this.capability = 'pending';
+    void probeHiZCapability(device).then((report) => {
+      if ((this.engine as any)._device !== device) return; // superseded by a device loss
+      this.capability = report;
+      if (!report.ok) {
+        this.detachAll();
+        this.disposeDepth();
+        this.reason = `capability probe failed: ${report.reason}`;
+      }
+    });
+  }
+
+  private rebuildAfterDeviceLoss(): void {
+    this.disposeDepth();
+    for (const entry of [...this.instanced, ...this.retired]) entry.matrices.dispose();
+    this.instanced = [];
+    this.retired = [];
+    this.bindings = [];
+    this.hizCore = new ShadoWorldHiZ(this.engine);
+    this.runProbe();
+    if (this.lastTargets) this.setTargets(this.lastTargets.meshes, this.lastTargets.instanced);
+    this.setOccluders(this.occluders);
+    if (this.mode === 'hiz') this.createDepth();
+    this.reason = 'rebuilt after device loss';
+  }
+
   public dispose(): void {
+    for (const remove of this.contextObservers.splice(0)) remove();
     this.detachAll();
     if (this.beforeDraw) this.scene.onBeforeDrawPhaseObservable.remove(this.beforeDraw);
     if (this.resizeObserver) this.engine.onResizeObservable.remove(this.resizeObserver as any);
     this.disposeDepth();
-    for (const entry of this.instanced) {
+    for (const entry of [...this.instanced, ...this.retired]) {
       entry.target.mesh.forcedInstanceCount = 0;
       entry.matrices.dispose();
     }
     this.instanced = [];
+    this.retired = [];
     this.hiz?.dispose();
   }
 
@@ -496,6 +582,11 @@ export class BabylonHiZAdapter {
   }
 
   private cullForDraw(): void {
+    if (this.capability === 'pending' || !this.capability.ok) {
+      this.detachAll();
+      this.reason = this.capability === 'pending' ? 'probing device capability' : `capability probe failed: ${this.capability.reason}`;
+      return;
+    }
     if (this.debugStage === 'depth') {
       this.detachAll();
       this.reason = 'profiling: depth prepass only';
@@ -642,15 +733,18 @@ export class BabylonHiZAdapter {
 
   private bindInstancedMaterials(compacted: boolean): void {
     if (!this.hiz) return;
-    for (const { target, batch, matrices } of this.instanced) {
-      const material = target.material;
-      material.setStorageBuffer('hizMatrices', matrices);
-      material.setStorageBuffer('hizVisible', this.hiz.visibleMembers);
-      material.setStorageBuffer('hizOverflow', this.hiz.overflow);
-      material.setFloat('hizSegment', this.hiz.segmentOffset(batch));
-      material.setFloat('hizBatch', batch);
-      material.setFloat('hizCompacted', compacted ? 1 : 0);
-    }
+    const bind = (entry: { target: BabylonHiZInstancedTarget; batch: number; matrices: StorageBuffer }, culled: boolean) => {
+      const material = entry.target.material;
+      material.setStorageBuffer('hizMatrices', entry.matrices);
+      // Always valid bindings: the tables are recreated by setCandidates.
+      material.setStorageBuffer('hizVisible', this.hiz!.visibleMembers);
+      material.setStorageBuffer('hizOverflow', this.hiz!.overflow);
+      material.setFloat('hizSegment', culled ? this.hiz!.segmentOffset(entry.batch) : 0);
+      material.setFloat('hizBatch', culled ? entry.batch : 0);
+      material.setFloat('hizCompacted', culled ? 1 : 0);
+    };
+    for (const entry of this.instanced) bind(entry, compacted);
+    for (const entry of this.retired) bind(entry, false);
   }
 }
 

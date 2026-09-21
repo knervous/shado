@@ -223,4 +223,27 @@ describe('Hi-Z WGSL on headless Dawn', () => {
       }
     }, 30_000);
   }
+
+  it('overflow admits: a batch with more visible members than capacity draws them all, flagged', async () => {
+    const headless = await installHeadlessWebGpu();
+    let device: GPUDevice | undefined;
+    try {
+      const adapter = await headless.gpu.requestAdapter();
+      device = (await adapter!.requestDevice()) as GPUDevice;
+      const view = hizFixtureView(W, H, 'normal');
+      // Nothing occludes: every box that is on screen is visible.
+      const depth = new Float32Array(W * H).fill(1);
+      const boxes = candidates();
+      const gpu = await runGpu(device, depth, view, boxes, () => 0, [3]);
+      expect(gpu.args[1]).toBe(3);
+      expect(gpu.overflow[0]).toBe(1);
+      // An all-or-nothing batch never overflows: it is 0 or its whole count.
+      const whole = await runGpu(device, depth, view, boxes, () => 0, [1], () => 5);
+      expect(whole.args[1]).toBe(5);
+      expect(whole.overflow[0]).toBe(0);
+    } finally {
+      device?.destroy();
+      headless.dispose?.();
+    }
+  }, 30_000);
 });

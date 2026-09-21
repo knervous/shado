@@ -9,3 +9,4 @@ export * from './wgsl';
 export * from './fixture-math';
 export * from './ShadoWorldHiZ';
 export * from '../../render/BabylonHiZAdapter';
+export * from '../../render/hiz-capability-probe';
