@@ -221,6 +221,11 @@ export type ShadoWorldVisibilityCompileInput = {
    */
   cameraExtent?: { minY: number; maxY: number };
   /**
+   * Authored rooms and the portals between them, as the ONLY thing allowed
+   * to withhold a neighbour's row. See ShadoWorldSourceTopology.
+   */
+  sourceTopology?: ShadoWorldSourceTopology;
+  /**
    * How many regions of camera-position slack each source row carries, in
    * place of {@link CAMERA_ROW_MARGIN}. Lowering it is a measurement lever,
    * not a shipping default: the margin is what stops geometry popping as a
@@ -274,6 +279,28 @@ export type ShadoWorldVisibilityCompileInput = {
  * is a conservative distance flood. Heightless 2D wall rays cannot prove that
  * an entire vertical region is hidden and caused visible skyline holes.
  */
+/**
+ * Authored camera domains: rooms with stable ids, and the portals between them.
+ *
+ * This is the explicit contract the flood needs before it may withhold
+ * anything. A volume counts as inside a room only when its whole column band
+ * lies within the room's box; a volume partly inside is unknown. Two volumes
+ * in DIFFERENT rooms with NO portal between them are the only pair the flood
+ * does not union. Everything else -- exterior, unknown, same room, joined by
+ * a portal -- stays connected.
+ *
+ * Portals are baked open. A closed door can only add overdraw; an open door
+ * must never reveal content a closed-door bake left out, so the bake assumes
+ * every door that can open is open.
+ *
+ * Sealed rooms are never inferred from collision or from missing floor
+ * samples. They are authored here or they do not exist.
+ */
+export type ShadoWorldSourceTopology = {
+  rooms: ReadonlyArray<{ id: string; min: readonly [number, number, number]; max: readonly [number, number, number] }>;
+  portals: ReadonlyArray<{ a: string; b: string }>;
+};
+
 export function compileShadoWorldVisibility(
   input: ShadoWorldVisibilityCompileInput
 ): NonNullable<ShadoWorldSpatialPackage['visibility']> {
@@ -751,6 +778,54 @@ export function compileShadoWorldVisibility(
       regionOffset[index + 1] += regionOffset[index]!;
     }
   }
+  /*
+   * Which authored room each volume lies WHOLLY inside. Partly inside is
+   * unknown, and unknown is connected -- a room box that clips a column
+   * says nothing about the part of the column outside it.
+   */
+  const topology = input.sourceTopology;
+  const roomCount = useVolumes && topology ? topology.rooms.length : 0;
+  const roomPortal = new Uint8Array(roomCount * roomCount);
+  const volumeRoom: number[] = new Array(volumeRegion.length).fill(-1);
+  if (useVolumes && topology && roomCount) {
+    const roomIndex = new Map<string, number>();
+    topology.rooms.forEach((room, index) => {
+      if (roomIndex.has(room.id)) throw new RangeError(`Source topology repeats room id '${room.id}'`);
+      if (![...room.min, ...room.max].every(Number.isFinite)) {
+        throw new RangeError(`Source topology room '${room.id}' has non-finite bounds`);
+      }
+      roomIndex.set(room.id, index);
+    });
+    for (const portal of topology.portals) {
+      const a = roomIndex.get(portal.a);
+      const b = roomIndex.get(portal.b);
+      if (a === undefined || b === undefined) {
+        throw new RangeError(`Source topology portal names an unknown room: ${portal.a} -> ${portal.b}`);
+      }
+      roomPortal[a * roomCount + b] = 1;
+      roomPortal[b * roomCount + a] = 1;
+    }
+    for (let volume = 0; volume < volumeRegion.length; volume += 1) {
+      const region = volumeRegion[volume]!;
+      const x0 = originX + (region % width) * size;
+      const z0 = originZ + Math.floor(region / width) * size;
+      const x1 = x0 + size;
+      const z1 = z0 + size;
+      const y0 = volumeMinY[volume]!;
+      const y1 = volumeMaxY[volume]!;
+      for (let room = 0; room < roomCount; room += 1) {
+        const box = topology.rooms[room]!;
+        if (
+          x0 >= box.min[0] && x1 <= box.max[0] &&
+          z0 >= box.min[2] && z1 <= box.max[2] &&
+          y0 >= box.min[1] && y1 <= box.max[1]
+        ) {
+          volumeRoom[volume] = room;
+          break;
+        }
+      }
+    }
+  }
   const regionSamplingMs = clock() - samplingStarted;
 
   const volumeCount = volumeRegion.length;
@@ -849,7 +924,9 @@ export function compileShadoWorldVisibility(
     volumeMaxY,
     volumeCount,
     regionCount,
-    volumeEyes.map((points) => points !== null),
+    volumeRoom,
+    roomPortal,
+    roomCount,
     useVolumes,
     width,
     height,
@@ -1016,10 +1093,13 @@ function floodVolumeRows(
   volumeCount: number,
   regionCount: number,
   /**
-   * Whether each volume is a place a camera can actually be -- whether the
-   * sampler found a floor to stand on inside it.
+   * The authored room each volume lies wholly inside, or -1 for exterior or
+   * unknown. See ShadoWorldSourceTopology.
    */
-  volumeStandable: readonly boolean[],
+  volumeRoom: readonly number[],
+  /** rooms x rooms, 1 where an authored portal joins them. */
+  roomPortal: Uint8Array,
+  roomCount: number,
   /** Whether the layout carries a union row per region after the volumes. */
   unionRows: boolean,
   width: number,
@@ -1059,18 +1139,25 @@ function floodVolumeRows(
           if (volumeMinY[other]! >= volumeMaxY[volume]!) continue;
           if (volumeMaxY[other]! <= volumeMinY[volume]!) continue;
           /*
-           * And only FROM somewhere a camera can be. A volume with no floor
-           * holds no eyes, so its pairs went untested and its row admits
-           * everything -- and no player can cross an edge into it, because
-           * there is nothing there to stand on. Letting it donate that row
-           * makes every room beside solid rock fully visible, which on an
-           * interior zone is most of them.
+           * Withheld only across a CERTIFIED boundary: both volumes lie in
+           * authored rooms, the rooms differ, and no authored portal joins
+           * them. Portals are baked open, so a door that can open is a door
+           * that is open here. Anything short of that -- exterior, unknown,
+           * a volume only partly inside a room, a sample that simply found no
+           * floor -- stays connected.
            *
-           * Only where volumes exist: an unsplit bake is the layout every
-           * shipped package already uses, and narrowing its flood here would
-           * change rows nothing in this work asked to change.
+           * A missed floor sample is NOT a certificate. It was used as one
+           * ("no floor, so no camera can be there") and that is wrong: a
+           * third-person camera extends past floors, and a miss is only a
+           * miss.
            */
-          if (unionRows && !volumeStandable[other]) continue;
+          if (unionRows) {
+            const here = volumeRoom[volume]!;
+            const there = volumeRoom[other]!;
+            if (here >= 0 && there >= 0 && here !== there && !roomPortal[here * roomCount + there]) {
+              continue;
+            }
+          }
           unionInto(volume * wordsPerRow, other * wordsPerRow);
         }
       }
