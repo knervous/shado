@@ -173,7 +173,7 @@ export class BabylonHiZAdapter {
    * the passes but attaches nothing (draws stay ordinary); 'full' is normal.
    * Anything but 'full' culls nothing.
    */
-  public debugStage: 'full' | 'depth' | 'compute' = 'full';
+  public debugStage: 'full' | 'depth' | 'compute' | 'no-copy' = 'full';
   /**
    * Mesh targets drawing fewer triangles than this (index count / 3 x
    * instances, this frame) stay on the ordinary draw. Every indirect draw has
@@ -680,6 +680,8 @@ export class BabylonHiZAdapter {
       // changes; pin it so the compute-authored count is never overwritten.
       context._currentInstanceCount = binding.babylonInstances;
       if (!context.indirectDrawBuffer) continue;
+      // Profiling only: indirect draws with whatever arguments they hold.
+      if (this.debugStage === 'no-copy') continue;
       if (!encoderReady) {
         engine._endCurrentRenderPass();
         encoderReady = true;
