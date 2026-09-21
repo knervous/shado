@@ -21,8 +21,13 @@ export const SHADO_HIZ_WORKGROUP_1D = 64;
 
 /** Words per candidate record: (min.xyz, batch) (max.xyz, member). */
 export const SHADO_HIZ_CANDIDATE_WORDS = 8;
-/** Words per batch record: indexCount, firstIndex, capacity, segmentOffset. */
-export const SHADO_HIZ_BATCH_WORDS = 4;
+/**
+ * Words per batch record: indexCount, firstIndex, capacity, segmentOffset,
+ * wholeInstances, pad x3. `wholeInstances` > 0 marks a batch drawn all-or-
+ * nothing (a thin-instanced mesh culled by its whole bound): any visible
+ * member draws exactly that many instances, none draws zero.
+ */
+export const SHADO_HIZ_BATCH_WORDS = 8;
 /** Words per indexed-indirect argument block. */
 export const SHADO_HIZ_DRAW_ARGS_WORDS = 5;
 
@@ -272,7 +277,8 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
 }
 
 /**
- * Clamps each batch's instance count to its capacity and records overflow.
+ * Clamps each batch's instance count to its capacity and records overflow;
+ * an all-or-nothing batch becomes 0 or its whole instance count.
  * An overflowed batch draws all `capacity` members through the identity
  * mapping (the vertex path reads hizOverflow), so overflow can only admit.
  */
@@ -288,7 +294,12 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let b = id.x;
   if (b >= batchCount) { return; }
   let capacity = hizBatches[b * ${SHADO_HIZ_BATCH_WORDS}u + 2u];
+  let whole = hizBatches[b * ${SHADO_HIZ_BATCH_WORDS}u + 4u];
   let at = b * ${SHADO_HIZ_DRAW_ARGS_WORDS}u + 1u;
+  if (whole > 0u) {
+    hizDrawArgs[at] = select(0u, whole, hizDrawArgs[at] > 0u);
+    return;
+  }
   if (hizDrawArgs[at] > capacity) {
     hizDrawArgs[at] = capacity;
     hizOverflow[b] = 1u;

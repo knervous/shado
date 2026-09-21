@@ -85,9 +85,20 @@ export interface BabylonHiZStatus {
 
 interface BatchBinding {
   batch: number;
+  /** Index of this batch's (single) candidate; -1 for instanced targets. */
+  candidate: number;
   subMesh: SubMesh;
+  mesh: Mesh;
+  /**
+   * `mesh`: a plain or thin-instanced mesh culled whole by its bound, drawn
+   * all-or-nothing with its current instance count. `instanced`: a compacted
+   * batch drawn through createBabylonHiZInstancedMaterial.
+   */
+  kind: 'mesh' | 'instanced';
   /** Instance count Babylon itself will ask for; attach pins it. */
   babylonInstances: number;
+  /** Last world bound published for `candidate` (float64: compared to Babylon's doubles). */
+  bound: Float64Array;
   context?: WebGPUDrawContextLike;
 }
 
@@ -159,9 +170,17 @@ export class BabylonHiZAdapter {
   }
 
   /**
-   * Publishes what Hi-Z may cull. Each indexed submesh of a plain mesh is one
-   * capacity-1 batch; each instanced target is one batch of its members.
-   * Non-indexed submeshes stay on the ordinary draw (never culled).
+   * Publishes what Hi-Z may cull. Each indexed submesh of a plain or
+   * thin-instanced mesh is one all-or-nothing batch tested by the mesh's
+   * world bound (for thin instances, Babylon's instance-inclusive bound; the
+   * owner must call thinInstanceRefreshBoundingInfo when it rewrites them).
+   * Instance counts and bounds are re-read every frame, so streaming thin
+   * instances needs no rebuild; adding/removing meshes does.
+   *
+   * Never culled (left on the ordinary draw): non-indexed submeshes, meshes
+   * driving `forcedInstanceCount` themselves (their instances live on the
+   * GPU, outside Babylon's bound), and materials whose draw wrapper is shared
+   * across meshes (`_storeEffectOnSubMeshes` false).
    */
   public setTargets(meshes: readonly BabylonHiZMeshTarget[], instanced: readonly BabylonHiZInstancedTarget[] = []): void {
     if (!this.hiz) return;
@@ -174,14 +193,19 @@ export class BabylonHiZAdapter {
     this.candidateIds = [];
     for (const target of meshes) {
       const mesh = target.mesh;
-      if (!mesh.getIndices()?.length) continue;
+      if (mesh.isDisposed() || !mesh.getIndices()?.length || mesh.forcedInstanceCount > 0) continue;
+      // Not refreshBoundingInfo(): on a thin-instanced mesh that would drop
+      // the instance extents back to the prototype's.
       mesh.computeWorldMatrix(true);
-      mesh.refreshBoundingInfo();
       const box = mesh.getBoundingInfo().boundingBox;
+      const instances = thinInstanceCount(mesh);
       for (const subMesh of mesh.subMeshes ?? []) {
+        const material = subMesh.getMaterial();
+        if (material && !(material as any)._storeEffectOnSubMeshes) continue;
         const batch = batches.length;
-        batches.push({ indexCount: subMesh.indexCount, firstIndex: subMesh.indexStart, capacity: 1 });
+        batches.push({ indexCount: subMesh.indexCount, firstIndex: subMesh.indexStart, capacity: 1, wholeInstances: instances });
         const id = target.id ?? mesh.uniqueId;
+        const candidate = candidates.length;
         candidates.push({
           id,
           min: [box.minimumWorld.x, box.minimumWorld.y, box.minimumWorld.z],
@@ -190,7 +214,18 @@ export class BabylonHiZAdapter {
           member: 0,
         });
         this.candidateIds.push(id);
-        bindings.push({ batch, subMesh, babylonInstances: 1 });
+        bindings.push({
+          batch,
+          candidate,
+          subMesh,
+          mesh,
+          kind: 'mesh',
+          babylonInstances: instances,
+          bound: Float64Array.of(
+            box.minimumWorld.x, box.minimumWorld.y, box.minimumWorld.z,
+            box.maximumWorld.x, box.maximumWorld.y, box.maximumWorld.z
+          ),
+        });
       }
     }
     for (const target of instanced) {
@@ -217,7 +252,7 @@ export class BabylonHiZAdapter {
       // The prototype's own box says nothing about where members are; the
       // members' bounds are the cull input.
       target.mesh.alwaysSelectAsActiveMesh = true;
-      bindings.push({ batch, subMesh, babylonInstances: count });
+      bindings.push({ batch, candidate: -1, subMesh, mesh: target.mesh, kind: 'instanced', babylonInstances: count, bound: new Float64Array(6) });
       this.instanced.push({ target, batch, matrices });
     }
     this.hiz.setCandidates(candidates, batches);
@@ -343,12 +378,26 @@ export class BabylonHiZAdapter {
 
   private attachAndCopy(): void {
     const engine = this.engine as any;
-    const args = this.hiz!.drawArgs.getBuffer().underlyingResource as GPUBuffer;
+    const hiz = this.hiz!;
+    const args = hiz.drawArgs.getBuffer().underlyingResource as GPUBuffer;
     const passId = this.camera.renderPassId;
     let encoderReady = false;
     for (const binding of this.bindings) {
+      const mesh = binding.mesh;
+      // A mesh Babylon will not draw this frame needs no arguments. One that
+      // it will draw always gets THIS frame's block below, never a stale one.
+      if (mesh.isDisposed() || !mesh.isEnabled()) continue;
       const material = binding.subMesh.getMaterial();
-      const wrapper = material && (material as any)._storeEffectOnSubMeshes
+      const perSubMesh = !!material && (material as any)._storeEffectOnSubMeshes;
+      if (binding.kind === 'mesh') {
+        if (!perSubMesh) {
+          // The material changed to one with a shared draw wrapper.
+          this.release(binding);
+          continue;
+        }
+        this.syncMesh(binding);
+      }
+      const wrapper = perSubMesh
         ? (binding.subMesh as any)._getDrawWrapper(passId)
         : (material as any)?._getDrawWrapper?.();
       const context = wrapper?.drawContext as WebGPUDrawContextLike | undefined;
@@ -380,15 +429,39 @@ export class BabylonHiZAdapter {
     this.bindInstancedMaterials(true);
   }
 
-  private detachAll(): void {
-    for (const binding of this.bindings) {
-      const context = binding.context;
-      if (!context) continue;
-      context.enableIndirectDraw = false;
-      // Force Babylon to rewrite its own arguments on the next draw.
-      context._currentInstanceCount = -1;
-      binding.context = undefined;
+  /**
+   * Re-reads a mesh target's instance count and world bound. Both reach the
+   * GPU as queue writes, which land before this frame's command buffer, so
+   * the cull that already ran in this frame's encoder sees them.
+   */
+  private syncMesh(binding: BatchBinding): void {
+    const hiz = this.hiz!;
+    const instances = thinInstanceCount(binding.mesh);
+    if (instances !== binding.babylonInstances) {
+      binding.babylonInstances = instances;
+      hiz.setWholeInstances(binding.batch, instances);
     }
+    const box = binding.mesh.getBoundingInfo().boundingBox;
+    const b = binding.bound;
+    const lo = box.minimumWorld;
+    const hi = box.maximumWorld;
+    if (b[0] !== lo.x || b[1] !== lo.y || b[2] !== lo.z || b[3] !== hi.x || b[4] !== hi.y || b[5] !== hi.z) {
+      b[0] = lo.x; b[1] = lo.y; b[2] = lo.z; b[3] = hi.x; b[4] = hi.y; b[5] = hi.z;
+      hiz.updateBounds(binding.candidate, [lo.x, lo.y, lo.z], [hi.x, hi.y, hi.z]);
+    }
+  }
+
+  private release(binding: BatchBinding): void {
+    const context = binding.context;
+    if (!context) return;
+    context.enableIndirectDraw = false;
+    // Force Babylon to rewrite its own arguments on the next draw.
+    context._currentInstanceCount = -1;
+    binding.context = undefined;
+  }
+
+  private detachAll(): void {
+    for (const binding of this.bindings) this.release(binding);
     this.bindInstancedMaterials(false);
   }
 
@@ -404,6 +477,12 @@ export class BabylonHiZAdapter {
       material.setFloat('hizCompacted', compacted ? 1 : 0);
     }
   }
+}
+
+/** Instances Babylon draws for a mesh target: its thin instances, or 1. */
+function thinInstanceCount(mesh: Mesh): number {
+  const count = (mesh as any).thinInstanceCount as number | undefined;
+  return count && count > 0 ? count : 1;
 }
 
 function sameMatrix(a: ArrayLike<number>, b: ArrayLike<number>): boolean {

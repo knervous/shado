@@ -52,6 +52,12 @@ export interface ShadoHiZBatch {
   readonly firstIndex: number;
   /** Candidates addressed to this batch; its visible-id segment size. */
   readonly capacity: number;
+  /**
+   * > 0: draw all-or-nothing with this many instances (a thin-instanced mesh
+   * tested by its whole bound). The count can change per frame through
+   * `ShadoWorldHiZ.setWholeInstances`.
+   */
+  readonly wholeInstances?: number;
 }
 
 /** Why a candidate is kept without a depth comparison. */

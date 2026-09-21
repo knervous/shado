@@ -19,6 +19,7 @@ import {
   emitShadoHiZReduceWGSL,
   emitShadoHiZResetWGSL,
   emitShadoHiZSeedWGSL,
+  SHADO_HIZ_BATCH_WORDS,
   SHADO_HIZ_FLAG_ADMIT_BASE,
   SHADO_HIZ_FLAG_REJECTED,
   SHADO_HIZ_VIEW_WORDS,
@@ -59,7 +60,8 @@ async function runGpu(
   view: ShadoHiZViewInput,
   boxes: ReturnType<typeof candidates>,
   batchOf: (i: number) => number,
-  batchCapacities: number[]
+  batchCapacities: number[],
+  wholeOf: (b: number) => number = () => 0
 ) {
   const U = (globalThis as any).GPUBufferUsage;
   const T = (globalThis as any).GPUTextureUsage;
@@ -91,9 +93,9 @@ async function runGpu(
     candBits[i * 8 + 7] = members[batch]!++;
   });
   let segment = 0;
-  const batchWords = new Uint32Array(batchCapacities.length * 4);
+  const batchWords = new Uint32Array(batchCapacities.length * SHADO_HIZ_BATCH_WORDS);
   batchCapacities.forEach((cap, b) => {
-    batchWords.set([36, 6 * b, cap, segment], b * 4);
+    batchWords.set([36, 6 * b, cap, segment, wholeOf(b)], b * SHADO_HIZ_BATCH_WORDS);
     segment += cap;
   });
   const viewWords = new Uint32Array(SHADO_HIZ_VIEW_WORDS);
@@ -158,7 +160,7 @@ async function runGpu(
     args: new Uint32Array(await read(args, batchCapacities.length * 20)),
     visible: new Uint32Array(await read(visible, Math.max(1, segment) * 4)),
     overflow: new Uint32Array(await read(overflowSized, batchCapacities.length * 4)),
-    segments: batchCapacities.map((_, b) => batchWords[b * 4 + 3]!),
+    segments: batchCapacities.map((_, b) => batchWords[b * SHADO_HIZ_BATCH_WORDS + 3]!),
     members,
   };
 }
@@ -178,7 +180,8 @@ describe('Hi-Z WGSL on headless Dawn', () => {
         const boxes = candidates();
         const batchCaps = [0, 0, 0];
         boxes.forEach((_, i) => batchCaps[i % 3]!++);
-        const gpu = await runGpu(device, depth, view, boxes, i => i % 3, batchCaps);
+        // Batch 2 is all-or-nothing (a thin-instanced mesh): 7 instances or none.
+        const gpu = await runGpu(device, depth, view, boxes, i => i % 3, batchCaps, b => (b === 2 ? 7 : 0));
 
         const ref = buildShadoHiZPyramid(depth, W, H, convention);
         expect(Array.from(gpu.pyramid)).toEqual(Array.from(ref.data));
@@ -205,6 +208,10 @@ describe('Hi-Z WGSL on headless Dawn', () => {
         for (let b = 0; b < 3; b++) {
           const count = gpu.args[b * 5 + 1]!;
           expect([gpu.args[b * 5]!, gpu.args[b * 5 + 2]!, gpu.args[b * 5 + 3]!, gpu.args[b * 5 + 4]!]).toEqual([36, 6 * b, 0, 0]);
+          if (b === 2) {
+            expect(count).toBe(expectedVisible[b]!.length > 0 ? 7 : 0);
+            continue;
+          }
           expect(count).toBe(expectedVisible[b]!.length);
           const seg = Array.from(gpu.visible.slice(gpu.segments[b]!, gpu.segments[b]! + count)).sort((x, y) => x - y);
           expect(seg).toEqual(expectedVisible[b]);

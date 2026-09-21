@@ -65,6 +65,7 @@ export class ShadoWorldHiZ {
   private overflowBuffer: StorageBuffer;
   private flagsBuffer: StorageBuffer;
   private candidateWords = new Float32Array(SHADO_HIZ_CANDIDATE_WORDS);
+  private batchWords = new Uint32Array(SHADO_HIZ_BATCH_WORDS);
   private candidateCount = 0;
   private batchCount = 0;
   private segments: number[] = [];
@@ -160,8 +161,10 @@ export class ShadoWorldHiZ {
       batchWords[b * SHADO_HIZ_BATCH_WORDS + 1] = batch.firstIndex >>> 0;
       batchWords[b * SHADO_HIZ_BATCH_WORDS + 2] = batch.capacity >>> 0;
       batchWords[b * SHADO_HIZ_BATCH_WORDS + 3] = segment;
+      batchWords[b * SHADO_HIZ_BATCH_WORDS + 4] = (batch.wholeInstances ?? 0) >>> 0;
       segment += batch.capacity;
     });
+    this.batchWords = batchWords;
     const words = new Float32Array(Math.max(1, candidates.length) * SHADO_HIZ_CANDIDATE_WORDS);
     const bits = new Uint32Array(words.buffer);
     candidates.forEach((c, i) => {
@@ -194,6 +197,20 @@ export class ShadoWorldHiZ {
     this.bindTables();
   }
 
+  /**
+   * Changes an all-or-nothing batch's instance count (a thin-instance buffer
+   * was rewritten). A queue write, so it lands before this frame's passes.
+   */
+  public setWholeInstances(batch: number, count: number): void {
+    if (batch < 0 || batch >= this.batchCount) return;
+    const at = batch * SHADO_HIZ_BATCH_WORDS + 4;
+    if (this.batchWords[at] === count >>> 0) return;
+    this.batchWords[at] = count >>> 0;
+    // Babylon's update() reads from the START of `data` whatever the
+    // destination offset, so hand it exactly the slice to write.
+    this.batchBuffer.update(this.batchWords.subarray(at, at + 1), at * 4, 4);
+  }
+
   /** Rewrites one candidate's bound in place (dirty update, no rebuild). */
   public updateBounds(index: number, min: readonly number[], max: readonly number[]): void {
     if (index < 0 || index >= this.candidateCount) return;
@@ -205,7 +222,7 @@ export class ShadoWorldHiZ {
     w[o + 4] = max[0]!;
     w[o + 5] = max[1]!;
     w[o + 6] = max[2]!;
-    this.candidateBuffer.update(w, o * 4, SHADO_HIZ_CANDIDATE_WORDS * 4);
+    this.candidateBuffer.update(w.subarray(o, o + SHADO_HIZ_CANDIDATE_WORDS), o * 4, SHADO_HIZ_CANDIDATE_WORDS * 4);
   }
 
   /** (Re)allocates the pyramid for a viewport. Cheap when unchanged. */
