@@ -129,6 +129,7 @@ export function validateShadoWorldAuthoring(
   validateEnvironment(document);
   validatePerformanceBudgets(document);
   validatePlayability(document);
+  validateVisibility(document);
   if (!Number.isInteger(document.revision) || document.revision < 0) {
     throw new Error('World authoring revision must be a non-negative integer');
   }
@@ -314,6 +315,35 @@ function validatePerformanceBudgets(document: ShadoWorldAuthoringDocument): void
     if (!Number.isInteger(value) || value <= 0) {
       throw new Error(`Performance budget ${name} must be a positive integer`);
     }
+  }
+}
+
+function validateVisibility(document: ShadoWorldAuthoringDocument): void {
+  const disocclusion = document.visibility?.disocclusion;
+  if (!disocclusion) return;
+  if (!Array.isArray(disocclusion.sources) || !disocclusion.sources.length) {
+    throw new Error('Disocclusion visibility requires at least one source volume');
+  }
+  const ids = new Set<string>();
+  for (const source of disocclusion.sources) {
+    if (!source.id?.trim() || ids.has(source.id)) throw new Error('Disocclusion sources require unique IDs');
+    ids.add(source.id);
+    validateVec3(source.min, `Disocclusion source '${source.id}' min`, false);
+    validateVec3(source.max, `Disocclusion source '${source.id}' max`, false);
+    for (let axis = 0; axis < 3; axis++) {
+      if (!(source.max[axis]! > source.min[axis]!)) throw new Error(`Disocclusion source '${source.id}' box is empty`);
+    }
+    positive(source.near, `Disocclusion source '${source.id}' near`);
+    if (!(source.far > source.near)) throw new Error(`Disocclusion source '${source.id}' far must exceed near`);
+    if (source.sideUp !== undefined) positive(source.sideUp, `Disocclusion source '${source.id}' sideUp`);
+  }
+  for (const [name, value] of Object.entries(disocclusion.settings ?? {})) {
+    positive(value, `Disocclusion setting '${name}'`);
+  }
+  for (const pose of disocclusion.poses ?? []) {
+    if (!pose.name?.trim()) throw new Error('Disocclusion review poses require names');
+    validateVec3(pose.at, `Disocclusion pose '${pose.name}' at`, false);
+    validateVec3(pose.look, `Disocclusion pose '${pose.name}' look`, false);
   }
 }
 

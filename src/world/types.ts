@@ -839,6 +839,38 @@ export type ShadoWorldAuthoringDocument = {
   performanceBudgets: ShadoWorldPerformanceBudgets;
   /** Entrances and deterministic traversal/recovery probes. */
   playability: ShadoWorldPlayabilityAuthoring;
+  /** Offline visibility bakes the promotion runs for this zone. */
+  visibility?: ShadoWorldVisibilityAuthoring;
+};
+
+/**
+ * Visibility bakes a zone asks its promotion to run. Declaring disocclusion
+ * sources makes the disocclusion PVS a mandatory promotion stage: the sidecar
+ * is baked from the just-published package and published beside it.
+ */
+export type ShadoWorldVisibilityAuthoring = {
+  disocclusion?: {
+    /** Why these sources and settings (how they were resolved). */
+    note?: string;
+    /** Source volumes (a camera anywhere inside one uses its rows). */
+    sources: Array<{
+      id: string;
+      min: [number, number, number];
+      max: [number, number, number];
+      /** Capture near and far distance, world units. */
+      near: number;
+      far: number;
+      /** Tan of the vertical half-angle the side faces capture (default the baker's). */
+      sideUp?: number;
+    }>;
+    /** Numeric overrides of the baker's buffer settings. */
+    settings?: Record<string, number>;
+    /**
+     * Review poses for the proving ground: the first is the source pose, the
+     * rest are checks. Not read at runtime.
+     */
+    poses?: Array<{ name: string; at: [number, number, number]; look: [number, number, number]; fov?: number; hour?: number }>;
+  };
 };
 
 export type ShadoWorldPrimitive = {
