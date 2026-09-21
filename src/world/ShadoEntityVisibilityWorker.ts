@@ -61,6 +61,15 @@ export type ShadoEntityVisibilityWorkerResult = {
   ageMs: number;
   /** The epochs this result was computed against, for the caller to match. */
   epochs: ShadoEntityVisibilityEpochs;
+  /**
+   * Worker time for THIS request, from its own completion message.
+   *
+   * Not the control word: that holds whichever request finished last, and a
+   * benchmark reading it attributes one request's duration to another.
+   */
+  requestWorkerMs: number;
+  /** Membership changes the worker made applying this request's delta. */
+  membershipChanges: number;
   /** True when the result is older than the caller's permitted age. */
   stale: boolean;
   workerDurationMs: number;
@@ -103,6 +112,39 @@ export type ShadoEntityVisibilityWorkerStats = {
   lastResultAgeMs: number;
   /** Slots whose deltas are waiting for the next dispatch. */
   pendingDeltaSlots: number;
+  /** Every call to request(), whether or not it reached the worker. */
+  requests: number;
+  /** Requests actually posted to the worker. */
+  dispatched: number;
+  /** Requests replaced by a newer one before they were dispatched. */
+  coalesced: number;
+  /** Published results that reached the caller. */
+  completions: number;
+  /** Published results the caller gave up, and completions that matched nothing. */
+  discarded: number;
+  /** Bytes transferred to the worker, summed over every dispatch. */
+  transferredBytes: number;
+};
+
+/**
+ * Where one request's main-thread time went, by stage.
+ *
+ * Kept per request rather than summed, so a benchmark can attribute each
+ * sample to the request it came from instead of reading a running total and
+ * guessing which requests contributed.
+ */
+export type ShadoEntityVisibilityRequestTiming = {
+  generation: number;
+  /** Packing the projection's dirty slots into a transferable delta. */
+  packMs: number;
+  /** Merging into a superseded pending request's delta; zero if none. */
+  mergeMs: number;
+  /** Posting to the worker; zero when the request was queued instead. */
+  dispatchMs: number;
+  /** Slots the delta carried. */
+  dirtySlots: number;
+  /** Bytes transferred; zero when queued. */
+  transferredBytes: number;
 };
 
 type WorkerRequest = {
@@ -141,6 +183,10 @@ type WorkerMessage =
       output: 0 | 1;
       count: number;
       entityCount: number;
+      /** How long this request took inside the worker, in microseconds. */
+      durationMicros?: number;
+      candidateCount?: number;
+      membershipChanges?: number;
     }
   | { type: 'error'; message: string };
 
@@ -402,7 +448,19 @@ export class ShadoEntityVisibilityWorker {
     output: 0 | 1;
     count: number;
     entityCount: number;
+    durationMicros: number;
+    membershipChanges: number;
   } | null = null;
+  private counters = {
+    requests: 0,
+    dispatched: 0,
+    coalesced: 0,
+    completions: 0,
+    discarded: 0,
+    transferredBytes: 0,
+  };
+  /** The last request's stage timings; see ShadoEntityVisibilityRequestTiming. */
+  public lastRequestTiming: ShadoEntityVisibilityRequestTiming | null = null;
   private lastConsumedCreatedAtMs = 0;
   private staleEpochResults = 0;
   private staleAgeResults = 0;
@@ -556,6 +614,7 @@ export class ShadoEntityVisibilityWorker {
         'Entity visibility no longer supports radiusScale; write the effective radius instead'
       );
     }
+    this.counters.requests += 1;
     const generation =
       Atomics.add(this.control, ShadoVisibilityWorkerControl.RequestedGeneration, 1) + 1;
     const cellSnapshot = new Uint8Array(this.cellCount);
@@ -569,12 +628,23 @@ export class ShadoEntityVisibilityWorker {
       maxDistance: Math.max(0, options.maxDistance ?? 0),
       outsideWorldVisible: options.outsideWorldVisible !== false,
       activePhaseMask: (options.activePhaseMask ?? 0xffffffff) >>> 0,
-      delta: this.projection.drainDelta(),
+      delta: EMPTY_DELTA_PLACEHOLDER,
       epochs: { ...this.epochs },
       createdAtMs: now(),
       dispatchedAtMs: 0,
       completedAtMs: 0,
     };
+    const packStarted = now();
+    request.delta = this.projection.drainDelta();
+    const timing: ShadoEntityVisibilityRequestTiming = {
+      generation,
+      packMs: now() - packStarted,
+      mergeMs: 0,
+      dispatchMs: 0,
+      dirtySlots: request.delta.slots.length,
+      transferredBytes: 0,
+    };
+    this.lastRequestTiming = timing;
     if (this.inFlight || this.published) {
       /*
        * A pending request is replaced by the newer camera, but its slot
@@ -588,10 +658,18 @@ export class ShadoEntityVisibilityWorker {
        * or discards them.
        */
       const superseded = this.pendingRequest;
-      if (superseded) request.delta = mergeDeltas(superseded.delta, request.delta);
+      if (superseded) {
+        const mergeStarted = now();
+        request.delta = mergeDeltas(superseded.delta, request.delta);
+        timing.mergeMs = now() - mergeStarted;
+        timing.dirtySlots = request.delta.slots.length;
+        this.counters.coalesced += 1;
+      }
       this.pendingRequest = request;
     } else {
-      this.dispatch(request);
+      const dispatchStarted = now();
+      timing.transferredBytes = this.dispatch(request);
+      timing.dispatchMs = now() - dispatchStarted;
     }
     return generation;
   }
@@ -646,7 +724,7 @@ export class ShadoEntityVisibilityWorker {
   public acquireLatest(): ShadoEntityVisibilityWorkerResult | null {
     const published = this.published;
     if (!published) return null;
-    const { request, output, count, entityCount } = published;
+    const { request, output, count, entityCount, durationMicros, membershipChanges } = published;
     this.published = null;
     this.consumedGeneration = request.generation;
     this.lastConsumedCreatedAtMs = request.createdAtMs;
@@ -681,6 +759,8 @@ export class ShadoEntityVisibilityWorker {
       visibleGenerations: this.resultGenerations[output].slice(0, count),
       ageMs,
       epochs: { ...request.epochs },
+      requestWorkerMs: durationMicros / 1000,
+      membershipChanges,
       stale,
       // Flags exist only when the caller asked for them.
       flags: this.publishFlags ? this.flags[output].slice(0, entityCount) : EMPTY_FLAGS,
@@ -695,6 +775,7 @@ export class ShadoEntityVisibilityWorker {
         ShadoVisibilityWorkerControl.PublishedFlagBytes
       ),
     };
+    this.counters.completions += 1;
     this.releaseAndDispatch();
     return result;
   }
@@ -711,6 +792,7 @@ export class ShadoEntityVisibilityWorker {
     this.consumedGeneration = this.published.request.generation;
     this.lastConsumedCreatedAtMs = this.published.request.createdAtMs;
     this.published = null;
+    this.counters.discarded += 1;
     this.releaseAndDispatch();
     return true;
   }
@@ -762,6 +844,7 @@ export class ShadoEntityVisibilityWorker {
       staleAgeResults: this.staleAgeResults,
       lastResultAgeMs: this.lastResultAgeMs,
       pendingDeltaSlots: this.projection.pendingDeltaSlots,
+      ...this.counters,
     };
   }
 
@@ -785,10 +868,21 @@ export class ShadoEntityVisibilityWorker {
     if (pending && !this.disposed) this.dispatch(pending);
   }
 
-  private dispatch(request: WorkerRequest): void {
+  /** Posts a request and returns how many bytes went with it. */
+  private dispatch(request: WorkerRequest): number {
     this.inFlight = true;
     request.dispatchedAtMs = now();
     this.inFlightRequest = request;
+    const transferred =
+      request.planes.byteLength +
+      request.cellFlags.byteLength +
+      request.delta.slots.byteLength +
+      request.delta.generations.byteLength +
+      request.delta.transforms.byteLength +
+      request.delta.policy.byteLength +
+      request.delta.enabled.byteLength;
+    this.counters.dispatched += 1;
+    this.counters.transferredBytes += transferred;
     /*
      * Everything the worker reads is transferred, so neither side holds a
      * view the other may write. The projection stays authoritative here and
@@ -803,6 +897,7 @@ export class ShadoEntityVisibilityWorker {
       request.delta.policy.buffer as ArrayBuffer,
       request.delta.enabled.buffer as ArrayBuffer,
     ]);
+    return transferred;
   }
 
   /**
@@ -832,6 +927,7 @@ export class ShadoEntityVisibilityWorker {
      * request that did not produce it.
      */
     if (!request || request.generation !== message.generation) {
+      this.counters.discarded += 1;
       this.releaseAndDispatch();
       return;
     }
@@ -841,6 +937,8 @@ export class ShadoEntityVisibilityWorker {
       output: message.output,
       count: message.count,
       entityCount: message.entityCount,
+      durationMicros: message.durationMicros ?? 0,
+      membershipChanges: message.membershipChanges ?? 0,
     };
     /*
      * The next request waits. The worker writes into the buffer it is about
@@ -855,6 +953,9 @@ export class ShadoEntityVisibilityWorker {
     this.pendingRequest = null;
   }
 }
+
+/** Replaced before use; lets the request literal be built before the delta is drained. */
+const EMPTY_DELTA_PLACEHOLDER = null as unknown as ShadoEntityVisibilityDelta;
 
 /** What a compact-mode result carries in place of flags: nothing, not a slice. */
 const EMPTY_FLAGS = new Uint8Array(0);
@@ -1588,6 +1689,9 @@ function reduce(message) {
     output,
     count: visibleCount,
     entityCount: state.publishFlags ? count : 0,
+    durationMicros: Math.max(0, Math.round((performance.now() - started) * 1000)),
+    candidateCount,
+    membershipChanges: state.membershipChanges,
   });
 }
 `;
