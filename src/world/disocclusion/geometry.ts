@@ -195,8 +195,24 @@ export function zoneBakeGeometry(
   let two = 0;
   for (let t = 0; t < triangles; t++) if (blocker[t]) two += doubleSided[t]!;
   const blockerTotal = blockerTargetTriangles + extraTriangles + objectTriangles;
+  // GLB parts carry vertices no cluster references; keep only used ones.
+  const remap = new Int32Array(vertexCount).fill(-1);
+  let used = 0;
+  for (let i = 0; i < indices.length; i++) {
+    const v = indices[i]!;
+    if (remap[v] < 0) remap[v] = used++;
+    indices[i] = remap[v]!;
+  }
+  const compact = new Float32Array(used * 3);
+  for (let v = 0; v < vertexCount; v++) {
+    const to = remap[v]!;
+    if (to < 0) continue;
+    compact[to * 3] = positions[v * 3]!;
+    compact[to * 3 + 1] = positions[v * 3 + 1]!;
+    compact[to * 3 + 2] = positions[v * 3 + 2]!;
+  }
   return {
-    geometry: { positions, indices, triangleTarget, blocker, doubleSided },
+    geometry: { positions: compact, indices, triangleTarget, blocker, doubleSided },
     manifest: {
       targets: {
         clusters: clusterCount,

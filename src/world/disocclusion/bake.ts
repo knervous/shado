@@ -371,7 +371,7 @@ export class DisocclusionBaker {
     const baker = new DisocclusionBaker(device, settings, options, bytes, subset.count);
     try {
       baker.allocate(geometry, subset);
-      await device.queue.onSubmittedWorkDone();
+      await baker.flushUploads();
     } catch (error) {
       baker.dispose();
       if (error instanceof DisocclusionBakeError) throw error;
@@ -388,14 +388,39 @@ export class DisocclusionBaker {
   }
 
   private upload(data: ArrayBufferView, usage: number, label: string) {
-    const b = this.buffer(data.byteLength, usage | BUF.COPY_DST, label);
-    // Chunked through byte views: one multi-hundred-megabyte write aborted
-    // headless Dawn (the process died with no error) on a real zone.
-    const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-    for (let at = 0; at < bytes.byteLength; at += UPLOAD_CHUNK) {
-      this.device.queue.writeBuffer(b, at, bytes.subarray(at, Math.min(bytes.byteLength, at + UPLOAD_CHUNK)));
-    }
+    // Padded to 16 bytes: headless Dawn's writeBuffer aborts the process, with
+    // no error, on a write of >= 4 MiB whose size is not 16-byte aligned.
+    const size = Math.max(16, Math.ceil(data.byteLength / 16) * 16);
+    const bytes = new Uint8Array(size);
+    bytes.set(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+    const b = this.buffer(size, usage | BUF.COPY_DST, label);
+    this.pendingUploads.push({ target: b, bytes });
     return b;
+  }
+
+  private readonly pendingUploads: { target: GPUBuffer; bytes: Uint8Array }[] = [];
+
+  /**
+   * Writes queued uploads in 16 MiB pieces, draining the queue every 64 MiB so
+   * staging for a real zone's geometry stays bounded.
+   */
+  private async flushUploads() {
+    // Every piece stays a multiple of 16 bytes: UPLOAD_CHUNK is, and so is each padded upload.
+    let sinceDrain = 0;
+    for (const { target, bytes } of this.pendingUploads.splice(0)) {
+      for (let at = 0; at < bytes.byteLength; at += UPLOAD_CHUNK) {
+        const piece = bytes.subarray(at, Math.min(bytes.byteLength, at + UPLOAD_CHUNK));
+        this.device.queue.writeBuffer(target, at, piece);
+        sinceDrain += piece.byteLength;
+        if (sinceDrain >= UPLOAD_DRAIN) {
+          this.device.queue.submit([]);
+          await this.device.queue.onSubmittedWorkDone();
+          sinceDrain = 0;
+        }
+      }
+    }
+    this.device.queue.submit([]);
+    await this.device.queue.onSubmittedWorkDone();
   }
 
   private allocate(geometry: DisocclusionGeometry, subset: ReturnType<typeof rasterSubset>) {
@@ -683,6 +708,7 @@ export class DisocclusionBaker {
 
 const SOURCE_STRIDE = 256;
 const UPLOAD_CHUNK = 16 * 1024 * 1024;
+const UPLOAD_DRAIN = 64 * 1024 * 1024;
 
 /** One capture with its own baker: the fixture path and the stage-parity tests. */
 export async function bakeDisocclusionCapture(
