@@ -31,7 +31,14 @@
  * instances flip the facing test rather than silently blocking from the side
  * a player can see through.
  */
-import { buildOccluderBvh, type OccluderBuildLimits, type OccluderBvh } from './occluder-bvh';
+import {
+  OccluderBuildGuard,
+  buildOccluderBvh,
+  isOccluderBuildCancelled,
+  selectNth,
+  type OccluderBuildLimits,
+  type OccluderBvh,
+} from './occluder-bvh';
 import type { ShadoWorldPrimitive } from './types';
 
 /** Hits closer than this to either end are the endpoints' own surfaces. */
@@ -52,6 +59,8 @@ export type InstancedOccluders = {
   readonly instanceBounds: Float64Array;
   /** Non-zero where the instance mirrors, so the facing test flips. */
   readonly instanceMirrored: Uint8Array;
+  /** Non-zero where the instance places geometry; zero for an empty prototype. */
+  readonly instanceValid: Uint8Array;
   readonly instanceCount: number;
   /** Top-level hierarchy over instance bounds: six doubles, three ints each. */
   readonly nodeBounds: Float64Array;
@@ -77,11 +86,37 @@ export type InstancedOccluders = {
 const LEAF_INSTANCES = 4;
 
 /**
+ * Bytes the top level holds for `count` placements at their peak: the
+ * per-instance arrays it keeps, the centroid scratch the partition reads, and
+ * the node arrays. Priced BEFORE any of them is allocated.
+ */
+export function estimateInstancedTopBytes(count: number): number {
+  const kept =
+    count * 4 + // instancePrototype
+    count * 16 * 8 + // instanceInverse
+    count * 6 * 8 + // instanceBounds
+    count + // instanceMirrored
+    count + // instanceValid
+    count * 4; // order
+  const scratch = count * 3 * 8; // centroids
+  const nodes = topNodeCapacity(count) * (6 * 8 + 3 * 4);
+  return kept + scratch + nodes;
+}
+
+/** A leaf forms at LEAF_INSTANCES or fewer, and a split halves: at most ceil(n/2) leaves. */
+function topNodeCapacity(count: number): number {
+  return Math.max(4, 2 * Math.ceil(Math.max(1, count) / 2) + 1);
+}
+
+/**
  * Builds one hierarchy per prototype and one over the placements.
  *
- * `limits` are honoured the same way the flat builder honours them: a refusal
- * or a cancellation returns a structure that indexes nothing, which finds no
- * blockers and therefore admits more.
+ * Every build in the pass draws on ONE guard: one byte ledger and one poll
+ * counter. Each prototype's finished structure stays charged for as long as it
+ * lives, so the next build -- and the top level after them -- is priced
+ * against what is actually still held, not against a fresh allowance. A
+ * refusal or a cancellation anywhere returns a structure that indexes
+ * nothing, which finds no blockers and therefore admits more.
  */
 export function buildInstancedOccluders(
   prototypes: readonly (readonly ShadoWorldPrimitive[])[],
@@ -96,118 +131,192 @@ export function buildInstancedOccluders(
     triangleTests: 0,
     instanceVisits: 0,
   };
-  const built: OccluderBvh[] = [];
-  let uniqueTriangles = 0;
-  for (const primitives of prototypes) {
-    const bvh = buildOccluderBvh(primitives, limits);
-    if (bvh.aborted) return emptyInstanced(counters, bvh.aborted);
-    built.push(bvh);
-    uniqueTriangles += bvh.triangleCount;
-  }
-
-  const count = instances.length;
-  const instancePrototype = new Int32Array(count);
-  const instanceInverse = new Float64Array(count * 16);
-  const instanceBounds = new Float64Array(count * 6);
-  const instanceMirrored = new Uint8Array(count);
-  let placedTriangles = 0;
-  for (let index = 0; index < count; index += 1) {
-    const instance = instances[index]!;
-    const prototype = built[instance.prototype];
-    if (!prototype) continue;
-    instancePrototype[index] = instance.prototype;
-    placedTriangles += prototype.triangleCount;
-    const matrix = instance.matrix;
-    instanceMirrored[index] = determinant3(matrix) < 0 ? 1 : 0;
-    invertAffine(matrix, instanceInverse, index * 16);
-    // The prototype's root bounds carried through the transform: every corner,
-    // because a rotation turns a box into something no single corner bounds.
-    const root = prototype.nodeBounds;
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-    for (let corner = 0; corner < 8; corner += 1) {
-      const x = corner & 1 ? root[3]! : root[0]!;
-      const y = corner & 2 ? root[4]! : root[1]!;
-      const z = corner & 4 ? root[5]! : root[2]!;
-      const wx = matrix[0]! * x + matrix[4]! * y + matrix[8]! * z + matrix[12]!;
-      const wy = matrix[1]! * x + matrix[5]! * y + matrix[9]! * z + matrix[13]!;
-      const wz = matrix[2]! * x + matrix[6]! * y + matrix[10]! * z + matrix[14]!;
-      if (wx < minX) minX = wx; if (wx > maxX) maxX = wx;
-      if (wy < minY) minY = wy; if (wy > maxY) maxY = wy;
-      if (wz < minZ) minZ = wz; if (wz > maxZ) maxZ = wz;
+  const guard = limits.guard ?? new OccluderBuildGuard(limits);
+  let topReserved = 0;
+  try {
+    // On entry, even with nothing to build: a pass already stopped stays stopped.
+    guard.poll();
+    const built: OccluderBvh[] = [];
+    let uniqueTriangles = 0;
+    for (const primitives of prototypes) {
+      const bvh = buildOccluderBvh(primitives, { ...limits, guard });
+      if (bvh.aborted) return emptyInstanced(counters, bvh.aborted);
+      built.push(bvh);
+      uniqueTriangles += bvh.triangleCount;
     }
-    instanceBounds[index * 6] = minX;
-    instanceBounds[index * 6 + 1] = minY;
-    instanceBounds[index * 6 + 2] = minZ;
-    instanceBounds[index * 6 + 3] = maxX;
-    instanceBounds[index * 6 + 4] = maxY;
-    instanceBounds[index * 6 + 5] = maxZ;
-  }
 
-  // Top level: median split over instance centres, the same shape as the
-  // triangle hierarchy and with the same node layout.
-  const order = new Int32Array(count);
-  for (let index = 0; index < count; index += 1) order[index] = index;
-  const capacity = Math.max(4, 2 * Math.ceil(Math.max(1, count) / 2) + 1);
-  const nodeBounds = new Float64Array(capacity * 6);
-  const nodeMeta = new Int32Array(capacity * 3);
-  let nodeCount = 0;
-  const centre = (instance: number, axis: number): number =>
-    (instanceBounds[instance * 6 + axis]! + instanceBounds[instance * 6 + 3 + axis]!) / 2;
-  const build = (start: number, span: number): number => {
-    const node = nodeCount++;
-    let minX = Infinity, minY = Infinity, minZ = Infinity;
-    let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-    for (let index = start; index < start + span; index += 1) {
-      const base = order[index]! * 6;
-      if (instanceBounds[base]! < minX) minX = instanceBounds[base]!;
-      if (instanceBounds[base + 1]! < minY) minY = instanceBounds[base + 1]!;
-      if (instanceBounds[base + 2]! < minZ) minZ = instanceBounds[base + 2]!;
-      if (instanceBounds[base + 3]! > maxX) maxX = instanceBounds[base + 3]!;
-      if (instanceBounds[base + 4]! > maxY) maxY = instanceBounds[base + 4]!;
-      if (instanceBounds[base + 5]! > maxZ) maxZ = instanceBounds[base + 5]!;
+    const count = instances.length;
+    /*
+     * Validated before anything is derived from them. A bad prototype index
+     * or a transform that cannot be inverted is corrupt input, and building a
+     * root box out of it produces bounds that block the wrong space.
+     */
+    for (let index = 0; index < count; index += 1) {
+      guard.tick(1);
+      const instance = instances[index]!;
+      if (!Number.isInteger(instance.prototype) || instance.prototype < 0 || instance.prototype >= built.length) {
+        throw new RangeError(`Occluder instance ${index} names prototype ${instance.prototype}, which does not exist`);
+      }
+      const matrix = instance.matrix;
+      if (matrix.length < 16 || !matrix.slice(0, 16).every(Number.isFinite)) {
+        throw new RangeError(`Occluder instance ${index} has a non-finite transform`);
+      }
+      const det = determinant3(matrix);
+      if (!Number.isFinite(det) || Math.abs(det) < 1e-12) {
+        throw new RangeError(`Occluder instance ${index} has a transform that cannot be inverted`);
+      }
     }
-    nodeBounds.set([minX, minY, minZ, maxX, maxY, maxZ], node * 6);
-    if (span <= LEAF_INSTANCES) {
+
+    // Priced before a single per-instance array exists.
+    topReserved = estimateInstancedTopBytes(count);
+    guard.reserve(topReserved);
+
+    const instancePrototype = new Int32Array(count);
+    const instanceInverse = new Float64Array(count * 16);
+    const instanceBounds = new Float64Array(count * 6);
+    const instanceMirrored = new Uint8Array(count);
+    /*
+     * An instance of an EMPTY prototype indexes no geometry and has no box to
+     * bound. It stays in the arrays, so instance ids keep their meaning, and
+     * is left out of the top level -- an inverted "empty" box passes the slab
+     * test from every direction, which is the wrong failure.
+     */
+    const instanceValid = new Uint8Array(count);
+    let placedTriangles = 0;
+    let validCount = 0;
+    for (let index = 0; index < count; index += 1) {
+      guard.tick(8);
+      const instance = instances[index]!;
+      const prototype = built[instance.prototype]!;
+      instancePrototype[index] = instance.prototype;
+      if (prototype.triangleCount === 0) continue;
+      instanceValid[index] = 1;
+      validCount += 1;
+      placedTriangles += prototype.triangleCount;
+      const matrix = instance.matrix;
+      instanceMirrored[index] = determinant3(matrix) < 0 ? 1 : 0;
+      invertAffine(matrix, instanceInverse, index * 16);
+      // Every corner, because a rotation turns a box into something no single
+      // corner bounds.
+      const root = prototype.nodeBounds;
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (let corner = 0; corner < 8; corner += 1) {
+        const x = corner & 1 ? root[3]! : root[0]!;
+        const y = corner & 2 ? root[4]! : root[1]!;
+        const z = corner & 4 ? root[5]! : root[2]!;
+        const wx = matrix[0]! * x + matrix[4]! * y + matrix[8]! * z + matrix[12]!;
+        const wy = matrix[1]! * x + matrix[5]! * y + matrix[9]! * z + matrix[13]!;
+        const wz = matrix[2]! * x + matrix[6]! * y + matrix[10]! * z + matrix[14]!;
+        if (wx < minX) minX = wx; if (wx > maxX) maxX = wx;
+        if (wy < minY) minY = wy; if (wy > maxY) maxY = wy;
+        if (wz < minZ) minZ = wz; if (wz > maxZ) maxZ = wz;
+      }
+      instanceBounds[index * 6] = minX;
+      instanceBounds[index * 6 + 1] = minY;
+      instanceBounds[index * 6 + 2] = minZ;
+      instanceBounds[index * 6 + 3] = maxX;
+      instanceBounds[index * 6 + 4] = maxY;
+      instanceBounds[index * 6 + 5] = maxZ;
+    }
+
+    // Top level over the valid instances only, partitioned in place.
+    const order = new Int32Array(validCount);
+    const centroids = new Float64Array(count * 3);
+    let written = 0;
+    for (let index = 0; index < count; index += 1) {
+      guard.tick(1);
+      if (!instanceValid[index]) continue;
+      order[written++] = index;
+      for (let axis = 0; axis < 3; axis += 1) {
+        centroids[index * 3 + axis] =
+          (instanceBounds[index * 6 + axis]! + instanceBounds[index * 6 + 3 + axis]!) / 2;
+      }
+    }
+    const capacity = topNodeCapacity(validCount);
+    const nodeBounds = new Float64Array(capacity * 6);
+    const nodeMeta = new Int32Array(capacity * 3);
+    let nodeCount = 0;
+    const build = (start: number, span: number): number => {
+      guard.tick(1);
+      if (nodeCount >= capacity) {
+        throw new RangeError(`Occluder top level exceeded its ${capacity}-node bound at ${validCount} instances`);
+      }
+      const node = nodeCount++;
+      let minX = Infinity, minY = Infinity, minZ = Infinity;
+      let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+      for (let index = start; index < start + span; index += 1) {
+        guard.tick(1);
+        const base = order[index]! * 6;
+        if (instanceBounds[base]! < minX) minX = instanceBounds[base]!;
+        if (instanceBounds[base + 1]! < minY) minY = instanceBounds[base + 1]!;
+        if (instanceBounds[base + 2]! < minZ) minZ = instanceBounds[base + 2]!;
+        if (instanceBounds[base + 3]! > maxX) maxX = instanceBounds[base + 3]!;
+        if (instanceBounds[base + 4]! > maxY) maxY = instanceBounds[base + 4]!;
+        if (instanceBounds[base + 5]! > maxZ) maxZ = instanceBounds[base + 5]!;
+      }
+      nodeBounds[node * 6] = minX;
+      nodeBounds[node * 6 + 1] = minY;
+      nodeBounds[node * 6 + 2] = minZ;
+      nodeBounds[node * 6 + 3] = maxX;
+      nodeBounds[node * 6 + 4] = maxY;
+      nodeBounds[node * 6 + 5] = maxZ;
+      if (span <= LEAF_INSTANCES) {
+        nodeMeta[node * 3] = start;
+        nodeMeta[node * 3 + 1] = span;
+        nodeMeta[node * 3 + 2] = -1;
+        return node;
+      }
+      const axis =
+        maxX - minX >= maxY - minY && maxX - minX >= maxZ - minZ ? 0 : maxY - minY >= maxZ - minZ ? 1 : 2;
+      const half = span >> 1;
+      /*
+       * The flat builder's bounded in-place median partition. The old
+       * Array.from(...).sort(...) allocated a copy and sorted it at every
+       * level, unguarded -- the root level over every placement in the zone.
+       */
+      selectNth(order, centroids, axis, start, start + span - 1, start + half, guard);
       nodeMeta[node * 3] = start;
-      nodeMeta[node * 3 + 1] = span;
-      nodeMeta[node * 3 + 2] = -1;
+      nodeMeta[node * 3 + 1] = 0;
+      build(start, half);
+      nodeMeta[node * 3 + 2] = build(start + half, span - half);
       return node;
+    };
+    if (validCount) build(0, validCount);
+    else {
+      nodeCount = 1;
+      nodeMeta[2] = -1;
     }
-    const axis =
-      maxX - minX >= maxY - minY && maxX - minX >= maxZ - minZ ? 0 : maxY - minY >= maxZ - minZ ? 1 : 2;
-    const slice = Array.from(order.subarray(start, start + span));
-    slice.sort((left, right) => centre(left, axis) - centre(right, axis));
-    order.set(slice, start);
-    const half = span >> 1;
-    nodeMeta[node * 3] = start;
-    nodeMeta[node * 3 + 1] = 0;
-    build(start, half);
-    nodeMeta[node * 3 + 2] = build(start + half, span - half);
-    return node;
-  };
-  if (count) build(0, count);
-  else {
-    nodeCount = 1;
-    nodeMeta[2] = -1;
-  }
+    guard.poll();
 
-  return {
-    prototypes: built,
-    instancePrototype,
-    instanceInverse,
-    instanceBounds,
-    instanceMirrored,
-    instanceCount: count,
-    nodeBounds,
-    nodeMeta,
-    nodeCount,
-    order,
-    counters,
-    aborted: null,
-    uniqueTriangles,
-    placedTriangles,
-  };
+    // Centroids were scratch; everything else stays with the structure.
+    const scratch = count * 3 * 8;
+    guard.retain(topReserved - scratch);
+    guard.release(scratch);
+    topReserved = 0;
+
+    return {
+      prototypes: built,
+      instancePrototype,
+      instanceInverse,
+      instanceBounds,
+      instanceMirrored,
+      instanceValid,
+      instanceCount: count,
+      nodeBounds,
+      nodeMeta,
+      nodeCount,
+      order,
+      counters,
+      aborted: null,
+      uniqueTriangles,
+      placedTriangles,
+    };
+  } catch (error) {
+    guard.release(topReserved);
+    if (isOccluderBuildCancelled(error)) return emptyInstanced(counters, guard.reason);
+    throw error;
+  }
 }
 
 /** Is the straight line from a to b interrupted by any placed prototype? */
@@ -276,6 +385,7 @@ export function instancedHighestSurfaceAt(
   scene.counters.columnQueries += 1;
   let best: number | null = null;
   for (let instance = 0; instance < scene.instanceCount; instance += 1) {
+    if (!scene.instanceValid[instance]) continue;
     const base = instance * 6;
     if (x < scene.instanceBounds[base]! || x > scene.instanceBounds[base + 3]!) continue;
     if (z < scene.instanceBounds[base + 2]! || z > scene.instanceBounds[base + 5]!) continue;
@@ -469,6 +579,7 @@ function emptyInstanced(
     instanceInverse: new Float64Array(0),
     instanceBounds: new Float64Array(0),
     instanceMirrored: new Uint8Array(0),
+    instanceValid: new Uint8Array(0),
     instanceCount: 0,
     nodeBounds: new Float64Array(6),
     nodeMeta,

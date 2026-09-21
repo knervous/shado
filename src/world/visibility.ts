@@ -8,6 +8,7 @@ import {
 import { buildInstancedOccluders, instancedSegmentBlocked } from './occluder-instances';
 import type { InstancedOccluders } from './occluder-instances';
 import {
+  OccluderBuildGuard,
   ShadoOccluderBackendError,
   buildOccluderBvh,
   bvhColumnSurfaces,
@@ -379,26 +380,29 @@ export function compileShadoWorldVisibility(
    * poll for cancellation while reading geometry.
    */
   /*
-   * Recomputed immediately before each build, never shared between them.
+   * ONE guard for every structure this bake builds -- the occluder index,
+   * the ground index, every prototype BLAS and the TLAS over them.
    *
-   * One allowance handed to both indexes lets two structures that each fit
-   * individually exceed the ceiling together: the first one is resident by the
-   * time the second is measured, so the second has to be offered what is
-   * actually left rather than what the first was offered.
+   * It owns a byte ledger: each finished structure stays charged for as long
+   * as it lives, so a later build is priced against what is actually still
+   * held. The ceiling is taken once, from host RSS at the start of the stage;
+   * after that the ledger, not a fresh RSS read, is what says what is left --
+   * separate allowances let two structures that each fit exceed the ceiling
+   * together. Host RSS is still reported, separately, by the caller.
    */
-  const buildLimits = (): OccluderBuildLimits => ({
-    ...(budget?.maxResidentBytes !== undefined && budget.residentBytes
-      ? { maxBytes: Math.max(0, budget.maxResidentBytes - budget.residentBytes()) }
-      : {}),
-    ...(budget
-      ? {
-          stopReason: () => {
-            const reason = exhausted(0);
-            return reason === 'none' ? null : reason;
-          },
-        }
-      : {}),
-  });
+  const passGuard = budget
+    ? new OccluderBuildGuard({
+        ...(budget.maxResidentBytes !== undefined && budget.residentBytes
+          ? { maxBytes: Math.max(0, budget.maxResidentBytes - budget.residentBytes()) }
+          : {}),
+        stopReason: () => {
+          const reason = exhausted(0);
+          return reason === 'none' ? null : reason;
+        },
+      })
+    : null;
+  const buildLimits = (): OccluderBuildLimits =>
+    passGuard ? { guard: passGuard, stopReason: () => passGuard.stoppedReason } : {};
   /*
    * Only the hierarchy can be bounded, so a caller asking for both bounded
    * execution and the grid is refused here rather than at the CLI -- the
@@ -421,7 +425,7 @@ export function compileShadoWorldVisibility(
         buildLimits()
       )
     : null;
-  if (built?.aborted) {
+  if (built?.aborted && stop === 'none') {
     // The guard carries the exact reason; a deadline noticed inside a build
     // is a deadline and must not be reported as a generic cancellation.
     stop = built.aborted;
@@ -444,7 +448,7 @@ export function compileShadoWorldVisibility(
         buildLimits()
       )
     : null;
-  if (groundBuilt?.aborted) {
+  if (groundBuilt?.aborted && stop === 'none') {
     stop = groundBuilt.aborted;
     stoppedDuring = 'index-build';
   }
@@ -453,14 +457,19 @@ export function compileShadoWorldVisibility(
     : grid;
   const occluderGridMs = clock() - gridStarted;
   // Without ground there is nothing to stand on, so nothing can be sampled.
-  const instanced = requestedMode === 'sampled-occlusion' && input.instancedOccluders
+  /*
+   * Not attempted once anything before it has stopped. A pass that is out of
+   * time or memory is out of it for every later structure too, and building
+   * one anyway would overwrite the reason that actually stopped it.
+   */
+  const instanced = requestedMode === 'sampled-occlusion' && input.instancedOccluders && stop === 'none'
     ? buildInstancedOccluders(
         input.instancedOccluders.prototypes,
         input.instancedOccluders.instances as never,
         buildLimits()
       )
     : null;
-  if (instanced?.aborted) {
+  if (instanced?.aborted && stop === 'none') {
     stop = instanced.aborted;
     stoppedDuring = 'index-build';
   }

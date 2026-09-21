@@ -62,6 +62,16 @@ export type OccluderBuildLimits = {
    * the operator needs.
    */
   stopReason?: () => OccluderBuildStop | null;
+  /**
+   * One guard for a whole pass of builds.
+   *
+   * Every prototype BLAS and the TLAS over them draw from the same byte
+   * ledger and the same 4,096-element poll counter. Separate guards gave each
+   * build the full allowance -- two structures that each fit could together
+   * exceed it -- and let a pass of small builds, none reaching the stride,
+   * run without ever polling.
+   */
+  guard?: OccluderBuildGuard;
 };
 
 /**
@@ -72,11 +82,16 @@ export type OccluderBuildLimits = {
  * lets one call over five million triangles run to completion, which is
  * exactly what a root partition or a root bounds scan is.
  */
-class BuildGuard {
+export class OccluderBuildGuard {
   private pending = 0;
   private stopped: OccluderBuildStop | null = null;
+  /** Bytes held by finished structures that are still alive. */
+  private retainedBytes = 0;
+  /** Bytes reserved by builds still in progress. */
+  private reservedBytes = 0;
+  private peakBytes = 0;
 
-  constructor(private readonly limits: OccluderBuildLimits) {}
+  constructor(private readonly limits: Pick<OccluderBuildLimits, 'maxBytes' | 'stopReason'>) {}
 
   /** Charges `workUnits` of work and polls when enough has accumulated. */
   tick(workUnits: number): void {
@@ -89,6 +104,7 @@ class BuildGuard {
 
   /** Polls unconditionally; used on stage entry, where the cost is one call. */
   poll(): void {
+    if (this.stopped) throw CANCELLED;
     if (!this.limits.stopReason) return;
     const reason = this.limits.stopReason();
     if (reason) {
@@ -98,23 +114,67 @@ class BuildGuard {
   }
 
   /**
-   * Refuses an allocation before it is made, while the memory is unclaimed.
-   * Called with every simultaneously live buffer the stage is about to add.
+   * Reserves bytes before they are allocated, against everything the pass
+   * already holds -- finished structures and other builds in progress alike.
    */
-  checkBeforeAllocation(bytes: number): void {
+  reserve(bytes: number): void {
     this.poll();
     if (!Number.isFinite(bytes) || bytes < 0) {
       throw new RangeError(`Occluder build asked for ${bytes} bytes`);
     }
-    if (this.limits.maxBytes !== undefined && bytes > this.limits.maxBytes) {
+    if (
+      this.limits.maxBytes !== undefined &&
+      this.retainedBytes + this.reservedBytes + bytes > this.limits.maxBytes
+    ) {
       this.stopped = 'memory';
       throw CANCELLED;
     }
+    this.reservedBytes += bytes;
+    this.peakBytes = Math.max(this.peakBytes, this.retainedBytes + this.reservedBytes);
+  }
+
+  /** Gives back a reservation whose buffers are gone. */
+  release(bytes: number): void {
+    this.reservedBytes = Math.max(0, this.reservedBytes - bytes);
+  }
+
+  /**
+   * Converts part of a reservation into a retained charge: the build is done
+   * and these are the buffers it hands back, which live as long as the
+   * structure does and must be deducted from every later build.
+   */
+  retain(bytes: number): void {
+    this.release(bytes);
+    this.retainedBytes += bytes;
+  }
+
+  /** Kept for callers of the old single-build check. */
+  checkBeforeAllocation(bytes: number): void {
+    this.reserve(bytes);
+    this.release(bytes);
+  }
+
+  get stoppedReason(): OccluderBuildStop | null {
+    return this.stopped;
   }
 
   get reason(): OccluderBuildStop {
     return this.stopped ?? 'cancelled';
   }
+
+  /** What the pass holds, for reporting beside host RSS. */
+  get ledger(): { retainedBytes: number; reservedBytes: number; peakBytes: number } {
+    return {
+      retainedBytes: this.retainedBytes,
+      reservedBytes: this.reservedBytes,
+      peakBytes: this.peakBytes,
+    };
+  }
+}
+
+/** Whether an error is this module's cancellation unwind. */
+export function isOccluderBuildCancelled(error: unknown): boolean {
+  return error === CANCELLED;
 }
 
 /** True when any bound at all was requested. */
@@ -155,6 +215,14 @@ export function estimateBvhBytes(triangleCount: number): number {
   const order = triangleCount * 4;
   const nodes = Math.max(4, 2 * Math.ceil(triangleCount / 4) + 1) * (6 * 8 + 3 * 4);
   return payload * 2 + centroids + bounds + sides + order + nodes;
+}
+
+/**
+ * Bytes a finished hierarchy keeps: the leaf-ordered payload, its sidedness
+ * and the node arrays. Everything else estimateBvhBytes prices is scratch.
+ */
+export function retainedBvhBytes(triangleCount: number, nodeCapacity: number): number {
+  return triangleCount * 9 * 8 + triangleCount + nodeCapacity * (6 * 8 + 3 * 4);
 }
 
 /** How often construction asks whether it should stop. */
@@ -201,12 +269,26 @@ export function buildOccluderBvh(
   primitives: readonly ShadoWorldPrimitive[],
   limits: OccluderBuildLimits = {}
 ): OccluderBvh {
-  let total = 0;
-  for (const primitive of primitives) total += Math.floor(primitive.indices.length / 3);
-  const guard = new BuildGuard(limits);
+  const guard = limits.guard ?? new OccluderBuildGuard(limits);
+  let reserved = 0;
   try {
-    return buildGuarded(primitives, total, guard);
+    guard.poll();
+    let total = 0;
+    for (const primitive of primitives) total += Math.floor(primitive.indices.length / 3);
+    reserved = estimateBvhBytes(total);
+    guard.reserve(reserved);
+    const bvh = buildGuarded(primitives, total, guard);
+    /*
+     * The build is done: what it hands back stays charged for as long as the
+     * structure lives, and the scratch it used is given back now.
+     */
+    const kept = retainedBvhBytes(bvh.triangleCount, bvh.nodeMeta.length / 3);
+    guard.retain(Math.min(kept, reserved));
+    guard.release(reserved - Math.min(kept, reserved));
+    reserved = 0;
+    return bvh;
   } catch (error) {
+    guard.release(reserved);
     if (error === CANCELLED) return emptyBvh(guard.reason);
     throw error;
   }
@@ -215,14 +297,14 @@ export function buildOccluderBvh(
 function buildGuarded(
   primitives: readonly ShadoWorldPrimitive[],
   total: number,
-  guard: BuildGuard
+  guard: OccluderBuildGuard
 ): OccluderBvh {
   /*
    * Refuse the allocation before making it, while the memory is unclaimed:
    * every simultaneously live buffer this build will hold, priced from the
    * triangle count, which is exactly known here.
    */
-  guard.checkBeforeAllocation(estimateBvhBytes(total));
+  // Reserved by the caller, against the pass's whole ledger.
   const triangles = new Float64Array(total * 9);
   const sides = new Uint8Array(total);
   const centroids = new Float64Array(total * 3);
@@ -369,7 +451,8 @@ function buildGuarded(
   }
 
   // Reorder the triangle payload into leaf order so a leaf reads contiguously.
-  guard.checkBeforeAllocation(triangleCount * 9 * 8 + triangleCount);
+  // Priced in the reservation already: estimateBvhBytes counts the payload twice.
+  guard.poll();
   const ordered = new Float64Array(triangleCount * 9);
   const orderedSides = new Uint8Array(triangleCount);
   for (let index = 0; index < triangleCount; index += 1) {
@@ -406,14 +489,14 @@ function buildGuarded(
  * every triangle in the zone. `shouldStop` is polled per partition pass so a
  * cancellation does not have to wait for the largest one to finish.
  */
-function selectNth(
+export function selectNth(
   order: Int32Array,
   centroids: Float64Array,
   axis: number,
   low: number,
   high: number,
   nth: number,
-  guard: BuildGuard
+  guard: OccluderBuildGuard
 ): void {
   const key = (index: number): number => centroids[order[index]! * 3 + axis]!;
   const swap = (left: number, right: number): void => {

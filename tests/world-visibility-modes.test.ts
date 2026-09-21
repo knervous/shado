@@ -316,6 +316,38 @@ describe('bounded bakes', () => {
     expect(report.occluderTriangles).toBe(0);
   });
 
+  it('does not attempt the instanced build once an earlier stage has stopped', () => {
+    /*
+     * The flat index is refused for memory. The instanced input below names
+     * a prototype that does not exist, so if the builder were reached at all
+     * it would throw -- the test passes only if it is skipped, and the stop
+     * reason stays the one that actually stopped the bake.
+     */
+    const reports: ShadoWorldVisibilityBakeReport[] = [];
+    const strip = groundStrip(LENGTH, DEPTH, 8);
+    const centers: [number, number][] = [];
+    for (let x = REGION / 2; x < LENGTH; x += REGION) centers.push([x, DEPTH / 2]);
+    compileShadoWorldVisibility({
+      mode: 'sampled-occlusion',
+      budget: { maxResidentBytes: 4096, residentBytes: () => 0 },
+      occluderIndex: 'bvh',
+      bounds: { min: [0, 0, 0], max: [LENGTH, 200, DEPTH] },
+      regionSize: REGION,
+      maxDistance: 1024,
+      renderCellCenters: centers,
+      persistentRenderCells: new Uint8Array(centers.length),
+      collisionPrimitives: [strip, wall(WALL_X, DEPTH, 200)],
+      instancedOccluders: {
+        prototypes: [[wall(0, DEPTH, 200)]],
+        instances: [{ prototype: 99, matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] }],
+      } as never,
+      report: (value) => reports.push(value),
+    });
+    expect(reports[0]!.limit.stop).toBe('memory');
+    expect(reports[0]!.limit.stoppedDuring).toBe('index-build');
+    expect(reports[0]!.mode).toBe('distance-flood');
+  });
+
   it('abandons a build when cancelled part way through reading geometry', () => {
     const reports: ShadoWorldVisibilityBakeReport[] = [];
     let polls = 0;
