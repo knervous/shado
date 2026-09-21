@@ -8,3 +8,4 @@ export * from './reference';
 export * from './wgsl';
 export * from './fixture-math';
 export * from './ShadoWorldHiZ';
+export * from '../../render/BabylonHiZAdapter';

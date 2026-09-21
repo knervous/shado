@@ -407,6 +407,8 @@ export default defineConfig({
     'world/index': 'src/world/index.ts',
     'world/disocclusion/index': 'src/world/disocclusion/index.ts',
     'world/disocclusion/bake': 'src/world/disocclusion/bake-entry.ts',
+    // Runtime Hi-Z pulls in Babylon; kept out of the worker-shared world entry.
+    'world/hiz/index': 'src/world/hiz/index.ts',
     cli: 'src/cli.ts',
   },
   // NO_DTS=1 remains useful for fast local JS-only builds. Release builds
