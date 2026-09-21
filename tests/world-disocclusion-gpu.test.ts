@@ -12,7 +12,9 @@ import {
   twoRoomFixture,
   type Vec3,
 } from '../src/world/disocclusion';
-import { bakeDisocclusionPvs } from '../src/world/disocclusion/bake-entry';
+import { bakeDisocclusionCapture, bakeDisocclusionPvs } from '../src/world/disocclusion/bake-entry';
+import { classifyBox } from '../src/world/disocclusion/classify';
+import type { DisocclusionGeometry } from '../src/world/disocclusion';
 
 function compileFixture() {
   const fixture = twoRoomFixture();
@@ -75,7 +77,13 @@ describe('disocclusion GPU bake (headless Dawn)', () => {
       expect(door.some(c => east.raw[c])).toBe(true);
       expect(door.every(c => east.expanded[c])).toBe(true);
       // No face of the volume admits the sealed room's target.
-      for (const d of out.domains) expect(sealed.every(c => !d.classification.expanded[c])).toBe(true);
+      for (const d of out.domains) expect(sealed.every(c => !d.classification.admitted[c])).toBe(true);
+      // Known cost, kept on purpose (pvs.md R3): the filter admits room C's
+      // floor strip along the B/C wall, via the hidden floor under that wall.
+      const stripFloor = world.clusters.primitive.flatMap((p, c) =>
+        fixture.primitives[p]!.name === 'floor' && world.clusters.centerZ[c]! > 16 && world.clusters.centerZ[c]! < 24 && world.clusters.centerX[c]! > 32 ? [c] : []
+      );
+      expect(stripFloor.some(c => east.admitted[c] && !east.expanded[c])).toBe(true);
 
       // Plain-data round trip, then the runtime path.
       const json = JSON.stringify(out.meta);
@@ -109,6 +117,51 @@ describe('disocclusion GPU bake (headless Dawn)', () => {
       const outside = admission.evaluate(pose([12, 5, 16], fixture.start.look));
       expect(outside.mode).toBe('reference');
       expect(outside.cellMask).toBeNull();
+    } finally {
+      device?.destroy();
+      headless.dispose();
+    }
+  }, 60_000);
+});
+
+describe('disocclusion blocker sidedness (headless Dawn)', () => {
+  it('a single-sided wall hides what is behind it only when it faces the camera', async () => {
+    const headless = await installHeadlessWebGpu();
+    let device: GPUDevice | undefined;
+    try {
+      device = (await (await headless.gpu.requestAdapter())!.requestDevice()) as GPUDevice;
+      const capture = {
+        sourceMin: [-0.5, -0.5, -0.5] as Vec3,
+        sourceMax: [0.5, 0.5, 0.5] as Vec3,
+        axis: '+x' as const,
+        directionTan: 0.5,
+        near: 2,
+        far: 128,
+      };
+      const frame = captureFrame(capture);
+      // A 60x60 wall at x = 20, two triangles; `facing` winds it CCW as seen
+      // from the camera (normal -x), the other way winds it away.
+      const wall = (facing: boolean): DisocclusionGeometry => {
+        const positions = new Float32Array([20, -30, -30, 20, -30, 30, 20, 30, 30, 20, 30, -30]);
+        // Seen from -x looking +x with right = +z, up = +y: (z,y) CCW is 0,1,2.
+        const front = [0, 1, 2, 0, 2, 3];
+        const back = [0, 2, 1, 0, 3, 2];
+        return {
+          positions,
+          indices: Uint32Array.from(facing ? front : back),
+          triangleTarget: new Int32Array(2).fill(-1),
+          blocker: new Uint8Array([1, 1]),
+          doubleSided: new Uint8Array([0, 0]),
+        };
+      };
+      const settings = { ...DISOCCLUSION_DEFAULT_SETTINGS, filterCell: 0 };
+      const target = { min: [40, -2, -2] as Vec3, max: [42, 2, 2] as Vec3 };
+      const verdict = async (facing: boolean) => {
+        const result = await bakeDisocclusionCapture(device!, frame, settings, wall(facing), { timeoutMs: 20_000 });
+        return classifyBox(frame, settings, result.masks, target.min, target.max);
+      };
+      expect(await verdict(true)).toBe('hidden');
+      expect(await verdict(false)).toBe('cell');
     } finally {
       device?.destroy();
       headless.dispose();

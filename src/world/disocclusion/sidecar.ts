@@ -18,7 +18,7 @@ export type DisocclusionDomainMeta = {
   viewcellHalf: [number, number];
   /** First payload word of this domain's row. */
   wordOffset: number;
-  counts: { targets: number; raw: number; filtered: number; expanded: number; filterOnly: number; regionsAdmitted: number; regions: number };
+  counts: { targets: number; raw: number; filtered: number; expanded: number; admitted: number; filterOnly: number; regionsAdmitted: number; regions: number };
   timings: Record<string, number>;
 };
 
@@ -37,7 +37,28 @@ export type DisocclusionSidecarMeta = {
     width: number;
     height: number;
   };
-  inputs: { geometrySha256: string; triangles: number; targets: number };
+  inputs: {
+    geometrySha256: string;
+    triangles: number;
+    targets: number;
+    /** Blocker eligibility and sidedness per triangle. */
+    blockerSha256: string;
+    blockerTriangles: number;
+    /** Triangle -> target cluster. */
+    targetMapSha256: string;
+    /** Cluster -> region, recomputable from the world package alone. */
+    clusterRegionSha256: string;
+    settingsSha256: string;
+    /** Real-zone inputs, when the bake read a zone: file digests a reader can re-check. */
+    zone?: {
+      name: string;
+      spatialSha256: string;
+      glbSha256: string;
+      prototypesSha256: string;
+      prototypeFiles: number;
+      releaseRevision?: string;
+    };
+  };
   settings: DisocclusionSettings;
   domains: DisocclusionDomainMeta[];
   payload: { endianness: 'little'; wordsPerRow: number; wordCount: number; sha256: string };
@@ -131,6 +152,36 @@ export async function decodeDisocclusionSidecar(json: string, payload: Uint8Arra
     });
   }
   return { meta, words };
+}
+
+/** Digest of the cluster -> region mapping the rows are addressed through. */
+export async function clusterRegionDigest(world: ShadoWorldSpatialPackage): Promise<string> {
+  const cellRegion = world.visibility?.cellRegion ?? [];
+  const regions = Int32Array.from(world.clusters.cellId, cell => cellRegion[cell] ?? -1);
+  return sha256Hex(new Uint8Array(regions.buffer));
+}
+
+/**
+ * The deep identity check a reader can make: the cluster -> region mapping
+ * from the loaded package and, when given, the digests of the exact spatial
+ * and GLB bytes the bake read. Null when everything checked matches.
+ */
+export async function verifySidecarInputs(
+  sidecar: DisocclusionSidecar,
+  world: ShadoWorldSpatialPackage,
+  files: { spatial?: Uint8Array; glb?: Uint8Array } = {}
+): Promise<string | null> {
+  const shallow = sidecarMismatch(sidecar, world);
+  if (shallow) return shallow;
+  const inputs = sidecar.meta.inputs;
+  if (inputs.clusterRegionSha256 !== (await clusterRegionDigest(world))) return 'cluster -> region mapping differs';
+  if (inputs.zone && files.spatial && inputs.zone.spatialSha256 !== (await sha256Hex(files.spatial))) {
+    return 'spatial package bytes differ from the baked input';
+  }
+  if (inputs.zone && files.glb && inputs.zone.glbSha256 !== (await sha256Hex(files.glb))) {
+    return 'world GLB bytes differ from the baked input';
+  }
+  return null;
 }
 
 /** Null when the sidecar was baked for this exact world layout, else the reason. */

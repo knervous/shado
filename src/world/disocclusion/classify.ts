@@ -4,26 +4,23 @@
  *
  * Raw:      a target is admitted when one of its triangle IDs is a sample in a
  *           non-empty, potentially visible tile (the paper's PVS).
- * Filtered: raw plus the paper's volumetric filter (§3.3), reported only.
+ * Filtered: raw plus the paper's volumetric filter (§3.3).
  * Expanded: raw, OR any target whose full bounds touch a potentially visible
  *           cell, OR reach nearer than `near` (near field) or beyond `far`
  *           (unknown). This catches triangles that lost the per-layer depth
  *           competition, fell between samples, or were clipped.
  *
- * The filter is NOT part of `expanded`: the bounds test already admits any
- * target with a triangle inside a visible cell, which is what the filter
- * guards against, and the filter's world grid (the paper's 50 cm minimum is
- * 1.5 zone units) is thicker than a typical wall, so it admits the far face
- * of any wall whose near face is visible. `filterOnly` counts those.
- *
- * Only `expanded` may reach the runtime. `raw`/`filtered` are reported so the
- * adapter's effect is measurable.
+ * What reaches the runtime is `admitted = expanded ∪ filtered` (pvs.md R3).
+ * Whether the bounds test makes the filter redundant is not established, and
+ * the filter's world grid (the paper's 50 cm minimum is 1.5 zone units) can
+ * cross a thin wall: those admissions are the price of not assuming it.
+ * `filterOnly` counts targets only the filter admitted.
  */
 import { layerFront, tileRangeX, tileRangeY, toView } from './layers';
 import { EMPTY_SAMPLE } from './reference';
 import type { DisocclusionFrame, DisocclusionGeometry, DisocclusionLayers, DisocclusionMasks, DisocclusionSettings, Vec3 } from './types';
 
-export type DisocclusionTargetReason = 'raw' | 'cell' | 'near' | 'far' | 'hidden' | 'outside';
+export type DisocclusionTargetReason = 'raw' | 'filter' | 'cell' | 'near' | 'far' | 'hidden' | 'outside';
 
 export type DisocclusionTargetClassification = {
   /** Per target: why it was admitted, or 'hidden'/'outside' when rejected. */
@@ -31,7 +28,9 @@ export type DisocclusionTargetClassification = {
   raw: Uint8Array;
   filtered: Uint8Array;
   expanded: Uint8Array;
-  counts: { targets: number; raw: number; filtered: number; expanded: number; filterOnly: number };
+  /** expanded ∪ filtered: the admission serialized into rows. */
+  admitted: Uint8Array;
+  counts: { targets: number; raw: number; filtered: number; expanded: number; admitted: number; filterOnly: number };
 };
 
 export type TargetBounds = { min: Float64Array; max: Float64Array };
@@ -129,16 +128,22 @@ export function classifyBox(
 export function volumetricFilter(geometry: DisocclusionGeometry, visibleTriangles: Uint8Array, cell: number): Uint8Array {
   const out = Uint8Array.from(visibleTriangles);
   if (!(cell > 0)) return out;
-  const { positions, indices } = geometry;
-  const key = (v: number) =>
-    `${Math.floor(positions[v * 3]! / cell)},${Math.floor(positions[v * 3 + 1]! / cell)},${Math.floor(positions[v * 3 + 2]! / cell)}`;
-  const marked = new Set<string>();
+  const { positions, indices, triangleTarget } = geometry;
+  // Grid cells hashed to one number; collisions only admit more.
+  const key = (v: number) => {
+    const x = Math.floor(positions[v * 3]! / cell) & 0x1fffff;
+    const y = Math.floor(positions[v * 3 + 1]! / cell) & 0x1fffff;
+    const z = Math.floor(positions[v * 3 + 2]! / cell) & 0x1fffff;
+    return (x * 2097152 + y) * 2097152 + z;
+  };
+  const marked = new Set<number>();
   for (let tri = 0; tri < visibleTriangles.length; tri++) {
     if (!visibleTriangles[tri]) continue;
     for (let k = 0; k < 3; k++) marked.add(key(indices[tri * 3 + k]!));
   }
+  // Only target triangles can change an admission.
   for (let tri = 0; tri < visibleTriangles.length; tri++) {
-    if (out[tri]) continue;
+    if (out[tri] || triangleTarget[tri]! < 0) continue;
     for (let k = 0; k < 3; k++) {
       if (marked.has(key(indices[tri * 3 + k]!))) {
         out[tri] = 1;
@@ -188,6 +193,7 @@ export function classifyTargets(
   }
   const bounds = targetBounds(geometry, targetCount);
   const expanded = new Uint8Array(targetCount);
+  const admitted = new Uint8Array(targetCount);
   const reason: DisocclusionTargetReason[] = new Array(targetCount);
   for (let target = 0; target < targetCount; target++) {
     if (raw[target]) {
@@ -207,6 +213,10 @@ export function classifyTargets(
     reason[target] = verdict;
     expanded[target] = verdict === 'hidden' || verdict === 'outside' ? 0 : 1;
   }
+  for (let target = 0; target < targetCount; target++) {
+    admitted[target] = expanded[target] || filtered[target] ? 1 : 0;
+    if (!expanded[target] && filtered[target]) reason[target] = 'filter';
+  }
   const sum = (a: Uint8Array) => a.reduce((s, v) => s + v, 0);
   let filterOnly = 0;
   for (let target = 0; target < targetCount; target++) if (filtered[target] && !expanded[target]) filterOnly++;
@@ -215,6 +225,7 @@ export function classifyTargets(
     raw,
     filtered,
     expanded,
-    counts: { targets: targetCount, raw: sum(raw), filtered: sum(filtered), expanded: sum(expanded), filterOnly },
+    admitted,
+    counts: { targets: targetCount, raw: sum(raw), filtered: sum(filtered), expanded: sum(expanded), admitted: sum(admitted), filterOnly },
   };
 }

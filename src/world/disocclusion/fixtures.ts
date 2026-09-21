@@ -109,12 +109,12 @@ const WALL_H = 24;
  *        z=32 +---------+-------------------------------+
  *             |         |   C  (sealed)     [sealed]    |
  *             |    A    |                               |
- *        z=16 |   src   +===============================+  <- B/C wall z 15..16
+ *        z=16 |   src   +===============================+  <- B/C wall z 14..16
  *             |    *    :                               |
  *             |         :        [door]     B           |
  *        z=0  +---------+-------------------------------+
  *            x=0      x=24                            x=64
- *                doorway z 7..13 at x 23..24, lintel from y 10
+ *                doorway z 7..13 at x 22..24, lintel from y 10
  *
  * Walls are 24 high (8 m) so they fill whole tiles of the 128^2 capture; a
  * wall that only half-fills its tiles leaves them open and hides nothing.
@@ -131,23 +131,29 @@ export function twoRoomFixture(): DisocclusionFixture {
   p.push(box('a-south', 'stone', [0, 0, 0], [24, WALL_H, 1]));
   p.push(box('a-north', 'stone', [0, 0, 31], [24, WALL_H, 32]));
   // East wall: solid north of the doorway, jamb south of it, lintel above.
-  p.push(box('a-east-solid', 'stone', [23, 0, 13], [24, WALL_H, 32]));
-  p.push(box('a-east-jamb', 'stone', [23, 0, 0], [24, WALL_H, 7]));
-  p.push(box('a-east-lintel', 'stone', [23, 10, 7], [24, WALL_H, 13]));
+  // The interior walls are 2 units (0.67 m) thick: thicker than the
+  // volumetric filter's 1.5-unit grid, which admits across anything thinner.
+  p.push(box('a-east-solid', 'stone', [22, 0, 13], [24, WALL_H, 32]));
+  p.push(box('a-east-jamb', 'stone', [22, 0, 0], [24, WALL_H, 7]));
+  p.push(box('a-east-lintel', 'stone', [22, 10, 7], [24, WALL_H, 13]));
   // Room B (south) and C (north), divided by a solid wall.
-  p.push(box('bc-divide', 'stone', [24, 0, 15], [64, WALL_H, 16]));
+  p.push(box('bc-divide', 'stone', [24, 0, 14], [64, WALL_H, 16]));
   p.push(box('b-south', 'stone', [24, 0, 0], [64, WALL_H, 1]));
   p.push(box('bc-east', 'stone', [63, 0, 0], [64, WALL_H, 32]));
   p.push(box('c-north', 'stone', [24, 0, 31], [64, WALL_H, 32]));
   // Targets.
   p.push(box('target-door', 'target-door', [39, 0, 3], [41, 6, 5]));
-  p.push(box('target-sealed', 'target-sealed', [55, 0, 23], [57, 6, 25]));
+  // Two units past the 16..24 region row along the B/C wall: the floor under
+  // that wall is hidden but tile-visible in a deeper layer, so the volumetric
+  // filter admits the room-C strip beside it (the paper's filter, kept per
+  // pvs.md R3). The target stands in the interior beyond that strip.
+  p.push(box('target-sealed', 'target-sealed', [55, 0, 25], [57, 6, 27]));
   return {
     name: 'two-room',
     primitives: p,
     targets: {
       'target-door': { min: [39, 0, 3], max: [41, 6, 5], expect: 'visible' },
-      'target-sealed': { min: [55, 0, 23], max: [57, 6, 25], expect: 'hidden' },
+      'target-sealed': { min: [55, 0, 25], max: [57, 6, 27], expect: 'hidden' },
     },
     // 0.75-unit half extent: the directive's starting size. Six faces, so a
     // camera anywhere in the box may look in any direction.

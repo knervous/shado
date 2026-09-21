@@ -33,16 +33,20 @@ export function geometryFromWorld(
   for (let c = 0; c < clusterCount; c++) indexCount += world.clusters.indexCount[c]!;
   const indices = new Uint32Array(indexCount);
   const triangleTarget = new Int32Array(indexCount / 3);
+  // Sidedness as the primitive declares it; undeclared means double-sided.
+  const doubleSided = new Uint8Array(indexCount / 3);
   let at = 0;
   for (let c = 0; c < clusterCount; c++) {
-    const base = offsets[world.clusters.primitive[c]!]!;
+    const primitive = world.clusters.primitive[c]!;
+    const base = offsets[primitive]!;
     const first = world.clusters.firstIndex[c]!;
     const count = world.clusters.indexCount[c]!;
     for (let k = 0; k < count; k++) indices[at + k] = base + world.clusterIndices[first + k]!;
     triangleTarget.fill(c, at / 3, (at + count) / 3);
+    doubleSided.fill(primitives[primitive]!.doubleSided === false ? 0 : 1, at / 3, (at + count) / 3);
     at += count;
   }
-  return { positions, indices, triangleTarget };
+  return { positions, indices, triangleTarget, doubleSided };
 }
 
 /** Region owning each cluster, or -1 when the package has no dense regions. */
@@ -54,4 +58,157 @@ export function clusterRegions(world: ShadoWorldSpatialPackage): Int32Array {
     out[c] = cellRegion[cell] ?? -1;
   });
   return out;
+}
+
+/** What a zone bake put in the raster and why the rest stayed out. */
+export type ZoneBakeGeometryManifest = {
+  targets: { clusters: number; mappedPrimitives: number; primitives: number; triangles: number; blockerTriangles: number };
+  blockers: { baseExtraTriangles: number; objectTriangles: number; total: number };
+  sidedness: { doubleSided: number; singleSided: number };
+  /** Base GLB parts left out of the raster, by reason (they may still be targets). */
+  baseExclusions: Record<string, number>;
+  /** Clusters whose recovered triangles do not sit inside the package's cluster sphere. */
+  frameMismatches: number;
+};
+
+type GlbPart = {
+  node: string;
+  positions: ArrayLike<number>;
+  indices: ArrayLike<number>;
+  doubleSided: boolean;
+  /** Null when the part may block (see occluderEligibility). */
+  exclusion: string | null;
+};
+
+/**
+ * Bake input for a real zone.
+ *
+ * Targets are the package's render clusters, exactly as the scene layer
+ * draws them: package primitive `N#k` is primitive k of GLB node `N` (the
+ * runtime strips `#k` to find the same mesh), and cluster indices address its
+ * vertices. Blockers are every eligible static opaque surface: cluster
+ * triangles of eligible parts, the GLB's other eligible parts (drawn through
+ * merged geometry, never PVS targets) and eligible placed objects. Placed
+ * objects and extra parts are blockers only (target -1): objects keep
+ * reference admission.
+ */
+export function zoneBakeGeometry(
+  world: ShadoWorldSpatialPackage,
+  glbParts: readonly GlbPart[],
+  objectPrimitives: readonly ShadoWorldPrimitive[]
+): { geometry: DisocclusionGeometry; manifest: ZoneBakeGeometryManifest } {
+  const byNode = new Map<string, GlbPart>();
+  for (const part of glbParts) byNode.set(part.node.slice(part.node.lastIndexOf('/') + 1), part);
+  const matched = world.primitives.map(primitive => {
+    // `N#k`: the runtime strips `#k` to name the Babylon mesh. Babylon splits a
+    // multi-primitive glTF mesh into `N_primitiveI` meshes, which
+    // readGlbPrimitives names `N#I`.
+    const hash = primitive.name.lastIndexOf('#');
+    const mesh = hash >= 0 ? primitive.name.slice(0, hash) : primitive.name;
+    const split = /^(.*)_primitive(\d+)$/.exec(mesh);
+    const part =
+      byNode.get(mesh) ?? (split ? byNode.get(`${split[1]}#${split[2]}`) : undefined) ?? byNode.get(`${mesh}#0`) ?? null;
+    if (part && part.positions.length / 3 !== primitive.vertexCount) {
+      throw new Error(`GLB part ${part.node} has ${part.positions.length / 3} vertices, package primitive ${primitive.name} ${primitive.vertexCount}`);
+    }
+    return part;
+  });
+  const matchedParts = new Set(matched.filter((p): p is GlbPart => p !== null));
+  const unmapped = world.primitives.filter((_, i) => !matched[i]).map(p => p.name);
+  if (unmapped.length) throw new Error(`package primitives with no GLB part: ${unmapped.slice(0, 5).join(', ')}`);
+
+  const clusterCount = world.clusters.firstIndex.length;
+  let targetTriangles = 0;
+  for (let c = 0; c < clusterCount; c++) targetTriangles += world.clusters.indexCount[c]! / 3;
+  const baseExtra = glbParts.filter(p => !matchedParts.has(p) && p.exclusion === null);
+  const baseExclusions: Record<string, number> = {};
+  for (const part of glbParts) {
+    if (part.exclusion) baseExclusions[part.exclusion] = (baseExclusions[part.exclusion] ?? 0) + part.indices.length / 3;
+  }
+  const extraTriangles = baseExtra.reduce((s, p) => s + p.indices.length / 3, 0);
+  const objectTriangles = objectPrimitives.reduce((s, p) => s + p.indices.length / 3, 0);
+  const vertexCount =
+    [...matchedParts].reduce((s, p) => s + p.positions.length / 3, 0) +
+    baseExtra.reduce((s, p) => s + p.positions.length / 3, 0) +
+    objectPrimitives.reduce((s, p) => s + p.positions.length / 3, 0);
+  const triangles = targetTriangles + extraTriangles + objectTriangles;
+  const positions = new Float32Array(vertexCount * 3);
+  const indices = new Uint32Array(triangles * 3);
+  const triangleTarget = new Int32Array(triangles).fill(-1);
+  const blocker = new Uint8Array(triangles);
+  const doubleSided = new Uint8Array(triangles);
+  let vertexAt = 0;
+  let triangleAt = 0;
+  const partBase = new Map<GlbPart, number>();
+  const pushVertices = (source: ArrayLike<number>) => {
+    const base = vertexAt;
+    for (let i = 0; i < source.length; i++) positions[base * 3 + i] = Number(source[i]);
+    vertexAt += source.length / 3;
+    return base;
+  };
+  for (const part of matchedParts) partBase.set(part, pushVertices(part.positions));
+
+  let blockerTargetTriangles = 0;
+  let frameMismatches = 0;
+  for (let c = 0; c < clusterCount; c++) {
+    const part = matched[world.clusters.primitive[c]!]!;
+    const base = partBase.get(part)!;
+    const first = world.clusters.firstIndex[c]!;
+    const count = world.clusters.indexCount[c]!;
+    const cx = world.clusters.centerX[c]!;
+    const cy = world.clusters.centerY[c]!;
+    const cz = world.clusters.centerZ[c]!;
+    const r2 = (world.clusters.radius[c]! * 1.01 + 0.01) ** 2;
+    let outside = false;
+    for (let k = 0; k < count; k++) {
+      const v = base + world.clusterIndices[first + k]!;
+      indices[triangleAt * 3 + (k % 3)] = v;
+      const dx = positions[v * 3]! - cx;
+      const dy = positions[v * 3 + 1]! - cy;
+      const dz = positions[v * 3 + 2]! - cz;
+      if (dx * dx + dy * dy + dz * dz > r2) outside = true;
+      if (k % 3 === 2) {
+        triangleTarget[triangleAt] = c;
+        blocker[triangleAt] = part.exclusion === null ? 1 : 0;
+        doubleSided[triangleAt] = part.doubleSided ? 1 : 0;
+        if (part.exclusion === null) blockerTargetTriangles++;
+        triangleAt++;
+      }
+    }
+    if (outside) frameMismatches++;
+  }
+  const pushBlocker = (source: { positions: ArrayLike<number>; indices: ArrayLike<number>; doubleSided?: boolean }) => {
+    const base = pushVertices(source.positions);
+    const two = source.doubleSided === false ? 0 : 1;
+    for (let i = 0; i < source.indices.length; i += 3) {
+      indices[triangleAt * 3] = base + Number(source.indices[i]);
+      indices[triangleAt * 3 + 1] = base + Number(source.indices[i + 1]);
+      indices[triangleAt * 3 + 2] = base + Number(source.indices[i + 2]);
+      blocker[triangleAt] = 1;
+      doubleSided[triangleAt] = two;
+      triangleAt++;
+    }
+  };
+  for (const part of baseExtra) pushBlocker(part);
+  for (const primitive of objectPrimitives) pushBlocker(primitive);
+
+  let two = 0;
+  for (let t = 0; t < triangles; t++) if (blocker[t]) two += doubleSided[t]!;
+  const blockerTotal = blockerTargetTriangles + extraTriangles + objectTriangles;
+  return {
+    geometry: { positions, indices, triangleTarget, blocker, doubleSided },
+    manifest: {
+      targets: {
+        clusters: clusterCount,
+        mappedPrimitives: matchedParts.size,
+        primitives: world.primitives.length,
+        triangles: targetTriangles,
+        blockerTriangles: blockerTargetTriangles,
+      },
+      blockers: { baseExtraTriangles: extraTriangles, objectTriangles, total: blockerTotal },
+      sidedness: { doubleSided: two, singleSided: blockerTotal - two },
+      baseExclusions,
+      frameMismatches,
+    },
+  };
 }

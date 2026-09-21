@@ -96,6 +96,18 @@ export type DisocclusionGeometry = {
   indices: Uint32Array;
   /** Per triangle: owning target (render cluster) index, or -1 for none. */
   triangleTarget: Int32Array;
+  /**
+   * Per triangle: 1 when it may hide anything (static, opaque, eligible).
+   * Absent means every triangle blocks. Non-blockers stay targets: they are
+   * classified by bounds, never rasterized into the occluder layers.
+   */
+  blocker?: Uint8Array;
+  /**
+   * Per triangle: 1 when the surface is visible from both sides. A
+   * single-sided blocker seen from behind hides nothing, so it is not
+   * rasterized from that side. Absent means double-sided.
+   */
+  doubleSided?: Uint8Array;
 };
 
 /** Raw buffers after the raster passes, row-major [layer][y][x]. */

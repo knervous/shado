@@ -98,11 +98,15 @@ struct Params {
 @group(0) @binding(3) var<storage, read> fronts: array<f32>;
 @group(0) @binding(4) var<storage, read_write> depthKeys: array<atomic<u32>>;
 @group(0) @binding(5) var<storage, read_write> ids: array<atomic<u32>>;
+// Per raster triangle: original triangle ID, and bit 0 = double-sided.
+@group(0) @binding(6) var<storage, read> rasterTri: array<u32>;
+@group(0) @binding(7) var<storage, read> rasterFlags: array<u32>;
 
 struct VOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) depth: f32,
   @location(1) @interpolate(flat) tri: u32,
+  @location(2) @interpolate(flat) flags: u32,
 };
 
 @vertex fn vs(@builtin(vertex_index) vi: u32) -> VOut {
@@ -112,13 +116,16 @@ struct VOut {
   var o: VOut;
   o.pos = c;
   o.depth = c.w;
-  o.tri = vi / 3u;
+  o.tri = rasterTri[vi / 3u];
+  o.flags = rasterFlags[vi / 3u];
   return o;
 }
 
 // Layer by comparison against the CPU's layer fronts, so the raster and the
-// CPU classifier agree on every boundary. -1 outside [near, far).
-fn sampleIndex(pos: vec4<f32>, depth: f32) -> i32 {
+// CPU classifier agree on every boundary. -1 outside [near, far), and -1 for
+// the back of a single-sided surface: seen from behind it hides nothing.
+fn sampleIndex(pos: vec4<f32>, depth: f32, flags: u32, front: bool) -> i32 {
+  if ((flags & 1u) == 0u && !front) { return -1; }
   if (!(depth >= fronts[0]) || !(depth < fronts[params.layers])) { return -1; }
   var layer = 0u;
   loop {
@@ -130,14 +137,14 @@ fn sampleIndex(pos: vec4<f32>, depth: f32) -> i32 {
   return i32((layer * params.resolution + y) * params.resolution + x);
 }
 
-@fragment fn fsDepth(v: VOut) -> @location(0) vec4<f32> {
-  let i = sampleIndex(v.pos, v.depth);
+@fragment fn fsDepth(v: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+  let i = sampleIndex(v.pos, v.depth, v.flags, front);
   if (i >= 0) { atomicMin(&depthKeys[u32(i)], bitcast<u32>(v.depth)); }
   return vec4<f32>(0.0);
 }
 
-@fragment fn fsId(v: VOut) -> @location(0) vec4<f32> {
-  let i = sampleIndex(v.pos, v.depth);
+@fragment fn fsId(v: VOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+  let i = sampleIndex(v.pos, v.depth, v.flags, front);
   if (i >= 0 && atomicLoad(&depthKeys[u32(i)]) == bitcast<u32>(v.depth)) {
     atomicMin(&ids[u32(i)], v.tri);
   }
@@ -236,133 +243,190 @@ fn lowBits(n: u32) -> u32 {
 }
 `;
 
-/** Bytes this capture will allocate, before allocating any of it. */
-export function captureBytes(settings: DisocclusionSettings, geometry: DisocclusionGeometry): number {
+/** The raster's blocker subset: which triangles draw, with their IDs and sidedness. */
+function rasterSubset(geometry: DisocclusionGeometry) {
+  const triangles = geometry.indices.length / 3;
+  let count = 0;
+  for (let t = 0; t < triangles; t++) if (!geometry.blocker || geometry.blocker[t]) count++;
+  const indices = new Uint32Array(count * 3);
+  const tri = new Uint32Array(count);
+  const flags = new Uint32Array(count);
+  let at = 0;
+  for (let t = 0; t < triangles; t++) {
+    if (geometry.blocker && !geometry.blocker[t]) continue;
+    indices[at * 3] = geometry.indices[t * 3]!;
+    indices[at * 3 + 1] = geometry.indices[t * 3 + 1]!;
+    indices[at * 3 + 2] = geometry.indices[t * 3 + 2]!;
+    tri[at] = t;
+    flags[at] = !geometry.doubleSided || geometry.doubleSided[t] ? 1 : 0;
+    at++;
+  }
+  return { indices, tri, flags, count };
+}
+
+/** Bytes a baker will allocate on the device, before allocating any of it. */
+export function captureBytes(settings: DisocclusionSettings, geometry: DisocclusionGeometry, readDepth = false): number {
   const r = settings.resolution;
   const tiles = r / settings.tileSize;
   const n = settings.layers;
   const samples = r * r * n * 4;
   const cells = tiles * tiles * n * 4;
   const tables = n * n * tiles * 2 * 4 * 2;
-  const geometryBytes = geometry.positions.byteLength + geometry.indices.byteLength;
-  // depth + id, their readback copies, count/mask/visible + readback, column, tables, fronts, uniforms, target.
-  return samples * 4 + cells * 6 + tiles * tiles * 4 * 2 + tables + (n + 1) * 4 + 64 * 256 + r * r + geometryBytes;
+  let blockers = 0;
+  const triangles = geometry.indices.length / 3;
+  for (let t = 0; t < triangles; t++) if (!geometry.blocker || geometry.blocker[t]) blockers++;
+  const geometryBytes = geometry.positions.byteLength + blockers * (12 + 4 + 4);
+  // depth + id (+ id readback, + depth readback when asked), count/mask/visible + readback,
+  // column + readback, tables, fronts, uniforms, target.
+  return (
+    samples * (readDepth ? 4 : 3) + cells * 6 + tiles * tiles * 4 * 2 + tables + (n + 1) * 4 + 64 * 256 + r * r + geometryBytes
+  );
 }
 
 type GpuDevice = GPUDevice;
 
 /**
- * Rasterize one directional capture and run the tile stages. Every resource
- * is destroyed in `finally`. Any failure throws DisocclusionBakeError with the
- * stage it reached and the timings so far; it never returns an empty result.
+ * Bounded offline disocclusion stages over one static scene. Geometry,
+ * pipelines and working buffers are created once and reused for every
+ * capture (a source volume's six faces); per face only uniforms, layer
+ * fronts and frustum tables are rewritten and the working buffers cleared.
+ * `dispose()` destroys everything; a failure throws DisocclusionBakeError
+ * with the stage and timings, never an empty result.
  */
-export async function bakeDisocclusionCapture(
-  device: GpuDevice,
-  frame: DisocclusionFrame,
-  settings: DisocclusionSettings,
-  geometry: DisocclusionGeometry,
-  options: DisocclusionBakeOptions = {}
-): Promise<DisocclusionCaptureResult> {
-  validateSettings(settings);
-  const now = options.now ?? (() => performance.now());
-  const timings: DisocclusionStageTimings = {};
-  let stage = 'account';
-  const started = now();
-  const deadline = started + (options.timeoutMs ?? 10_000);
-  const bytes = captureBytes(settings, geometry);
-  const maxBytes = options.maxBytes ?? DISOCCLUSION_MAX_BYTES;
-  const fail = (message: string): never => {
-    timings.totalMs = now() - started;
-    throw new DisocclusionBakeError(message, stage, { ...timings });
-  };
-  if (bytes > maxBytes) fail(`capture needs ${bytes} bytes, cap is ${maxBytes}`);
-  if (geometry.indices.length % 3 || geometry.positions.length % 3) fail('geometry is not triangles');
-  const triangles = geometry.indices.length / 3;
-  if (triangles === 0) fail('capture has no occluder triangles; refusing to emit an empty PVS');
-  const vertexCount = geometry.positions.length / 3;
-  for (let i = 0; i < geometry.indices.length; i++) {
-    if (geometry.indices[i]! >= vertexCount) fail(`index ${i} out of range`);
+export class DisocclusionBaker {
+  private readonly buffers: GPUBuffer[] = [];
+  private readonly textures: GPUTexture[] = [];
+  private lost: string | null = null;
+  private disposed = false;
+  readonly bytes: number;
+  readonly rasterTriangles: number;
+  /** Setup cost, reported once. */
+  readonly setupTimings: DisocclusionStageTimings = {};
+
+  private constructor(
+    private readonly device: GpuDevice,
+    private readonly settings: DisocclusionSettings,
+    private readonly options: DisocclusionBakeOptions & { readDepth?: boolean },
+    bytes: number,
+    rasterTriangles: number
+  ) {
+    this.bytes = bytes;
+    this.rasterTriangles = rasterTriangles;
+    void device.lost?.then(info => {
+      this.lost = `device lost: ${info.reason} ${info.message}`;
+    });
   }
 
-  const r = settings.resolution;
-  const tiles = r / settings.tileSize;
-  const n = settings.layers;
-  const sampleCount = r * r * n;
-  const cellCount = tiles * tiles * n;
-  const buffers: GPUBuffer[] = [];
-  const textures: GPUTexture[] = [];
-  let lost: string | null = null;
-  void device.lost?.then(info => {
-    lost = `device lost: ${info.reason} ${info.message}`;
-  });
-  device.pushErrorScope('validation');
-  device.pushErrorScope('out-of-memory');
-  let scopes = 2;
-
-  const checkpoint = async (name: string, begin: number) => {
-    const pending = device.queue.onSubmittedWorkDone();
-    const remaining = deadline - now();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<'timeout'>(resolve => {
-      timer = setTimeout(() => resolve('timeout'), Math.max(0, remaining));
-    });
-    const outcome = await Promise.race([pending.then(() => 'done' as const), timeout]);
-    if (timer) clearTimeout(timer);
-    timings[`${name}Ms`] = now() - begin;
-    if (outcome === 'timeout') fail(`watchdog expired during ${name}`);
-    if (lost) fail(lost);
-    if (options.shouldStop?.()) fail(`cancelled after ${name}`);
+  // Resources, filled by create().
+  private state!: {
+    paramsBuffer: GPUBuffer;
+    frontsBuffer: GPUBuffer;
+    depth: GPUBuffer;
+    ids: GPUBuffer;
+    counts: GPUBuffer;
+    mask: GPUBuffer;
+    visible: GPUBuffer;
+    column: GPUBuffer;
+    rangeX: GPUBuffer;
+    rangeY: GPUBuffer;
+    sentinel: Uint32Array;
+    target: GPUTexture;
+    rasterGroup: GPUBindGroup;
+    tileGroup: GPUBindGroup;
+    sourceGroup: GPUBindGroup;
+    depthPipeline: GPURenderPipeline;
+    idPipeline: GPURenderPipeline;
+    countPipeline: GPUComputePipeline;
+    propagatePipeline: GPUComputePipeline;
+    gatherPipeline: GPUComputePipeline;
+    staging: Map<GPUBuffer, GPUBuffer>;
   };
-  const buffer = (size: number, usage: number, label: string) => {
-    const b = device.createBuffer({ size: Math.max(16, Math.ceil(size / 4) * 4), usage, label });
-    buffers.push(b);
+
+  static async create(
+    device: GpuDevice,
+    settings: DisocclusionSettings,
+    geometry: DisocclusionGeometry,
+    options: DisocclusionBakeOptions & { readDepth?: boolean } = {}
+  ): Promise<DisocclusionBaker> {
+    validateSettings(settings);
+    const now = options.now ?? (() => performance.now());
+    const started = now();
+    const fail = (message: string, stage = 'setup'): never => {
+      throw new DisocclusionBakeError(message, stage, { setupMs: now() - started });
+    };
+    if (geometry.indices.length % 3 || geometry.positions.length % 3) fail('geometry is not triangles');
+    const vertexCount = geometry.positions.length / 3;
+    for (let i = 0; i < geometry.indices.length; i++) {
+      if (geometry.indices[i]! >= vertexCount) fail(`index ${i} out of range`);
+    }
+    const subset = rasterSubset(geometry);
+    if (subset.count === 0) fail('capture has no occluder triangles; refusing to emit an empty PVS');
+    const bytes = captureBytes(settings, geometry, options.readDepth);
+    const maxBytes = options.maxBytes ?? DISOCCLUSION_MAX_BYTES;
+    if (bytes > maxBytes) fail(`capture needs ${bytes} bytes, cap is ${maxBytes}`);
+    const largest = Math.max(geometry.positions.byteLength, subset.indices.byteLength);
+    const limit = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize);
+    if (largest > limit) fail(`geometry buffer of ${largest} bytes exceeds the device's ${limit}-byte storage binding limit`);
+
+    const baker = new DisocclusionBaker(device, settings, options, bytes, subset.count);
+    try {
+      baker.allocate(geometry, subset);
+      await device.queue.onSubmittedWorkDone();
+    } catch (error) {
+      baker.dispose();
+      if (error instanceof DisocclusionBakeError) throw error;
+      fail(error instanceof Error ? error.message : String(error));
+    }
+    baker.setupTimings.setupMs = now() - started;
+    return baker;
+  }
+
+  private buffer(size: number, usage: number, label: string) {
+    const b = this.device.createBuffer({ size: Math.max(16, Math.ceil(size / 4) * 4), usage, label });
+    this.buffers.push(b);
     return b;
-  };
-  const upload = (data: ArrayBufferView, usage: number, label: string) => {
-    const b = buffer(data.byteLength, usage | BUF.COPY_DST, label);
-    device.queue.writeBuffer(b, 0, data.buffer, data.byteOffset, data.byteLength);
+  }
+
+  private upload(data: ArrayBufferView, usage: number, label: string) {
+    const b = this.buffer(data.byteLength, usage | BUF.COPY_DST, label);
+    // Chunked through byte views: one multi-hundred-megabyte write aborted
+    // headless Dawn (the process died with no error) on a real zone.
+    const bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    for (let at = 0; at < bytes.byteLength; at += UPLOAD_CHUNK) {
+      this.device.queue.writeBuffer(b, at, bytes.subarray(at, Math.min(bytes.byteLength, at + UPLOAD_CHUNK)));
+    }
     return b;
-  };
+  }
 
-  try {
-    stage = 'upload';
-    let begin = now();
-    const fronts = new Float32Array(n + 1);
-    for (let i = 0; i <= n; i++) fronts[i] = layerFront(frame, n, i);
-    const params = new ArrayBuffer(80);
-    new Float32Array(params, 0, 16).set(captureClipMatrix(frame));
-    new Uint32Array(params, 64, 4).set([r, n, 0, 0]);
-    const paramsBuffer = upload(new Uint8Array(params), BUF.UNIFORM, 'dpvs-params');
-    const positions = upload(Float32Array.from(geometry.positions), BUF.STORAGE, 'dpvs-positions');
-    const indices = upload(Uint32Array.from(geometry.indices), BUF.STORAGE, 'dpvs-indices');
-    const frontsBuffer = upload(fronts, BUF.STORAGE, 'dpvs-fronts');
-    const sentinel = new Uint32Array(sampleCount).fill(EMPTY_SAMPLE);
-    const depth = upload(sentinel, BUF.STORAGE | BUF.COPY_SRC, 'dpvs-depth');
-    const ids = upload(sentinel, BUF.STORAGE | BUF.COPY_SRC, 'dpvs-ids');
-    const tables = frustumTables(frame, settings);
-    const rangeX = upload(tables.rangeX, BUF.STORAGE, 'dpvs-range-x');
-    const rangeY = upload(tables.rangeY, BUF.STORAGE, 'dpvs-range-y');
-    const zeroCells = new Uint32Array(cellCount);
-    const counts = upload(zeroCells, BUF.STORAGE | BUF.COPY_SRC, 'dpvs-counts');
-    const mask = upload(zeroCells, BUF.STORAGE | BUF.COPY_SRC, 'dpvs-mask');
-    const visible = upload(zeroCells, BUF.STORAGE | BUF.COPY_SRC, 'dpvs-visible');
-    const column = upload(new Uint32Array(tiles * tiles), BUF.STORAGE | BUF.COPY_SRC, 'dpvs-column');
-    const grid = upload(Uint32Array.from([r, tiles, settings.tileSize, n]), BUF.UNIFORM, 'dpvs-grid');
-    const sourceStride = 256;
-    const sourceData = new Uint32Array((sourceStride / 4) * n);
-    for (let l = 0; l < n; l++) sourceData[(l * sourceStride) / 4] = l;
-    const sourceBuffer = upload(sourceData, BUF.UNIFORM, 'dpvs-source-layer');
-    await checkpoint('upload', begin);
+  private allocate(geometry: DisocclusionGeometry, subset: ReturnType<typeof rasterSubset>) {
+    const { device, settings } = this;
+    const r = settings.resolution;
+    const tiles = r / settings.tileSize;
+    const n = settings.layers;
+    const sampleCount = r * r * n;
+    const cellCount = tiles * tiles * n;
+    const paramsBuffer = this.buffer(80, BUF.UNIFORM | BUF.COPY_DST, 'dpvs-params');
+    const positions = this.upload(Float32Array.from(geometry.positions), BUF.STORAGE, 'dpvs-positions');
+    const indices = this.upload(subset.indices, BUF.STORAGE, 'dpvs-indices');
+    const rasterTri = this.upload(subset.tri, BUF.STORAGE, 'dpvs-raster-tri');
+    const rasterFlags = this.upload(subset.flags, BUF.STORAGE, 'dpvs-raster-flags');
+    const frontsBuffer = this.buffer((n + 1) * 4, BUF.STORAGE | BUF.COPY_DST, 'dpvs-fronts');
+    const depth = this.buffer(sampleCount * 4, BUF.STORAGE | BUF.COPY_SRC | BUF.COPY_DST, 'dpvs-depth');
+    const ids = this.buffer(sampleCount * 4, BUF.STORAGE | BUF.COPY_SRC | BUF.COPY_DST, 'dpvs-ids');
+    const tableWords = n * n * tiles * 2;
+    const rangeX = this.buffer(tableWords * 4, BUF.STORAGE | BUF.COPY_DST, 'dpvs-range-x');
+    const rangeY = this.buffer(tableWords * 4, BUF.STORAGE | BUF.COPY_DST, 'dpvs-range-y');
+    const counts = this.buffer(cellCount * 4, BUF.STORAGE | BUF.COPY_SRC | BUF.COPY_DST, 'dpvs-counts');
+    const mask = this.buffer(cellCount * 4, BUF.STORAGE | BUF.COPY_SRC | BUF.COPY_DST, 'dpvs-mask');
+    const visible = this.buffer(cellCount * 4, BUF.STORAGE | BUF.COPY_SRC | BUF.COPY_DST, 'dpvs-visible');
+    const column = this.buffer(tiles * tiles * 4, BUF.STORAGE | BUF.COPY_SRC | BUF.COPY_DST, 'dpvs-column');
+    const grid = this.upload(Uint32Array.from([r, tiles, settings.tileSize, n]), BUF.UNIFORM, 'dpvs-grid');
+    const sourceData = new Uint32Array((SOURCE_STRIDE / 4) * n);
+    for (let l = 0; l < n; l++) sourceData[(l * SOURCE_STRIDE) / 4] = l;
+    const sourceBuffer = this.upload(sourceData, BUF.UNIFORM, 'dpvs-source-layer');
+    const target = device.createTexture({ size: [r, r], format: 'r8unorm', usage: TEX_RENDER_ATTACHMENT, label: 'dpvs-target' });
+    this.textures.push(target);
 
-    stage = 'raster';
-    begin = now();
-    const target = device.createTexture({
-      size: [r, r],
-      format: 'r8unorm',
-      usage: TEX_RENDER_ATTACHMENT,
-      label: 'dpvs-target',
-    });
-    textures.push(target);
     const rasterModule = device.createShaderModule({ code: RASTER_WGSL, label: 'dpvs-raster' });
     const rasterLayout = device.createBindGroupLayout({
       label: 'dpvs-raster',
@@ -373,44 +437,30 @@ export async function bakeDisocclusionCapture(
         { binding: 3, visibility: STAGE.FRAGMENT, buffer: { type: 'read-only-storage' } },
         { binding: 4, visibility: STAGE.FRAGMENT, buffer: { type: 'storage' } },
         { binding: 5, visibility: STAGE.FRAGMENT, buffer: { type: 'storage' } },
+        { binding: 6, visibility: STAGE.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 7, visibility: STAGE.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
     const rasterGroup = device.createBindGroup({
       layout: rasterLayout,
-      entries: [paramsBuffer, positions, indices, frontsBuffer, depth, ids].map((b, binding) => ({
+      entries: [paramsBuffer, positions, indices, frontsBuffer, depth, ids, rasterTri, rasterFlags].map((b, binding) => ({
         binding,
         resource: { buffer: b },
       })),
     });
     const rasterPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [rasterLayout] });
-    const pipeline = (entryPoint: string) =>
+    const renderPipeline = (entryPoint: string) =>
       device.createRenderPipeline({
         label: `dpvs-${entryPoint}`,
         layout: rasterPipelineLayout,
         vertex: { module: rasterModule, entryPoint: 'vs' },
         fragment: { module: rasterModule, entryPoint, targets: [{ format: 'r8unorm', writeMask: 0 }] },
-        // No culling and no depth attachment: every layer keeps its own nearest sample.
-        primitive: { topology: 'triangle-list', cullMode: 'none' },
+        // No culling and no depth attachment: every layer keeps its own nearest
+        // sample. Sidedness is decided per triangle in the fragment stage; the
+        // capture's view basis is right-handed, so glTF's CCW front stays CCW.
+        primitive: { topology: 'triangle-list', cullMode: 'none', frontFace: 'ccw' },
       });
-    const rasterPass = (entryPoint: string) => {
-      const encoder = device.createCommandEncoder();
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [{ view: target.createView(), loadOp: 'clear', storeOp: 'discard', clearValue: [0, 0, 0, 0] }],
-      });
-      pass.setPipeline(pipeline(entryPoint));
-      pass.setBindGroup(0, rasterGroup);
-      pass.draw(triangles * 3);
-      pass.end();
-      device.queue.submit([encoder.finish()]);
-    };
-    rasterPass('fsDepth');
-    await checkpoint('rasterDepth', begin);
-    begin = now();
-    rasterPass('fsId');
-    await checkpoint('rasterId', begin);
 
-    stage = 'tiles';
-    begin = now();
     const tileModule = device.createShaderModule({ code: TILE_WGSL, label: 'dpvs-tiles' });
     const storage = (binding: number, readOnly: boolean) => ({
       binding,
@@ -432,9 +482,7 @@ export async function bakeDisocclusionCapture(
     });
     const sourceLayout = device.createBindGroupLayout({
       label: 'dpvs-source',
-      entries: [
-        { binding: 0, visibility: STAGE.COMPUTE, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: 16 } },
-      ],
+      entries: [{ binding: 0, visibility: STAGE.COMPUTE, buffer: { type: 'uniform', hasDynamicOffset: true, minBindingSize: 16 } }],
     });
     const tileGroup = device.createBindGroup({
       layout: tileLayout,
@@ -450,83 +498,204 @@ export async function bakeDisocclusionCapture(
     const computeLayout = device.createPipelineLayout({ bindGroupLayouts: [tileLayout, sourceLayout] });
     const compute = (entryPoint: string) =>
       device.createComputePipeline({ label: `dpvs-${entryPoint}`, layout: computeLayout, compute: { module: tileModule, entryPoint } });
-    const dispatch = (pipelineEntry: GPUComputePipeline, threads: number, layer: number) => {
-      const encoder = device.createCommandEncoder();
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(pipelineEntry);
-      pass.setBindGroup(0, tileGroup);
-      pass.setBindGroup(1, sourceGroup, [layer * sourceStride]);
-      pass.dispatchWorkgroups(Math.ceil(threads / 64));
-      pass.end();
-      device.queue.submit([encoder.finish()]);
+
+    const staging = new Map<GPUBuffer, GPUBuffer>();
+    const readable = this.options.readDepth ? [ids, counts, mask, column, visible, depth] : [ids, counts, mask, column, visible];
+    for (const source of readable) staging.set(source, this.buffer(source.size, BUF.MAP_READ | BUF.COPY_DST, `${source.label}-readback`));
+
+    this.state = {
+      paramsBuffer,
+      frontsBuffer,
+      depth,
+      ids,
+      counts,
+      mask,
+      visible,
+      column,
+      rangeX,
+      rangeY,
+      sentinel: new Uint32Array(sampleCount).fill(EMPTY_SAMPLE),
+      target,
+      rasterGroup,
+      tileGroup,
+      sourceGroup,
+      depthPipeline: renderPipeline('fsDepth'),
+      idPipeline: renderPipeline('fsId'),
+      countPipeline: compute('countTiles'),
+      propagatePipeline: compute('propagate'),
+      gatherPipeline: compute('gather'),
+      staging,
     };
-    dispatch(compute('countTiles'), cellCount, 0);
-    await checkpoint('count', begin);
-    begin = now();
-    const propagate = compute('propagate');
-    for (let layer = 0; layer < n - 1; layer++) {
-      dispatch(propagate, tiles * tiles, layer);
-      // Bounded work per submit: every source layer is its own checkpoint.
-      if ((layer & 7) === 7) await checkpoint(`propagate${layer}`, begin);
+  }
+
+  /** One directional capture over the shared scene. */
+  async capture(frame: DisocclusionFrame): Promise<DisocclusionCaptureResult> {
+    if (this.disposed) throw new DisocclusionBakeError('baker disposed', 'capture', {});
+    const { device, settings, options } = this;
+    const st = this.state;
+    const now = options.now ?? (() => performance.now());
+    const timings: DisocclusionStageTimings = {};
+    let stage = 'upload';
+    const started = now();
+    const deadline = started + (options.timeoutMs ?? 10_000);
+    const fail = (message: string): never => {
+      timings.totalMs = now() - started;
+      throw new DisocclusionBakeError(message, stage, { ...timings });
+    };
+    const r = settings.resolution;
+    const tiles = r / settings.tileSize;
+    const n = settings.layers;
+    const sampleCount = r * r * n;
+    const cellCount = tiles * tiles * n;
+    const checkpoint = async (name: string, begin: number) => {
+      const pending = device.queue.onSubmittedWorkDone();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<'timeout'>(resolve => {
+        timer = setTimeout(() => resolve('timeout'), Math.max(0, deadline - now()));
+      });
+      const outcome = await Promise.race([pending.then(() => 'done' as const), timeout]);
+      if (timer) clearTimeout(timer);
+      timings[`${name}Ms`] = now() - begin;
+      if (outcome === 'timeout') fail(`watchdog expired during ${name}`);
+      if (this.lost) fail(this.lost);
+      if (options.shouldStop?.()) fail(`cancelled after ${name}`);
+    };
+    device.pushErrorScope('validation');
+    device.pushErrorScope('out-of-memory');
+    let scopes = 2;
+    try {
+      let begin = now();
+      const fronts = new Float32Array(n + 1);
+      for (let i = 0; i <= n; i++) fronts[i] = layerFront(frame, n, i);
+      const params = new ArrayBuffer(80);
+      new Float32Array(params, 0, 16).set(captureClipMatrix(frame));
+      new Uint32Array(params, 64, 4).set([r, n, 0, 0]);
+      device.queue.writeBuffer(st.paramsBuffer, 0, params);
+      device.queue.writeBuffer(st.frontsBuffer, 0, fronts);
+      const tables = frustumTables(frame, settings);
+      device.queue.writeBuffer(st.rangeX, 0, tables.rangeX);
+      device.queue.writeBuffer(st.rangeY, 0, tables.rangeY);
+      device.queue.writeBuffer(st.depth, 0, st.sentinel);
+      device.queue.writeBuffer(st.ids, 0, st.sentinel);
+      const clear = device.createCommandEncoder();
+      for (const b of [st.counts, st.mask, st.visible, st.column]) clear.clearBuffer(b);
+      device.queue.submit([clear.finish()]);
+      await checkpoint('upload', begin);
+
+      stage = 'raster';
+      const rasterPass = (pipeline: GPURenderPipeline) => {
+        const encoder = device.createCommandEncoder();
+        const pass = encoder.beginRenderPass({
+          colorAttachments: [{ view: st.target.createView(), loadOp: 'clear', storeOp: 'discard', clearValue: [0, 0, 0, 0] }],
+        });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, st.rasterGroup);
+        pass.draw(this.rasterTriangles * 3);
+        pass.end();
+        device.queue.submit([encoder.finish()]);
+      };
+      begin = now();
+      rasterPass(st.depthPipeline);
+      await checkpoint('rasterDepth', begin);
+      begin = now();
+      rasterPass(st.idPipeline);
+      await checkpoint('rasterId', begin);
+
+      stage = 'tiles';
+      const dispatch = (pipeline: GPUComputePipeline, threads: number, layer: number) => {
+        const encoder = device.createCommandEncoder();
+        const pass = encoder.beginComputePass();
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, st.tileGroup);
+        pass.setBindGroup(1, st.sourceGroup, [layer * SOURCE_STRIDE]);
+        pass.dispatchWorkgroups(Math.ceil(threads / 64));
+        pass.end();
+        device.queue.submit([encoder.finish()]);
+      };
+      begin = now();
+      dispatch(st.countPipeline, cellCount, 0);
+      await checkpoint('count', begin);
+      begin = now();
+      for (let layer = 0; layer < n - 1; layer++) {
+        dispatch(st.propagatePipeline, tiles * tiles, layer);
+        // Bounded work per submit: every eighth source layer is a checkpoint.
+        if ((layer & 7) === 7) await checkpoint(`propagate${layer}`, begin);
+      }
+      await checkpoint('propagate', begin);
+      begin = now();
+      dispatch(st.gatherPipeline, cellCount, 0);
+      await checkpoint('gather', begin);
+
+      stage = 'readback';
+      begin = now();
+      const encoder = device.createCommandEncoder();
+      for (const [source, staging] of st.staging) encoder.copyBufferToBuffer(source, 0, staging, 0, source.size);
+      device.queue.submit([encoder.finish()]);
+      const read = async (source: GPUBuffer, words: number) => {
+        const staging = st.staging.get(source)!;
+        await staging.mapAsync(1 /* GPUMapMode.READ */);
+        const out = new Uint32Array(staging.getMappedRange(0, words * 4).slice(0));
+        staging.unmap();
+        return out;
+      };
+      const [idOut, countOut, maskOut, columnOut, visibleOut] = await Promise.all([
+        read(st.ids, sampleCount),
+        read(st.counts, cellCount),
+        read(st.mask, cellCount),
+        read(st.column, tiles * tiles),
+        read(st.visible, cellCount),
+      ]);
+      const depthOut = options.readDepth ? await read(st.depth, sampleCount) : null;
+      scopes = 0;
+      const oom = await device.popErrorScope();
+      const validation = await device.popErrorScope();
+      if (oom) fail(`out of memory: ${oom.message}`);
+      if (validation) fail(`validation: ${validation.message}`);
+      await checkpoint('readback', begin);
+      timings.totalMs = now() - started;
+      const state = new Uint8Array(cellCount);
+      const full = settings.tileSize * settings.tileSize;
+      for (let i = 0; i < cellCount; i++) state[i] = countOut[i] === 0 ? 0 : countOut[i]! >= full ? 2 : 1;
+      return {
+        // Without a depth readback, occupancy is recovered from the IDs:
+        // every written depth sample has an ID from the same fragment.
+        layers: { settings, depth: depthOut ?? idOut, id: idOut },
+        masks: { tilesX: tiles, tilesY: tiles, layers: n, count: countOut, state, mask: maskOut, column: columnOut, visible: Uint8Array.from(visibleOut) },
+        timings,
+        bytes: this.bytes,
+      };
+    } catch (error) {
+      if (error instanceof DisocclusionBakeError) throw error;
+      timings.totalMs = now() - started;
+      throw new DisocclusionBakeError(error instanceof Error ? error.message : String(error), stage, { ...timings });
+    } finally {
+      while (scopes-- > 0) await device.popErrorScope().catch(() => null);
     }
-    await checkpoint('propagate', begin);
-    begin = now();
-    dispatch(compute('gather'), cellCount, 0);
-    await checkpoint('gather', begin);
+  }
 
-    stage = 'readback';
-    begin = now();
-    const read = async (source: GPUBuffer, size: number) => {
-      const staging = buffer(size, BUF.MAP_READ | BUF.COPY_DST, 'dpvs-readback');
-      const encoder = device.createCommandEncoder();
-      encoder.copyBufferToBuffer(source, 0, staging, 0, size);
-      device.queue.submit([encoder.finish()]);
-      await staging.mapAsync(1 /* GPUMapMode.READ */);
-      const out = new Uint32Array(staging.getMappedRange().slice(0));
-      staging.unmap();
-      return out;
-    };
-    const [depthOut, idOut, countOut, maskOut, columnOut, visibleOut] = await Promise.all([
-      read(depth, sampleCount * 4),
-      read(ids, sampleCount * 4),
-      read(counts, cellCount * 4),
-      read(mask, cellCount * 4),
-      read(column, tiles * tiles * 4),
-      read(visible, cellCount * 4),
-    ]);
-    scopes = 0;
-    const oom = await device.popErrorScope();
-    const validation = await device.popErrorScope();
-    if (oom) fail(`out of memory: ${oom.message}`);
-    if (validation) fail(`validation: ${validation.message}`);
-    await checkpoint('readback', begin);
-    timings.totalMs = now() - started;
+  dispose(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    for (const b of this.buffers) b.destroy();
+    for (const t of this.textures) t.destroy();
+  }
+}
 
-    const state = new Uint8Array(cellCount);
-    const full = settings.tileSize * settings.tileSize;
-    for (let i = 0; i < cellCount; i++) state[i] = countOut[i] === 0 ? 0 : countOut[i]! >= full ? 2 : 1;
-    return {
-      layers: { settings, depth: depthOut, id: idOut },
-      masks: {
-        tilesX: tiles,
-        tilesY: tiles,
-        layers: n,
-        count: countOut,
-        state,
-        mask: maskOut,
-        column: columnOut,
-        visible: Uint8Array.from(visibleOut),
-      },
-      timings,
-      bytes,
-    };
-  } catch (error) {
-    if (error instanceof DisocclusionBakeError) throw error;
-    timings.totalMs = now() - started;
-    throw new DisocclusionBakeError(error instanceof Error ? error.message : String(error), stage, { ...timings });
+const SOURCE_STRIDE = 256;
+const UPLOAD_CHUNK = 16 * 1024 * 1024;
+
+/** One capture with its own baker: the fixture path and the stage-parity tests. */
+export async function bakeDisocclusionCapture(
+  device: GpuDevice,
+  frame: DisocclusionFrame,
+  settings: DisocclusionSettings,
+  geometry: DisocclusionGeometry,
+  options: DisocclusionBakeOptions & { readDepth?: boolean } = {}
+): Promise<DisocclusionCaptureResult> {
+  const baker = await DisocclusionBaker.create(device, settings, geometry, { readDepth: true, ...options });
+  try {
+    return await baker.capture(frame);
   } finally {
-    while (scopes-- > 0) await device.popErrorScope().catch(() => null);
-    for (const b of buffers) b.destroy();
-    for (const t of textures) t.destroy();
+    baker.dispose();
   }
 }
