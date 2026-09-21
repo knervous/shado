@@ -5,8 +5,44 @@
  *
  * Units are zone units (3 per metre). Y is up.
  */
-import type { ShadoWorldPrimitive } from '../types';
-import type { DisocclusionCapture, Vec3 } from './types';
+import { compileShadoWorld } from '../compiler';
+import type { ShadoWorldPrimitive, ShadoWorldSpatialPackage } from '../types';
+import type { DisocclusionAxis, DisocclusionCapture, Vec3 } from './types';
+
+export const DISOCCLUSION_AXES: readonly DisocclusionAxis[] = ['+x', '-x', '+y', '-y', '+z', '-z'];
+
+/**
+ * A source volume as six axis captures that together cover every direction
+ * from anywhere in the box; admission unions the faces a frustum can touch.
+ *
+ * Not a cube map. Side faces (+-x, +-z) lean 1 across but only `sideUp` up,
+ * so their vertical tiles are finer: that is the axis a floor/wall junction
+ * leaks along. The +-y faces widen to 1/sideUp on both axes to take every
+ * steeper direction: a direction within `sideUp` of horizontal belongs to the
+ * side face of its larger horizontal component; any steeper one has
+ * |horizontal / vertical| < 1/sideUp.
+ */
+export function sourceVolumeCaptures(
+  volume: string,
+  sourceMin: Vec3,
+  sourceMax: Vec3,
+  range: { near: number; far: number },
+  sideUp = 0.6
+): DisocclusionCapture[] {
+  return DISOCCLUSION_AXES.map(axis => {
+    const vertical = axis === '+y' || axis === '-y';
+    return {
+      volume,
+      sourceMin: [...sourceMin] as Vec3,
+      sourceMax: [...sourceMax] as Vec3,
+      axis,
+      directionTan: vertical ? 1 / sideUp : 1,
+      directionTanUp: vertical ? 1 / sideUp : sideUp,
+      near: range.near,
+      far: range.far,
+    };
+  });
+}
 
 export type DisocclusionRouteKey = { t: number; at: Vec3; look: Vec3 };
 
@@ -113,20 +149,9 @@ export function twoRoomFixture(): DisocclusionFixture {
       'target-door': { min: [39, 0, 3], max: [41, 6, 5], expect: 'visible' },
       'target-sealed': { min: [55, 0, 23], max: [57, 6, 25], expect: 'hidden' },
     },
-    captures: [
-      {
-        // 0.75-unit half extent: the directive's starting size.
-        sourceMin: [7.25, 4.25, 15.25],
-        sourceMax: [8.75, 5.75, 16.75],
-        axis: '+x',
-        // A camera may yaw until a frustum corner reaches 45 degrees off the
-        // axis, and pitch until one reaches ~31 degrees.
-        directionTan: 1,
-        directionTanUp: 0.6,
-        near: 8,
-        far: 256,
-      },
-    ],
+    // 0.75-unit half extent: the directive's starting size. Six faces, so a
+    // camera anywhere in the box may look in any direction.
+    captures: sourceVolumeCaptures('source', [7.25, 4.25, 15.25], [8.75, 5.75, 16.75], { near: 8, far: 256 }),
     compile: { tileSize: 8, visibilityRegionSize: 8, visibilityMaxDistance: 256 },
     route: [
       { t: 0, at: [8, 5, 16], look: [40, 5, 10] },
@@ -144,6 +169,20 @@ export function twoRoomFixture(): DisocclusionFixture {
 export const DISOCCLUSION_FIXTURES: Record<string, () => DisocclusionFixture> = {
   'two-room': twoRoomFixture,
 };
+
+/**
+ * The one way a fixture becomes a world. Bake, tests and the browser all call
+ * this, so their layout hashes agree and a sidecar matches the page's world.
+ */
+export function compileFixtureWorld(fixture: DisocclusionFixture): ShadoWorldSpatialPackage {
+  return compileShadoWorld(fixture.primitives, {
+    name: fixture.name,
+    ...fixture.compile,
+    // One chunk per cell: draw units as fine as the regions being tested.
+    minRenderChunkTriangles: 1,
+    maxRenderChunkExtent: fixture.compile.tileSize,
+  });
+}
 
 /** Linear interpolation along a route; clamps outside its time span. */
 export function sampleRoute(route: readonly DisocclusionRouteKey[], t: number): { at: Vec3; look: Vec3 } {

@@ -133,7 +133,7 @@ describe('disocclusion scalar reference', () => {
     expect(layerOfDepth(f, 4, 16)).toBe(-1);
     expect(layerOfDepth(f, 4, 0.5)).toBe(-1);
     const capture = captureFrame(twoRoomFixture().captures[0]!);
-    // Box half 0.75, lean 1 across / 0.6 up: viewcell 0.75 + 0.75 * lean.
+    // Side face: box half 0.75, lean 1 across / 0.6 up: viewcell 0.75 + 0.75 * lean.
     expect(capture.viewcellHalfX).toBeCloseTo(1.5);
     expect(capture.viewcellHalfY).toBeCloseTo(1.2);
     expect(capture.extTanX).toBeCloseTo(1 + 1.5 / 8);

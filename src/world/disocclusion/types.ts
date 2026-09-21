@@ -17,6 +17,12 @@ export type Vec3 = [number, number, number];
  * every supported ray. All distances are zone units (3 units per metre).
  */
 export type DisocclusionCapture = {
+  /**
+   * Source volume this capture is one face of. Captures sharing a volume and
+   * covering all six axes at directionTan >= 1 support ANY view direction;
+   * see DisocclusionAdmission.
+   */
+  volume?: string;
   /** Source box the camera may occupy. */
   sourceMin: Vec3;
   sourceMax: Vec3;

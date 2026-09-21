@@ -79,9 +79,18 @@ export function classifyBox(
   const y1 = Math.max(a[1], b[1]);
   const z0 = Math.min(a[2], b[2]);
   const z1 = Math.max(a[2], b[2]);
-  // Behind every supported ray origin, or reaching nearer than the raster.
+  // Behind every supported ray origin: no forward ray gets there.
   if (z1 <= -frame.sourceHalfDepth) return 'outside';
-  if (z0 < frame.near) return 'near';
+  // Nearer than the raster: admit only what a supported ray can reach there.
+  // At depth z a ray from the box is at most viewcellHalf + tan * z sideways
+  // (see captureFrame), so a box wholly outside that wedge is not near field.
+  if (z0 < frame.near) {
+    const zNear = Math.min(z1, frame.near);
+    const reachX = frame.viewcellHalfX + frame.directionTanX * zNear;
+    const reachY = frame.viewcellHalfY + frame.directionTanY * zNear;
+    if (x1 >= -reachX && x0 <= reachX && y1 >= -reachY && y0 <= reachY) return 'near';
+    if (z1 < frame.near) return 'outside';
+  }
   if (z1 >= frame.far) return 'far';
   const tiles = masks.tilesX;
   const n = settings.layers;
@@ -90,7 +99,7 @@ export function classifyBox(
     const front = layerFront(frame, n, layer);
     const back = layerFront(frame, n, layer + 1);
     if (z1 < front || z0 >= back) continue;
-    const za = Math.max(z0, front);
+    const za = Math.max(z0, front, frame.near);
     const zb = Math.min(z1, back);
     const tanLo = (lo: number) => (lo >= 0 ? lo / zb : lo / za);
     const tanHi = (hi: number) => (hi >= 0 ? hi / za : hi / zb);

@@ -1,9 +1,9 @@
 import { describe, expect, it } from '@jest/globals';
 
 import { installHeadlessWebGpu } from '../src/devtools/headless-gpu';
-import { compileShadoWorld } from '../src/world/compiler';
 import {
   captureFrame,
+  compileFixtureWorld,
   countTiles,
   decodeDisocclusionSidecar,
   DisocclusionAdmission,
@@ -16,13 +16,7 @@ import { bakeDisocclusionPvs } from '../src/world/disocclusion/bake-entry';
 
 function compileFixture() {
   const fixture = twoRoomFixture();
-  const world = compileShadoWorld(fixture.primitives, {
-    name: fixture.name,
-    ...fixture.compile,
-    minRenderChunkTriangles: 1,
-    maxRenderChunkExtent: fixture.compile.tileSize,
-  });
-  return { fixture, world };
+  return { fixture, world: compileFixtureWorld(fixture) };
 }
 
 /** Corner rays of a symmetric frustum looking from `at` toward `look`. */
@@ -42,7 +36,7 @@ function pose(at: Vec3, look: Vec3, tanX = 0.55, tanY = 0.35) {
 }
 
 describe('disocclusion GPU bake (headless Dawn)', () => {
-  it('matches the scalar reference, rejects the sealed target, keeps the doorway target, and round-trips', async () => {
+  it('bakes six faces that match the scalar reference, hide the sealed room from every direction, and round-trip', async () => {
     const headless = await installHeadlessWebGpu();
     let device: GPUDevice | undefined;
     try {
@@ -50,36 +44,38 @@ describe('disocclusion GPU bake (headless Dawn)', () => {
       device = (await adapter!.requestDevice()) as GPUDevice;
       const { fixture, world } = compileFixture();
       const settings = DISOCCLUSION_DEFAULT_SETTINGS;
-      const out = await bakeDisocclusionPvs(device, world, fixture.primitives, fixture.captures, settings, {
+      const captures = fixture.captures.map(c => ({ ...c, id: `${c.volume}${c.axis}` }));
+      const out = await bakeDisocclusionPvs(device, world, fixture.primitives, captures, settings, {
         timeoutMs: 20_000,
         createdAt: '2026-09-20T00:00:00.000Z',
       });
-      const domain = out.domains[0]!;
-      const frame = captureFrame(fixture.captures[0]!);
+      expect(out.domains.map(d => d.meta.capture.axis)).toEqual(['+x', '-x', '+y', '-y', '+z', '-z']);
 
-      // Stage parity: counts from the depth layers, then propagation from counts.
-      expect(Array.from(domain.capture.masks.count)).toEqual(Array.from(countTiles(domain.capture.layers)));
-      const reference = propagateReference(frame, settings, domain.capture.masks.count);
-      expect(Array.from(domain.capture.masks.column)).toEqual(Array.from(reference.column));
-      expect(Array.from(domain.capture.masks.mask)).toEqual(Array.from(reference.mask));
-      expect(Array.from(domain.capture.masks.visible)).toEqual(Array.from(reference.visible));
-      // Every written sample carries an ID from the same fragment.
-      const { depth, id } = domain.capture.layers;
-      for (let i = 0; i < depth.length; i++) expect(depth[i] === 0xffffffff).toBe(id[i] === 0xffffffff);
+      // Stage parity on every face: counts from the depth layers, propagation from counts.
+      for (const [i, domain] of out.domains.entries()) {
+        const frame = captureFrame(fixture.captures[i]!);
+        expect(Array.from(domain.capture.masks.count)).toEqual(Array.from(countTiles(domain.capture.layers)));
+        const reference = propagateReference(frame, settings, domain.capture.masks.count);
+        expect(Array.from(domain.capture.masks.column)).toEqual(Array.from(reference.column));
+        expect(Array.from(domain.capture.masks.mask)).toEqual(Array.from(reference.mask));
+        expect(Array.from(domain.capture.masks.visible)).toEqual(Array.from(reference.visible));
+        const { depth, id } = domain.capture.layers;
+        for (let s = 0; s < depth.length; s++) expect(depth[s] === 0xffffffff).toBe(id[s] === 0xffffffff);
+      }
 
       const clustersOf = (name: string) => {
         const primitive = fixture.primitives.findIndex(p => p.name === name);
         return world.clusters.primitive.flatMap((p, c) => (p === primitive ? [c] : []));
       };
-      const { expanded, raw } = domain.classification;
       const door = clustersOf('target-door');
       const sealed = clustersOf('target-sealed');
       expect(door.length).toBeGreaterThan(0);
       expect(sealed.length).toBeGreaterThan(0);
-      expect(door.some(c => raw[c])).toBe(true);
-      expect(door.every(c => expanded[c])).toBe(true);
-      expect(sealed.every(c => !expanded[c])).toBe(true);
-      expect(domain.meta.counts.raw).toBeLessThanOrEqual(domain.meta.counts.expanded);
+      const east = out.domains[0]!.classification;
+      expect(door.some(c => east.raw[c])).toBe(true);
+      expect(door.every(c => east.expanded[c])).toBe(true);
+      // No face of the volume admits the sealed room's target.
+      for (const d of out.domains) expect(sealed.every(c => !d.classification.expanded[c])).toBe(true);
 
       // Plain-data round trip, then the runtime path.
       const json = JSON.stringify(out.meta);
@@ -89,16 +85,30 @@ describe('disocclusion GPU bake (headless Dawn)', () => {
       await expect(decodeDisocclusionSidecar(json, tampered)).rejects.toThrow('hash');
       const admission = new DisocclusionAdmission(world, sidecar);
       expect(admission.identityError).toBeNull();
-      const facing = admission.evaluate(pose(fixture.start.at, fixture.start.look));
-      expect(facing.mode).toBe('baked');
       const cellOf = (c: number) => world.clusters.cellId[c]!;
-      expect(door.every(c => facing.cellMask![cellOf(c)])).toBe(true);
-      expect(sealed.every(c => !facing.cellMask![cellOf(c)])).toBe(true);
-      const behind = admission.evaluate(pose(fixture.start.at, [-24, 5, 16]));
-      expect(behind.mode).toBe('reference');
-      expect(behind.cellMask).toBeNull();
+      const at = fixture.start.at;
+      const poses: Record<string, ReturnType<typeof pose>> = {
+        doorway: pose(at, fixture.start.look),
+        seam: pose(at, [40, 5, 48]), // 45 degrees between the +x and +z faces
+        rear: pose(at, [-24, 5, 16]),
+        overhead: pose(at, [8.01, 60, 16]),
+        floor: pose(at, [8.01, -60, 16]),
+      };
+      for (const [name, p] of Object.entries(poses)) {
+        const result = admission.evaluate(p);
+        expect([name, result.mode]).toEqual([name, 'baked']);
+        expect([name, sealed.some(c => result.cellMask![cellOf(c)])]).toEqual([name, false]);
+      }
+      const doorway = admission.evaluate(poses.doorway!);
+      expect(door.every(c => doorway.cellMask![cellOf(c)])).toBe(true);
+      expect(doorway.domains).toEqual(['source+x']);
+      // The face-plane separation test is conservative: a diagonal view may
+      // also pull in faces it cannot actually see into. Extra rows only admit.
+      expect(admission.evaluate(poses.seam!).domains).toEqual(expect.arrayContaining(['source+x', 'source+z']));
+      expect(admission.evaluate(poses.rear!).domains).toEqual(['source-x']);
       const outside = admission.evaluate(pose([12, 5, 16], fixture.start.look));
       expect(outside.mode).toBe('reference');
+      expect(outside.cellMask).toBeNull();
     } finally {
       device?.destroy();
       headless.dispose();
