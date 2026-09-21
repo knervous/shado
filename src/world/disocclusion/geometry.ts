@@ -74,6 +74,8 @@ export type ZoneBakeGeometryManifest = {
    * recovered geometry disagrees with the package, so it cannot be trusted to
    * hide anything) and the bake admits them in every row.
    */
+  /** Placed-object stamps as targets (0 when the bake was given no stamp bounds). */
+  stampTargets: { stamps: number; targets: number; neverHidden: number };
   suspectClusters: Array<{
     cluster: number;
     primitive: string;
@@ -109,7 +111,15 @@ type GlbPart = {
 export function zoneBakeGeometry(
   world: ShadoWorldSpatialPackage,
   glbParts: readonly GlbPart[],
-  objectPrimitives: readonly ShadoWorldPrimitive[]
+  objectPrimitives: readonly ShadoWorldPrimitive[],
+  /**
+   * Placed-object stamps as targets: the world AABB of everything each stamp
+   * DRAWS (every submesh, not just its blockers), 6 floats per stamp, NaN
+   * where the stamp must not be hidden (disabled, phase-variant, animated,
+   * unresolved). Each target stamp gets its blocker triangles' ids plus a
+   * non-blocking box of that bound, so it is hidden only if all of it is.
+   */
+  stampBounds: Float32Array | null = null
 ): { geometry: DisocclusionGeometry; manifest: ZoneBakeGeometryManifest } {
   const byNode = new Map<string, GlbPart>();
   for (const part of glbParts) byNode.set(part.node.slice(part.node.lastIndexOf('/') + 1), part);
@@ -141,11 +151,17 @@ export function zoneBakeGeometry(
   }
   const extraTriangles = baseExtra.reduce((s, p) => s + p.indices.length / 3, 0);
   const objectTriangles = objectPrimitives.reduce((s, p) => s + p.indices.length / 3, 0);
+  const stampCount = stampBounds ? Math.floor(stampBounds.length / 6) : 0;
+  const stampIsTarget = (stamp: number | undefined): boolean =>
+    stamp !== undefined && stamp >= 0 && stamp < stampCount && Number.isFinite(stampBounds![stamp * 6]!);
+  let stampTargets = 0;
+  for (let s = 0; s < stampCount; s++) if (stampIsTarget(s)) stampTargets++;
   const vertexCount =
     [...matchedParts].reduce((s, p) => s + p.positions.length / 3, 0) +
     baseExtra.reduce((s, p) => s + p.positions.length / 3, 0) +
-    objectPrimitives.reduce((s, p) => s + p.positions.length / 3, 0);
-  const triangles = targetTriangles + extraTriangles + objectTriangles;
+    objectPrimitives.reduce((s, p) => s + p.positions.length / 3, 0) +
+    stampTargets * 8;
+  const triangles = targetTriangles + extraTriangles + objectTriangles + stampTargets * 12;
   const positions = new Float32Array(vertexCount * 3);
   const indices = new Uint32Array(triangles * 3);
   const triangleTarget = new Int32Array(triangles).fill(-1);
@@ -216,7 +232,10 @@ export function zoneBakeGeometry(
       }
     }
   }
-  const pushBlocker = (source: { positions: ArrayLike<number>; indices: ArrayLike<number>; doubleSided?: boolean }) => {
+  const pushBlocker = (
+    source: { positions: ArrayLike<number>; indices: ArrayLike<number>; doubleSided?: boolean },
+    target = -1
+  ) => {
     const base = pushVertices(source.positions);
     const two = source.doubleSided === false ? 0 : 1;
     for (let i = 0; i < source.indices.length; i += 3) {
@@ -225,11 +244,36 @@ export function zoneBakeGeometry(
       indices[triangleAt * 3 + 2] = base + Number(source.indices[i + 2]);
       blocker[triangleAt] = 1;
       doubleSided[triangleAt] = two;
+      triangleTarget[triangleAt] = target;
       triangleAt++;
     }
   };
   for (const part of baseExtra) pushBlocker(part);
-  for (const primitive of objectPrimitives) pushBlocker(primitive);
+  // A stamp's own opaque triangles carry its target id: seeing any of them
+  // in the raster admits it directly.
+  for (const primitive of objectPrimitives) {
+    pushBlocker(primitive, stampIsTarget(primitive.stamp) ? clusterCount + primitive.stamp! : -1);
+  }
+  // Its whole drawn bound as a non-blocking box: classified, never rasterized.
+  const BOX = [0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4, 2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5];
+  for (let s = 0; s < stampCount; s++) {
+    if (!stampIsTarget(s)) continue;
+    const b = stampBounds!;
+    const corners: number[] = [];
+    for (let c = 0; c < 8; c++) {
+      corners.push(b[s * 6 + (c & 1 ? 3 : 0)]!, b[s * 6 + 1 + (c & 2 ? 3 : 0)]!, b[s * 6 + 2 + (c & 4 ? 3 : 0)]!);
+    }
+    const base = pushVertices(corners);
+    for (let i = 0; i < BOX.length; i += 3) {
+      indices[triangleAt * 3] = base + BOX[i]!;
+      indices[triangleAt * 3 + 1] = base + BOX[i + 1]!;
+      indices[triangleAt * 3 + 2] = base + BOX[i + 2]!;
+      blocker[triangleAt] = 0;
+      doubleSided[triangleAt] = 1;
+      triangleTarget[triangleAt] = clusterCount + s;
+      triangleAt++;
+    }
+  }
 
   let two = 0;
   for (let t = 0; t < triangles; t++) if (blocker[t]) two += doubleSided[t]!;
@@ -251,7 +295,14 @@ export function zoneBakeGeometry(
     compact[to * 3 + 2] = positions[v * 3 + 2]!;
   }
   return {
-    geometry: { positions: compact, indices, triangleTarget, blocker, doubleSided },
+    geometry: {
+      positions: compact,
+      indices,
+      triangleTarget,
+      blocker,
+      doubleSided,
+      ...(stampBounds ? { stampTargetBase: clusterCount, stampTargetCount: stampCount } : {}),
+    },
     manifest: {
       targets: {
         clusters: clusterCount,
@@ -265,6 +316,7 @@ export function zoneBakeGeometry(
       baseExclusions,
       frameMismatches,
       suspectClusters,
+      stampTargets: { stamps: stampCount, targets: stampTargets, neverHidden: stampCount - stampTargets },
     },
   };
 }

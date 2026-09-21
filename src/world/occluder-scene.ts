@@ -530,6 +530,7 @@ export function assembleOccluderScene(
       else manifest.sidedness.singleSidedTriangles += partTriangles;
       primitives.push({
         name: `${stamps.id[stamp] ?? `stamp-${stamp}`}:${part.node}`,
+        stamp,
         material: part.material,
         doubleSided: part.doubleSided,
         positions,
@@ -631,7 +632,7 @@ export function assembleInstancedOccluderScene(
 }
 
 /** The runtime's stamp transform, column-major, as thin instances receive it. */
-function stampMatrix(
+export function stampMatrix(
   stamps: NonNullable<ShadoWorldSpatialPackage['objects']>['stamps'],
   stamp: number,
   scratch: Float32Array

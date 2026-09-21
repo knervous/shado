@@ -18,13 +18,29 @@ export type DisocclusionDomainMeta = {
   viewcellHalf: [number, number];
   /** First payload word of this domain's row. */
   wordOffset: number;
-  counts: { targets: number; raw: number; filtered: number; expanded: number; admitted: number; filterOnly: number; regionsAdmitted: number; regions: number };
+  /** First payload word of this domain's stamp row (version 2). */
+  stampWordOffset?: number;
+  counts: {
+    targets: number;
+    raw: number;
+    filtered: number;
+    expanded: number;
+    admitted: number;
+    filterOnly: number;
+    regionsAdmitted: number;
+    regions: number;
+    stampsAdmitted?: number;
+    stamps?: number;
+  };
   timings: Record<string, number>;
 };
 
 export type DisocclusionSidecarMeta = {
   format: typeof DISOCCLUSION_SIDECAR_FORMAT;
-  version: 1;
+  /** 2 adds per-stamp rows (placed objects as targets). */
+  version: 1 | 2;
+  /** Version 2: one bit per placed-object stamp per domain, after the region rows. */
+  stamps?: { count: number; wordsPerRow: number };
   experimental: true;
   generator: { name: 'shado-disocclusion'; revision: string };
   createdAt: string;
@@ -193,7 +209,8 @@ export async function decodeDisocclusionSidecar(json: string, payload: Uint8Arra
     throw new DisocclusionSidecarError(`sidecar metadata is not JSON: ${String(error)}`);
   }
   if (meta.format !== DISOCCLUSION_SIDECAR_FORMAT) throw new DisocclusionSidecarError(`unexpected format '${meta.format}'`);
-  if (meta.version !== 1) throw new DisocclusionSidecarError(`unsupported version ${meta.version}`);
+  if (meta.version !== 1 && meta.version !== 2) throw new DisocclusionSidecarError(`unsupported version ${meta.version}`);
+  if ((meta.version === 2) !== !!meta.stamps) throw new DisocclusionSidecarError('version 2 carries stamp rows, version 1 does not');
   if (meta.experimental !== true) throw new DisocclusionSidecarError('sidecar must be marked experimental');
   assertFinite(meta, 'meta');
   const { world, payload: p, domains } = meta;
@@ -201,12 +218,17 @@ export async function decodeDisocclusionSidecar(json: string, payload: Uint8Arra
   const wordsPerRow = Math.ceil(regions / 32);
   if (p.endianness !== 'little') throw new DisocclusionSidecarError('payload must be little-endian');
   if (p.wordsPerRow !== wordsPerRow) throw new DisocclusionSidecarError(`wordsPerRow ${p.wordsPerRow} != ${wordsPerRow}`);
-  if (p.wordCount !== wordsPerRow * domains.length) throw new DisocclusionSidecarError('payload word count does not match domains');
+  const stampWords = meta.stamps ? meta.stamps.wordsPerRow : 0;
+  if (meta.stamps && stampWords !== Math.ceil(meta.stamps.count / 32)) throw new DisocclusionSidecarError('stamp wordsPerRow does not match the stamp count');
+  if (p.wordCount !== (wordsPerRow + stampWords) * domains.length) throw new DisocclusionSidecarError('payload word count does not match domains');
   if (payload.byteLength !== p.wordCount * 4) throw new DisocclusionSidecarError(`payload is ${payload.byteLength} bytes, expected ${p.wordCount * 4}`);
   const hash = await sha256Hex(payload);
   if (hash !== p.sha256) throw new DisocclusionSidecarError('payload hash mismatch');
   domains.forEach((d, i) => {
     if (d.wordOffset !== i * wordsPerRow) throw new DisocclusionSidecarError(`domain ${d.id} has wordOffset ${d.wordOffset}`);
+    if (meta.stamps && d.stampWordOffset !== wordsPerRow * domains.length + i * stampWords) {
+      throw new DisocclusionSidecarError(`domain ${d.id} has stampWordOffset ${d.stampWordOffset}`);
+    }
     for (let a = 0; a < 3; a++) {
       if (!(d.capture.sourceMax[a]! > d.capture.sourceMin[a]!)) throw new DisocclusionSidecarError(`domain ${d.id} has an empty source box`);
     }
@@ -218,6 +240,13 @@ export async function decodeDisocclusionSidecar(json: string, payload: Uint8Arra
     const padding = ~((1 << tail) - 1) >>> 0;
     domains.forEach(d => {
       if ((words[d.wordOffset + wordsPerRow - 1]! & padding) !== 0) throw new DisocclusionSidecarError(`domain ${d.id} sets padding bits`);
+    });
+  }
+  const stampTail = meta.stamps ? meta.stamps.count % 32 : 0;
+  if (meta.stamps && stampTail) {
+    const padding = ~((1 << stampTail) - 1) >>> 0;
+    domains.forEach(d => {
+      if ((words[d.stampWordOffset! + stampWords - 1]! & padding) !== 0) throw new DisocclusionSidecarError(`domain ${d.id} sets stamp padding bits`);
     });
   }
   return { meta, words };

@@ -843,6 +843,8 @@ export type ShadoWorldAuthoringDocument = {
 
 export type ShadoWorldPrimitive = {
   name: string;
+  /** Placed-object stamp this primitive was expanded from (occluder assembly). */
+  stamp?: number;
   material: string;
   /** Optional material-authored runtime role retained by headless preprocessing. */
   extraShader?: string;

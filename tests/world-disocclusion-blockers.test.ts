@@ -1,6 +1,10 @@
 import { describe, expect, it } from '@jest/globals';
 
 import {
+  captureFrame,
+  DisocclusionAdmission,
+  decodeDisocclusionSidecar,
+  wordsToBytes,
   clusterRegionDigest,
   compileFixtureWorld,
   DISOCCLUSION_FIXTURES,
@@ -153,5 +157,80 @@ describe('disocclusion blocker validation (V3)', () => {
     }
     expect(clusterTriangles).toBeGreaterThan(0);
     expect(skewed.manifest.blockers.total).toBe(clean.manifest.blockers.total - clusterTriangles);
+  });
+
+  it('stamps are targets: opaque triangles carry the stamp id, a non-blocking box carries its whole bound', () => {
+    const fixture = DISOCCLUSION_FIXTURES['two-room']!();
+    const world = compileFixtureWorld(fixture) as ShadoWorldSpatialPackage;
+    const parts = world.primitives.map((primitive) => {
+      const source = fixture.primitives.find((p) => p.name === primitive.name)!;
+      const hash = primitive.name.lastIndexOf('#');
+      return { node: hash >= 0 ? primitive.name.slice(0, hash) : primitive.name, positions: source.positions, indices: source.indices, doubleSided: true, exclusion: null };
+    });
+    const clusters = world.clusters.firstIndex.length;
+    // Stamp 0 has an opaque triangle and a larger drawn bound; stamp 1 must never be hidden.
+    const wall = { name: 'stamp-0:wall', stamp: 0, material: 'm', positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]), indices: new Uint32Array([0, 1, 2]) };
+    const bounds = new Float32Array([-1, -1, -1, 2, 3, 4, NaN, NaN, NaN, NaN, NaN, NaN]);
+    const { geometry, manifest } = zoneBakeGeometry(world, parts, [wall], bounds);
+    expect(manifest.stampTargets).toEqual({ stamps: 2, targets: 1, neverHidden: 1 });
+    expect(geometry.stampTargetBase).toBe(clusters);
+    expect(geometry.stampTargetCount).toBe(2);
+    const own: number[] = [];
+    for (let t = 0; t < geometry.triangleTarget.length; t++) if (geometry.triangleTarget[t] === clusters) own.push(t);
+    // 1 blocker triangle + 12 box triangles, only the first one blocks.
+    expect(own.length).toBe(13);
+    expect(own.filter((t) => geometry.blocker![t]).length).toBe(1);
+    expect(geometry.triangleTarget.includes(clusters + 1)).toBe(false);
+  });
+
+  it('a version-2 sidecar carries per-stamp rows; admission unions them and refuses a stamp-count mismatch', async () => {
+    const fixture = DISOCCLUSION_FIXTURES['two-room']!();
+    const world = compileFixtureWorld(fixture) as ShadoWorldSpatialPackage;
+    const stampCount = 37; // not a multiple of 32: padding bits matter
+    (world as any).objects = { prototypes: { source: [] }, stamps: { id: Array.from({ length: stampCount }, (_, i) => `s${i}`) } };
+    const capture = fixture.captures[0]!;
+    const identity = worldIdentity(world);
+    const regions = identity.width * identity.height;
+    const wordsPerRow = Math.ceil(regions / 32);
+    const stampWords = Math.ceil(stampCount / 32);
+    const words = new Uint32Array(wordsPerRow + stampWords);
+    words.fill(0xffffffff, 0, wordsPerRow);
+    if (regions % 32) words[wordsPerRow - 1] = ((1 << (regions % 32)) - 1) >>> 0;
+    // Admit stamps 0, 5 and 36 only.
+    for (const st of [0, 5, 36]) words[wordsPerRow + (st >>> 5)]! |= (1 << (st & 31)) >>> 0;
+    const payload = wordsToBytes(words);
+    const meta = {
+      format: 'eltania-disocclusion-pvs',
+      version: 2,
+      experimental: true,
+      generator: { name: 'shado-disocclusion', revision: 'test' },
+      createdAt: '2026-09-21T00:00:00.000Z',
+      world: identity,
+      inputs: { clusterRegionSha256: await clusterRegionDigest(world) },
+      stamps: { count: stampCount, wordsPerRow: stampWords },
+      settings: {},
+      domains: [{ id: 'd0', capture, extTan: [1, 1], viewcellHalf: [1, 1], wordOffset: 0, stampWordOffset: wordsPerRow, counts: {}, timings: {} }],
+      payload: { endianness: 'little', wordsPerRow, wordCount: words.length, sha256: await sha256Hex(payload) },
+    };
+    const sidecar = await decodeDisocclusionSidecar(JSON.stringify(meta), payload);
+    const frame = captureFrame(capture);
+    const c = [0, 1, 2].map((a) => (capture.sourceMin[a]! + capture.sourceMax[a]!) / 2) as [number, number, number];
+    const ray = (dx: number, dy: number) => [0, 1, 2].map((a) => frame.forward[a]! + frame.right[a]! * dx + frame.up[a]! * dy) as [number, number, number];
+    const pose = { position: c, cornerRays: [ray(-0.01, -0.01), ray(0.01, -0.01), ray(-0.01, 0.01), ray(0.01, 0.01)] };
+    const result = new DisocclusionAdmission(world, sidecar).evaluate(pose);
+    expect(result.mode).toBe('baked');
+    expect(result.admittedStamps).toBe(3);
+    expect([...result.stampMask!].flatMap((v, i) => (v ? [i] : []))).toEqual([0, 5, 36]);
+
+    // A stamp bit past the count is corrupt.
+    const bad = words.slice();
+    bad[wordsPerRow + 1]! |= 1 << 10;
+    const badBytes = wordsToBytes(bad);
+    await expect(
+      decodeDisocclusionSidecar(JSON.stringify({ ...meta, payload: { ...meta.payload, sha256: await sha256Hex(badBytes) } }), badBytes)
+    ).rejects.toThrow(/stamp padding/);
+    // A world with a different stamp count cannot use these rows.
+    (world as any).objects.stamps.id.push('extra');
+    expect(new DisocclusionAdmission(world, sidecar).evaluate(pose)).toMatchObject({ mode: 'reference', stampMask: null });
   });
 });

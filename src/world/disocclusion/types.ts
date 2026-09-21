@@ -103,6 +103,12 @@ export type DisocclusionGeometry = {
    */
   blocker?: Uint8Array;
   /**
+   * Placed-object stamps as targets: stamp s is target `stampTargetBase + s`
+   * (after the render clusters). Absent: no stamp targets.
+   */
+  stampTargetBase?: number;
+  stampTargetCount?: number;
+  /**
    * Per triangle: 1 when the surface is visible from both sides. A
    * single-sided blocker seen from behind hides nothing, so it is not
    * rasterized from that side. Absent means double-sided.

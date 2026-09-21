@@ -74,7 +74,11 @@ export async function bakeDisocclusionPvs(
   if (!captures.length) throw new DisocclusionBakeError('no source domains', 'input', {});
   const identity = worldIdentity(world);
   const geometry = options.geometry ?? geometryFromWorld(world, primitives);
-  const targets = world.clusters.firstIndex.length;
+  const clusterTargets = world.clusters.firstIndex.length;
+  const stampCount = geometry.stampTargetCount ?? 0;
+  const targets = clusterTargets + stampCount;
+  const stampWordsPerRow = Math.ceil(stampCount / 32);
+  const stampRows: Uint32Array[] = [];
   const regions = identity.width * identity.height;
   const wordsPerRow = Math.ceil(regions / 32);
   const domains: DisocclusionDomainResult[] = [];
@@ -90,6 +94,16 @@ export async function bakeDisocclusionPvs(
         if (cluster >= 0 && cluster < targets) classification.admitted[cluster] = 1;
       }
       const row = regionRow(world, classification.admitted);
+      // Per stamp: bit s admits stamp s (placed objects, drawn by the object layer).
+      const stampRow = new Uint32Array(stampWordsPerRow);
+      let stampsAdmitted = 0;
+      for (let s = 0; s < stampCount; s++) {
+        if (classification.admitted[clusterTargets + s]) {
+          stampRow[s >>> 5]! |= (1 << (s & 31)) >>> 0;
+          stampsAdmitted++;
+        }
+      }
+      stampRows.push(stampRow);
       result.timings.classifyMs = performance.now() - classifyStarted;
       let regionsAdmitted = 0;
       for (let r = 0; r < regions; r++) regionsAdmitted += (row[r >>> 5]! >>> (r & 31)) & 1;
@@ -103,7 +117,8 @@ export async function bakeDisocclusionPvs(
           extTan: [frame.extTanX, frame.extTanY],
           viewcellHalf: [frame.viewcellHalfX, frame.viewcellHalfY],
           wordOffset: i * wordsPerRow,
-          counts: { ...classification.counts, regionsAdmitted, regions },
+          counts: { ...classification.counts, regionsAdmitted, regions, ...(stampCount ? { stampsAdmitted, stamps: stampCount } : {}) },
+          ...(stampCount ? { stampWordOffset: wordsPerRow * captures.length + i * stampWordsPerRow } : {}),
           timings: result.timings,
         },
         capture: result,
@@ -114,8 +129,10 @@ export async function bakeDisocclusionPvs(
   } finally {
     baker.dispose();
   }
-  const words = new Uint32Array(wordsPerRow * domains.length);
+  // [region row per domain][stamp row per domain]
+  const words = new Uint32Array(wordsPerRow * domains.length + stampWordsPerRow * domains.length);
   domains.forEach((d, i) => words.set(d.row, i * wordsPerRow));
+  stampRows.forEach((row, i) => words.set(row, wordsPerRow * domains.length + i * stampWordsPerRow));
   const payload = wordsToBytes(words);
   const geometryBytes = new Uint8Array(geometry.positions.byteLength + geometry.indices.byteLength);
   geometryBytes.set(bytesOf(geometry.positions), 0);
@@ -131,7 +148,7 @@ export async function bakeDisocclusionPvs(
   }
   const meta: DisocclusionSidecarMeta = {
     format: DISOCCLUSION_SIDECAR_FORMAT,
-    version: 1,
+    version: stampCount ? 2 : 1,
     experimental: true,
     generator: { name: 'shado-disocclusion', revision: DISOCCLUSION_GENERATOR_REVISION },
     createdAt: options.createdAt ?? new Date().toISOString(),
@@ -148,6 +165,7 @@ export async function bakeDisocclusionPvs(
       ...(options.zone ? { zone: options.zone } : {}),
       ...(options.alwaysAdmitClusters?.length ? { suspectClusters: [...options.alwaysAdmitClusters] } : {}),
     },
+    ...(stampCount ? { stamps: { count: stampCount, wordsPerRow: stampWordsPerRow } } : {}),
     settings,
     domains: domains.map(d => d.meta),
     payload: { endianness: 'little', wordsPerRow, wordCount: words.length, sha256: await sha256Hex(payload) },

@@ -31,6 +31,12 @@ export type DisocclusionAdmissionResult = {
   cellMask: Uint8Array | null;
   admittedRegions: number;
   admittedCells: number;
+  /**
+   * Byte per placed-object stamp (1 = the main view may draw it), or null:
+   * the reference path, or a sidecar without stamp rows -- every stamp drawn.
+   */
+  stampMask: Uint8Array | null;
+  admittedStamps: number;
 };
 
 /** Distance a camera must keep from a domain face before the bake applies. */
@@ -88,7 +94,15 @@ export class DisocclusionAdmission {
     this.regionCount = v ? v.width * v.height : 0;
     this.wordsPerRow = Math.ceil(this.regionCount / 32);
     this.cellRegion = v?.cellRegion ?? [];
-    this.identityError = !v ? 'world has no dense regions' : sidecar ? sidecarMismatch(sidecar, world) : 'no sidecar loaded';
+    const worldStamps = world.objects?.stamps.id.length ?? 0;
+    this.identityError = !v
+      ? 'world has no dense regions'
+      : !sidecar
+        ? 'no sidecar loaded'
+        : sidecarMismatch(sidecar, world) ??
+          (sidecar.meta.stamps && sidecar.meta.stamps.count !== worldStamps
+            ? `sidecar has ${sidecar.meta.stamps.count} stamp rows, world has ${worldStamps} stamps`
+            : null);
     this.frames = sidecar && !this.identityError ? sidecar.meta.domains.map(d => captureFrame(d.capture)) : [];
     // Faces of one source volume are evaluated together; an unnamed capture is its own volume.
     const byVolume = new Map<string, number[]>();
@@ -127,15 +141,22 @@ export class DisocclusionAdmission {
       cellMask: null,
       admittedRegions: this.regionCount,
       admittedCells: this.cellRegion.length,
+      stampMask: null,
+      admittedStamps: this.world.objects?.stamps.id.length ?? 0,
     });
     if (this.identityError || !this.sidecar) return reference(this.identityError ?? 'no sidecar loaded');
     const words = new Uint32Array(this.wordsPerRow);
+    const stampMeta = this.sidecar.meta.stamps;
+    const stampWords = new Uint32Array(stampMeta?.wordsPerRow ?? 0);
     const used: string[] = [];
     let lastReason = 'no domain';
     const take = (i: number) => {
       const domain = this.sidecar!.meta.domains[i]!;
       used.push(domain.id);
       for (let w = 0; w < this.wordsPerRow; w++) words[w]! |= this.sidecar!.words[domain.wordOffset + w]!;
+      if (stampMeta && domain.stampWordOffset !== undefined) {
+        for (let w = 0; w < stampWords.length; w++) stampWords[w]! |= this.sidecar!.words[domain.stampWordOffset + w]!;
+      }
     };
     for (const group of this.groups) {
       const first = this.sidecar.meta.domains[group[0]!]!.capture;
@@ -169,6 +190,28 @@ export class DisocclusionAdmission {
     });
     let admittedRegions = 0;
     for (let r = 0; r < this.regionCount; r++) admittedRegions += (words[r >>> 5]! >>> (r & 31)) & 1;
-    return { mode: 'baked', reason: 'supported', domains: used, regionWords: words, cellMask, admittedRegions, admittedCells };
+    let stampMask: Uint8Array | null = null;
+    let admittedStamps = this.world.objects?.stamps.id.length ?? 0;
+    if (stampMeta) {
+      stampMask = new Uint8Array(stampMeta.count);
+      admittedStamps = 0;
+      for (let st = 0; st < stampMeta.count; st++) {
+        if ((stampWords[st >>> 5]! >>> (st & 31)) & 1) {
+          stampMask[st] = 1;
+          admittedStamps++;
+        }
+      }
+    }
+    return {
+      mode: 'baked',
+      reason: 'supported',
+      domains: used,
+      regionWords: words,
+      cellMask,
+      admittedRegions,
+      admittedCells,
+      stampMask,
+      admittedStamps,
+    };
   }
 }
