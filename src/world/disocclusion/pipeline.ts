@@ -79,6 +79,12 @@ export async function bakeDisocclusionPvs(
   const targets = clusterTargets + stampCount;
   const stampWordsPerRow = Math.ceil(stampCount / 32);
   const stampRows: Uint32Array[] = [];
+  // Relied-on blockers (A1): the clusters and stamps whose BLOCKER triangles
+  // were raw-visible. A blocker no sample saw is behind other blockers from
+  // every sample, so removing it cannot expose a rejected target.
+  const clusterWordsPerRow = Math.ceil(clusterTargets / 32);
+  const reliedClusterRows: Uint32Array[] = [];
+  const reliedStampRows: Uint32Array[] = [];
   const regions = identity.width * identity.height;
   const wordsPerRow = Math.ceil(regions / 32);
   const domains: DisocclusionDomainResult[] = [];
@@ -104,6 +110,24 @@ export async function bakeDisocclusionPvs(
         }
       }
       stampRows.push(stampRow);
+      const reliedClusters = new Uint32Array(clusterWordsPerRow);
+      let clustersRelied = 0;
+      for (let c = 0; c < clusterTargets; c++) {
+        if (classification.raw[c]) {
+          reliedClusters[c >>> 5]! |= (1 << (c & 31)) >>> 0;
+          clustersRelied++;
+        }
+      }
+      const reliedStamps = new Uint32Array(stampWordsPerRow);
+      let stampsRelied = 0;
+      for (let s = 0; s < stampCount; s++) {
+        if (classification.raw[clusterTargets + s]) {
+          reliedStamps[s >>> 5]! |= (1 << (s & 31)) >>> 0;
+          stampsRelied++;
+        }
+      }
+      reliedClusterRows.push(reliedClusters);
+      reliedStampRows.push(reliedStamps);
       result.timings.classifyMs = performance.now() - classifyStarted;
       let regionsAdmitted = 0;
       for (let r = 0; r < regions; r++) regionsAdmitted += (row[r >>> 5]! >>> (r & 31)) & 1;
@@ -117,8 +141,18 @@ export async function bakeDisocclusionPvs(
           extTan: [frame.extTanX, frame.extTanY],
           viewcellHalf: [frame.viewcellHalfX, frame.viewcellHalfY],
           wordOffset: i * wordsPerRow,
-          counts: { ...classification.counts, regionsAdmitted, regions, ...(stampCount ? { stampsAdmitted, stamps: stampCount } : {}) },
+          counts: {
+            ...classification.counts,
+            regionsAdmitted,
+            regions,
+            clustersRelied,
+            ...(stampCount ? { stampsAdmitted, stamps: stampCount, stampsRelied } : {}),
+          },
           ...(stampCount ? { stampWordOffset: wordsPerRow * captures.length + i * stampWordsPerRow } : {}),
+          reliedClusterWordOffset: (wordsPerRow + stampWordsPerRow) * captures.length + i * clusterWordsPerRow,
+          ...(stampCount
+            ? { reliedStampWordOffset: (wordsPerRow + stampWordsPerRow + clusterWordsPerRow) * captures.length + i * stampWordsPerRow }
+            : {}),
           timings: result.timings,
         },
         capture: result,
@@ -129,10 +163,13 @@ export async function bakeDisocclusionPvs(
   } finally {
     baker.dispose();
   }
-  // [region row per domain][stamp row per domain]
-  const words = new Uint32Array(wordsPerRow * domains.length + stampWordsPerRow * domains.length);
+  // [region rows][stamp rows][relied cluster rows][relied stamp rows], one each per domain
+  const n = domains.length;
+  const words = new Uint32Array((wordsPerRow + stampWordsPerRow * 2 + clusterWordsPerRow) * n);
   domains.forEach((d, i) => words.set(d.row, i * wordsPerRow));
-  stampRows.forEach((row, i) => words.set(row, wordsPerRow * domains.length + i * stampWordsPerRow));
+  stampRows.forEach((row, i) => words.set(row, wordsPerRow * n + i * stampWordsPerRow));
+  reliedClusterRows.forEach((row, i) => words.set(row, (wordsPerRow + stampWordsPerRow) * n + i * clusterWordsPerRow));
+  reliedStampRows.forEach((row, i) => words.set(row, (wordsPerRow + stampWordsPerRow + clusterWordsPerRow) * n + i * stampWordsPerRow));
   const payload = wordsToBytes(words);
   const geometryBytes = new Uint8Array(geometry.positions.byteLength + geometry.indices.byteLength);
   geometryBytes.set(bytesOf(geometry.positions), 0);
@@ -148,7 +185,7 @@ export async function bakeDisocclusionPvs(
   }
   const meta: DisocclusionSidecarMeta = {
     format: DISOCCLUSION_SIDECAR_FORMAT,
-    version: stampCount ? 2 : 1,
+    version: 3,
     experimental: true,
     generator: { name: 'shado-disocclusion', revision: DISOCCLUSION_GENERATOR_REVISION },
     createdAt: options.createdAt ?? new Date().toISOString(),
@@ -166,6 +203,7 @@ export async function bakeDisocclusionPvs(
       ...(options.alwaysAdmitClusters?.length ? { suspectClusters: [...options.alwaysAdmitClusters] } : {}),
     },
     ...(stampCount ? { stamps: { count: stampCount, wordsPerRow: stampWordsPerRow } } : {}),
+    relied: { clusters: clusterTargets, clusterWordsPerRow },
     settings,
     domains: domains.map(d => d.meta),
     payload: { endianness: 'little', wordsPerRow, wordCount: words.length, sha256: await sha256Hex(payload) },

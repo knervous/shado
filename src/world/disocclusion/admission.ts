@@ -37,6 +37,14 @@ export type DisocclusionAdmissionResult = {
    */
   stampMask: Uint8Array | null;
   admittedStamps: number;
+  /**
+   * The blocker contract (A1): byte per cluster / per stamp, 1 where the rows
+   * rely on that blocker being drawn in its baked, full-detail form. Null on
+   * the reference path. The caller must hold these resident while applying
+   * the masks above, or fall back.
+   */
+  reliedClusters: Uint8Array | null;
+  reliedStamps: Uint8Array | null;
 };
 
 /** Distance a camera must keep from a domain face before the bake applies. */
@@ -102,7 +110,11 @@ export class DisocclusionAdmission {
         : sidecarMismatch(sidecar, world) ??
           (sidecar.meta.stamps && sidecar.meta.stamps.count !== worldStamps
             ? `sidecar has ${sidecar.meta.stamps.count} stamp rows, world has ${worldStamps} stamps`
-            : null);
+            : !sidecar.meta.relied
+              ? `sidecar version ${sidecar.meta.version} has no relied-on blocker rows (rebake)`
+              : sidecar.meta.relied.clusters !== world.clusters.firstIndex.length
+                ? `sidecar relies on ${sidecar.meta.relied.clusters} clusters, world has ${world.clusters.firstIndex.length}`
+                : null);
     this.frames = sidecar && !this.identityError ? sidecar.meta.domains.map(d => captureFrame(d.capture)) : [];
     // Faces of one source volume are evaluated together; an unnamed capture is its own volume.
     const byVolume = new Map<string, number[]>();
@@ -143,11 +155,16 @@ export class DisocclusionAdmission {
       admittedCells: this.cellRegion.length,
       stampMask: null,
       admittedStamps: this.world.objects?.stamps.id.length ?? 0,
+      reliedClusters: null,
+      reliedStamps: null,
     });
     if (this.identityError || !this.sidecar) return reference(this.identityError ?? 'no sidecar loaded');
     const words = new Uint32Array(this.wordsPerRow);
     const stampMeta = this.sidecar.meta.stamps;
     const stampWords = new Uint32Array(stampMeta?.wordsPerRow ?? 0);
+    const relied = this.sidecar.meta.relied!;
+    const reliedClusterWords = new Uint32Array(relied.clusterWordsPerRow);
+    const reliedStampWords = new Uint32Array(stampMeta?.wordsPerRow ?? 0);
     const used: string[] = [];
     let lastReason = 'no domain';
     const take = (i: number) => {
@@ -156,6 +173,12 @@ export class DisocclusionAdmission {
       for (let w = 0; w < this.wordsPerRow; w++) words[w]! |= this.sidecar!.words[domain.wordOffset + w]!;
       if (stampMeta && domain.stampWordOffset !== undefined) {
         for (let w = 0; w < stampWords.length; w++) stampWords[w]! |= this.sidecar!.words[domain.stampWordOffset + w]!;
+      }
+      for (let w = 0; w < reliedClusterWords.length; w++) {
+        reliedClusterWords[w]! |= this.sidecar!.words[domain.reliedClusterWordOffset! + w]!;
+      }
+      if (stampMeta && domain.reliedStampWordOffset !== undefined) {
+        for (let w = 0; w < reliedStampWords.length; w++) reliedStampWords[w]! |= this.sidecar!.words[domain.reliedStampWordOffset + w]!;
       }
     };
     for (const group of this.groups) {
@@ -202,9 +225,16 @@ export class DisocclusionAdmission {
         }
       }
     }
+    const bytes = (words: Uint32Array, count: number) => {
+      const out = new Uint8Array(count);
+      for (let i = 0; i < count; i++) out[i] = (words[i >>> 5]! >>> (i & 31)) & 1;
+      return out;
+    };
     return {
       mode: 'baked',
       reason: 'supported',
+      reliedClusters: bytes(reliedClusterWords, relied.clusters),
+      reliedStamps: stampMeta ? bytes(reliedStampWords, stampMeta.count) : null,
       domains: used,
       regionWords: words,
       cellMask,

@@ -6,6 +6,7 @@
  */
 import type { ShadoWorldPrimitive, ShadoWorldSpatialPackage } from '../types';
 import type { DisocclusionGeometry } from './types';
+import { stampMatrix } from '../occluder-scene';
 
 export function geometryFromWorld(
   world: ShadoWorldSpatialPackage,
@@ -319,4 +320,79 @@ export function zoneBakeGeometry(
       stampTargets: { stamps: stampCount, targets: stampTargets, neverHidden: stampCount - stampTargets },
     },
   };
+}
+
+/**
+ * Relative and absolute float tolerance on a target box. Not a margin for
+ * geometry the box does not contain: every level the runtime may draw is IN
+ * the union below, so nothing is left to guess (pvs-latest-audit A1).
+ */
+const BOUNDS_EPSILON_RELATIVE = 1e-5;
+const BOUNDS_EPSILON_ABSOLUTE = 1e-3;
+
+/**
+ * Per stamp, the world AABB of everything the runtime may draw for it: every
+ * part of every detail level its prototype ships. `partsOf` returns the
+ * prototype's local-space position arrays across ALL levels, or null when
+ * that cannot be established (unreadable level-0 or chain, dynamic parts) --
+ * those stamps get NaN bounds and are never hidden. Disabled and
+ * phase-variant stamps are NaN too.
+ */
+export function stampTargetBounds(
+  world: ShadoWorldSpatialPackage,
+  partsOf: (prototype: number) => readonly ArrayLike<number>[] | null
+): Float32Array | null {
+  const stamps = world.objects?.stamps;
+  if (!stamps?.id.length) return null;
+  const local = new Map<number, { min: number[]; max: number[] } | null>();
+  const boundsOf = (prototype: number) => {
+    if (local.has(prototype)) return local.get(prototype)!;
+    const parts = partsOf(prototype);
+    let result: { min: number[]; max: number[] } | null = null;
+    if (parts?.length) {
+      const min = [Infinity, Infinity, Infinity];
+      const max = [-Infinity, -Infinity, -Infinity];
+      for (const positions of parts) {
+        for (let i = 0; i + 2 < positions.length; i += 3) {
+          for (let a = 0; a < 3; a++) {
+            const v = positions[i + a]!;
+            if (v < min[a]!) min[a] = v;
+            if (v > max[a]!) max[a] = v;
+          }
+        }
+      }
+      if (min[0]! <= max[0]!) result = { min, max };
+    }
+    local.set(prototype, result);
+    return result;
+  };
+  let worldPhases = 0;
+  for (const mask of stamps.phaseMask) worldPhases |= mask;
+  const out = new Float32Array(stamps.id.length * 6).fill(NaN);
+  const scratch = new Float32Array(16);
+  for (let s = 0; s < stamps.id.length; s++) {
+    if (!stamps.enabled[s]) continue;
+    if (worldPhases !== 0 && ((stamps.phaseMask[s]! & worldPhases) >>> 0) !== worldPhases >>> 0) continue;
+    const b = boundsOf(stamps.prototype[s]!);
+    if (!b) continue;
+    const m = stampMatrix(stamps, s, scratch);
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (let c = 0; c < 8; c++) {
+      const x = c & 1 ? b.max[0]! : b.min[0]!;
+      const y = c & 2 ? b.max[1]! : b.min[1]!;
+      const z = c & 4 ? b.max[2]! : b.min[2]!;
+      const w = [m[0]! * x + m[4]! * y + m[8]! * z + m[12]!, m[1]! * x + m[5]! * y + m[9]! * z + m[13]!, m[2]! * x + m[6]! * y + m[10]! * z + m[14]!];
+      for (let a = 0; a < 3; a++) {
+        lo[a] = Math.min(lo[a]!, w[a]!);
+        hi[a] = Math.max(hi[a]!, w[a]!);
+      }
+    }
+    for (let a = 0; a < 3; a++) {
+      const tolerance = Math.max(Math.abs(lo[a]!), Math.abs(hi[a]!)) * BOUNDS_EPSILON_RELATIVE + BOUNDS_EPSILON_ABSOLUTE;
+      out[s * 6 + a] = lo[a]! - tolerance;
+      out[s * 6 + 3 + a] = hi[a]! + tolerance;
+    }
+  }
+  return out;
 }

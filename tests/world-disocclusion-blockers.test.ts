@@ -9,6 +9,7 @@ import {
   compileFixtureWorld,
   DISOCCLUSION_FIXTURES,
   sha256Hex,
+  stampTargetBounds,
   verifyPrototypeManifest,
   verifySidecarInputs,
   worldIdentity,
@@ -109,6 +110,84 @@ describe('disocclusion blocker validation (V3)', () => {
     expect(await verifyPrototypeManifest(world, missingAtBake, resolve, options)).toMatch(/missing at bake time/);
   });
 
+  it('a prototype missing at bake survives serialization and verifies only while it stays missing (A4)', async () => {
+    const fixture = DISOCCLUSION_FIXTURES['two-room']!();
+    const world = compileFixtureWorld(fixture) as ShadoWorldSpatialPackage;
+    (world as any).objects = { ...(world as any).objects, prototypes: { source: [CHURCH, WALL] } };
+    const files = new Map<string, Uint8Array>([[WALL, encode('wall v1')]]);
+    const spatial = encode('spatial');
+    const glb = encode('glb');
+    const identity = worldIdentity(world);
+    const wordsPerRow = Math.ceil((identity.width * identity.height) / 32);
+    const payload = wordsToBytes(new Uint32Array(wordsPerRow));
+    const meta = {
+      format: 'eltania-disocclusion-pvs',
+      version: 1,
+      experimental: true,
+      generator: { name: 'shado-disocclusion', revision: 'test' },
+      createdAt: '2026-09-21T00:00:00.000Z',
+      world: identity,
+      inputs: {
+        clusterRegionSha256: await clusterRegionDigest(world),
+        zone: {
+          name: 'fixture',
+          spatialSha256: await sha256Hex(spatial),
+          glbSha256: await sha256Hex(glb),
+          prototypesSha256: 'x',
+          prototypeFiles: 2,
+          prototypes: {
+            eligibilityRevision: SHADO_OCCLUDER_ELIGIBILITY_REVISION,
+            files: [
+              { source: CHURCH, sha256: null },
+              { source: WALL, sha256: await sha256Hex(files.get(WALL)!) },
+            ],
+          },
+        },
+      },
+      settings: {},
+      domains: [{ id: 'd0', capture: fixture.captures[0]!, extTan: [1, 1], viewcellHalf: [1, 1], wordOffset: 0, counts: {}, timings: {} }],
+      payload: { endianness: 'little', wordsPerRow, wordCount: wordsPerRow, sha256: await sha256Hex(payload) },
+    };
+    // Through the real serialized boundary, not a hand-built object.
+    const sidecar = await decodeDisocclusionSidecar(JSON.stringify(meta), payload);
+    const verify = (resolve: (source: string) => Promise<Uint8Array | null>) =>
+      verifySidecarInputs(sidecar, world, {
+        spatial,
+        glb,
+        prototypes: { resolve, eligibilityRevision: SHADO_OCCLUDER_ELIGIBILITY_REVISION, release: 'r1' },
+      });
+    // Missing at bake and at runtime: the bake treated it as unknown, so do we.
+    expect(await verify(async (source) => files.get(source) ?? null)).toBeNull();
+    // Missing at bake, present now: drift, refused.
+    expect(await verify(async (source) => (source === CHURCH ? encode('church') : files.get(source) ?? null))).toMatch(
+      /missing at bake time but resolves now/
+    );
+    // Null anywhere else is still corruption.
+    const corrupt = { ...meta, world: { ...meta.world, width: null } };
+    await expect(decodeDisocclusionSidecar(JSON.stringify(corrupt), payload)).rejects.toThrow(/meta\.world\.width is null/);
+  });
+
+  it('refuses a changed LOD selection or chain: target bounds were the union of those exact levels (A1)', async () => {
+    const { world, files, manifest, resolve, options } = await setup();
+    const SELECTION = '/eqrequiem/objects/object-lods.json';
+    const CHAIN = '/eqrequiem/objects/wall/final.lods.glb.gz';
+    const lodFiles = new Map([...files, [SELECTION, encode('{"levels":{"wall":[1]}}')], [CHAIN, encode('wall lods v1')]]);
+    const withLods = {
+      ...manifest,
+      lods: {
+        manifest: { source: SELECTION, sha256: await sha256Hex(lodFiles.get(SELECTION)!) },
+        files: [{ source: CHAIN, sha256: await sha256Hex(lodFiles.get(CHAIN)!) }],
+      },
+    };
+    const from = (map: Map<string, Uint8Array>) => async (source: string) => map.get(source) ?? null;
+    expect(await verifyPrototypeManifest(world, withLods, from(lodFiles), options)).toBeNull();
+    const newChain = new Map(lodFiles).set(CHAIN, encode('wall lods v2'));
+    expect(await verifyPrototypeManifest(world, withLods, from(newChain), options)).toMatch(/LOD chain .* differs/);
+    const newSelection = new Map(lodFiles).set(SELECTION, encode('{"levels":{}}'));
+    expect(await verifyPrototypeManifest(world, withLods, from(newSelection), options)).toMatch(/LOD selection .* differs/);
+    void resolve;
+  });
+
   it('hashes each prototype once per release, and again for a new release', async () => {
     const { world, manifest, files, options } = await setup();
     let fetches = 0;
@@ -183,7 +262,65 @@ describe('disocclusion blocker validation (V3)', () => {
     expect(geometry.triangleTarget.includes(clusters + 1)).toBe(false);
   });
 
-  it('a version-2 sidecar carries per-stamp rows; admission unions them and refuses a stamp-count mismatch', async () => {
+  it('target bounds are the union of every drawn level; an unreadable chain is never hidden (A1)', () => {
+    // Three stamps at x = 0, 10, 20, identity rotation, scale 2 on the third.
+    const n = 3;
+    const col = (values: number[]) => values;
+    const world = {
+      objects: {
+        prototypes: { id: ['wall', 'wall-lod-fails', 'wall'], source: ['/w.glb.gz', '/f.glb.gz', '/w.glb.gz'] },
+        stamps: {
+          id: ['a', 'b', 'c'],
+          prototype: col([0, 1, 2]),
+          enabled: col([1, 1, 1]),
+          phaseMask: col([0, 0, 0]),
+          positionX: col([0, 10, 20]),
+          positionY: col([0, 0, 0]),
+          positionZ: col([0, 0, 0]),
+          rotationX: col([0, 0, 0]),
+          rotationY: col([0, 0, 0]),
+          rotationZ: col([0, 0, 0]),
+          scaleX: col([1, 1, 2]),
+          scaleY: col([1, 1, 2]),
+          scaleZ: col([1, 1, 2]),
+        },
+      },
+    } as unknown as ShadoWorldSpatialPackage;
+    // Level 0 is a unit cube; its coarse level bulges 1.5 units higher -- a
+    // simplifier is free to move a silhouette outward.
+    const level0 = new Float32Array([0, 0, 0, 1, 1, 1]);
+    const coarse = new Float32Array([0, 0, 0, 1, 2.5, 1]);
+    const bounds = stampTargetBounds(world, (prototype) => (prototype === 1 ? null : [level0, coarse]))!;
+    const box = (s: number) => Array.from(bounds.slice(s * 6, s * 6 + 6));
+    // The union, to float tolerance -- not level 0 plus a guessed margin.
+    expect(box(0)[4]).toBeGreaterThanOrEqual(2.5);
+    expect(box(0)[4]).toBeLessThan(2.5 + 0.01);
+    expect(box(0)[1]).toBeLessThanOrEqual(0);
+    expect(box(0)[1]).toBeGreaterThan(-0.01);
+    // Scale applies to the union.
+    expect(box(2)[4]).toBeGreaterThanOrEqual(5);
+    expect(box(2)[4]).toBeLessThan(5.01);
+    // An unreadable chain: never a target.
+    expect(box(1).every(Number.isNaN)).toBe(true);
+    // And the geometry gives the enlarged target its whole box.
+    const fixture = DISOCCLUSION_FIXTURES['two-room']!();
+    const fixtureWorld = compileFixtureWorld(fixture) as ShadoWorldSpatialPackage;
+    const parts = fixtureWorld.primitives.map((primitive) => {
+      const source = fixture.primitives.find((p) => p.name === primitive.name)!;
+      const hash = primitive.name.lastIndexOf('#');
+      return { node: hash >= 0 ? primitive.name.slice(0, hash) : primitive.name, positions: source.positions, indices: source.indices, doubleSided: true, exclusion: null };
+    });
+    const { geometry } = zoneBakeGeometry(fixtureWorld, parts, [], bounds);
+    const base = geometry.stampTargetBase!;
+    let top = -Infinity;
+    for (let t = 0; t < geometry.triangleTarget.length; t++) {
+      if (geometry.triangleTarget[t] !== base) continue;
+      for (let v = 0; v < 3; v++) top = Math.max(top, geometry.positions[geometry.indices[t * 3 + v]! * 3 + 1]!);
+    }
+    expect(top).toBeGreaterThanOrEqual(2.5);
+  });
+
+  it('a version-3 sidecar carries per-stamp and relied-on rows; admission unions them and refuses a stamp-count mismatch', async () => {
     const fixture = DISOCCLUSION_FIXTURES['two-room']!();
     const world = compileFixtureWorld(fixture) as ShadoWorldSpatialPackage;
     const stampCount = 37; // not a multiple of 32: padding bits matter
@@ -193,23 +330,43 @@ describe('disocclusion blocker validation (V3)', () => {
     const regions = identity.width * identity.height;
     const wordsPerRow = Math.ceil(regions / 32);
     const stampWords = Math.ceil(stampCount / 32);
-    const words = new Uint32Array(wordsPerRow + stampWords);
+    const clusters = world.clusters.firstIndex.length;
+    const clusterWords = Math.ceil(clusters / 32);
+    const reliedClusterOffset = wordsPerRow + stampWords;
+    const reliedStampOffset = reliedClusterOffset + clusterWords;
+    const words = new Uint32Array(reliedStampOffset + stampWords);
     words.fill(0xffffffff, 0, wordsPerRow);
     if (regions % 32) words[wordsPerRow - 1] = ((1 << (regions % 32)) - 1) >>> 0;
-    // Admit stamps 0, 5 and 36 only.
+    // Admit stamps 0, 5 and 36 only; the rows rely on stamp 5 and cluster 0.
     for (const st of [0, 5, 36]) words[wordsPerRow + (st >>> 5)]! |= (1 << (st & 31)) >>> 0;
+    words[reliedStampOffset]! |= 1 << 5;
+    words[reliedClusterOffset]! |= 1;
     const payload = wordsToBytes(words);
     const meta = {
       format: 'eltania-disocclusion-pvs',
-      version: 2,
+      version: 3,
       experimental: true,
       generator: { name: 'shado-disocclusion', revision: 'test' },
       createdAt: '2026-09-21T00:00:00.000Z',
       world: identity,
       inputs: { clusterRegionSha256: await clusterRegionDigest(world) },
       stamps: { count: stampCount, wordsPerRow: stampWords },
+      relied: { clusters, clusterWordsPerRow: clusterWords },
       settings: {},
-      domains: [{ id: 'd0', capture, extTan: [1, 1], viewcellHalf: [1, 1], wordOffset: 0, stampWordOffset: wordsPerRow, counts: {}, timings: {} }],
+      domains: [
+        {
+          id: 'd0',
+          capture,
+          extTan: [1, 1],
+          viewcellHalf: [1, 1],
+          wordOffset: 0,
+          stampWordOffset: wordsPerRow,
+          reliedClusterWordOffset: reliedClusterOffset,
+          reliedStampWordOffset: reliedStampOffset,
+          counts: {},
+          timings: {},
+        },
+      ],
       payload: { endianness: 'little', wordsPerRow, wordCount: words.length, sha256: await sha256Hex(payload) },
     };
     const sidecar = await decodeDisocclusionSidecar(JSON.stringify(meta), payload);
@@ -221,6 +378,23 @@ describe('disocclusion blocker validation (V3)', () => {
     expect(result.mode).toBe('baked');
     expect(result.admittedStamps).toBe(3);
     expect([...result.stampMask!].flatMap((v, i) => (v ? [i] : []))).toEqual([0, 5, 36]);
+    expect([...result.reliedStamps!].flatMap((v, i) => (v ? [i] : []))).toEqual([5]);
+    expect([...result.reliedClusters!].flatMap((v, i) => (v ? [i] : []))).toEqual([0]);
+
+    // Rows without the relied-on blockers cannot be applied safely (A1).
+    const v2Words = words.slice(0, wordsPerRow + stampWords);
+    const v2Bytes = wordsToBytes(v2Words);
+    const { relied: _relied, ...v2Meta } = meta;
+    const v2 = await decodeDisocclusionSidecar(
+      JSON.stringify({
+        ...v2Meta,
+        version: 2,
+        domains: [{ ...meta.domains[0], reliedClusterWordOffset: undefined, reliedStampWordOffset: undefined }],
+        payload: { ...meta.payload, wordCount: v2Words.length, sha256: await sha256Hex(v2Bytes) },
+      }),
+      v2Bytes
+    );
+    expect(new DisocclusionAdmission(world, v2).evaluate(pose)).toMatchObject({ mode: 'reference', reason: expect.stringMatching(/no relied-on blocker rows/) });
 
     // A stamp bit past the count is corrupt.
     const bad = words.slice();

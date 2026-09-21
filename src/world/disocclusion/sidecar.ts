@@ -18,8 +18,16 @@ export type DisocclusionDomainMeta = {
   viewcellHalf: [number, number];
   /** First payload word of this domain's row. */
   wordOffset: number;
-  /** First payload word of this domain's stamp row (version 2). */
+  /** First payload word of this domain's stamp row (version 2+). */
   stampWordOffset?: number;
+  /**
+   * Version 3: first payload words of this domain's RELIED-ON blockers -- the
+   * clusters and stamps whose blocker triangles the source actually saw. Only
+   * those can be what hides a rejected target, so they are what the runtime
+   * must keep drawn, at full detail, while the rows apply (pvs-latest-audit A1).
+   */
+  reliedClusterWordOffset?: number;
+  reliedStampWordOffset?: number;
   counts: {
     targets: number;
     raw: number;
@@ -31,16 +39,26 @@ export type DisocclusionDomainMeta = {
     regions: number;
     stampsAdmitted?: number;
     stamps?: number;
+    clustersRelied?: number;
+    stampsRelied?: number;
   };
   timings: Record<string, number>;
 };
 
 export type DisocclusionSidecarMeta = {
   format: typeof DISOCCLUSION_SIDECAR_FORMAT;
-  /** 2 adds per-stamp rows (placed objects as targets). */
-  version: 1 | 2;
-  /** Version 2: one bit per placed-object stamp per domain, after the region rows. */
+  /**
+   * 2 adds per-stamp rows (placed objects as targets); 3 adds the relied-on
+   * blocker rows. Readers refuse to apply rows without them (A1).
+   */
+  version: 1 | 2 | 3;
+  /** Version 2+: one bit per placed-object stamp per domain, after the region rows. */
   stamps?: { count: number; wordsPerRow: number };
+  /**
+   * Version 3: per domain, one bit per cluster then (with stamps) one bit per
+   * stamp, after the stamp rows: [regions][stamps][relied clusters][relied stamps].
+   */
+  relied?: { clusters: number; clusterWordsPerRow: number };
   experimental: true;
   generator: { name: 'shado-disocclusion'; revision: string };
   createdAt: string;
@@ -86,7 +104,12 @@ export type DisocclusionSidecarMeta = {
   };
   settings: DisocclusionSettings;
   domains: DisocclusionDomainMeta[];
-  payload: { endianness: 'little'; wordsPerRow: number; wordCount: number; sha256: string };
+  /**
+   * `file`: the immutable payload file this metadata publishes (A5); absent
+   * on sidecars from before generation-named payloads, which sit at
+   * `<name>.pvs.bin`.
+   */
+  payload: { endianness: 'little'; wordsPerRow: number; wordCount: number; sha256: string; file?: string };
 };
 
 export type DisocclusionSidecar = { meta: DisocclusionSidecarMeta; words: Uint32Array };
@@ -96,6 +119,18 @@ export type DisocclusionPrototypeManifest = {
   eligibilityRevision: string;
   /** Sorted by source. sha256 of the DECOMPRESSED content; null = not found at bake time. */
   files: Array<{ source: string; sha256: string | null }>;
+  /**
+   * The detail levels the runtime draws instead of level 0 (A1). Target
+   * bounds are the union of every level, so the rows are only valid for these
+   * exact chains: the selection manifest and each chain file it lists for a
+   * referenced prototype (sorted by source; sha256 of decompressed content;
+   * null = listed but unreadable at bake time, so those stamps were never
+   * hidden).
+   */
+  lods?: {
+    manifest: { source: string; sha256: string };
+    files: Array<{ source: string; sha256: string | null }>;
+  };
 };
 
 /**
@@ -148,6 +183,29 @@ export async function verifyPrototypeManifest(
     if (digest === null) return `prototype ${file.source} does not resolve (blocker content unverified)`;
     if (digest !== file.sha256) return `prototype ${file.source} content differs from the baked blocker`;
   }
+  if (manifest.lods) {
+    const digestOf = async (source: string): Promise<string | null | 'unresolvable'> => {
+      const key = `${options.release ?? ''}|${source}`;
+      const cached = options.cache?.get(key);
+      if (cached !== undefined) return cached;
+      let content: Uint8Array | null;
+      try {
+        content = await resolve(source);
+      } catch {
+        return 'unresolvable';
+      }
+      const digest = content ? await sha256Hex(content) : null;
+      options.cache?.set(key, digest);
+      return digest;
+    };
+    const selection = await digestOf(manifest.lods.manifest.source);
+    if (selection !== manifest.lods.manifest.sha256) return `LOD selection ${manifest.lods.manifest.source} differs from the bake`;
+    for (const file of manifest.lods.files) {
+      const digest = await digestOf(file.source);
+      if (digest === 'unresolvable') return `LOD chain ${file.source} could not be resolved to verify it`;
+      if (digest !== file.sha256) return `LOD chain ${file.source} differs from the bake`;
+    }
+  }
   return null;
 }
 
@@ -186,12 +244,21 @@ export function worldIdentity(world: ShadoWorldSpatialPackage): DisocclusionSide
 
 export class DisocclusionSidecarError extends Error {}
 
+/**
+ * The one documented null in the metadata: a prototype the bake could not
+ * find (`DisocclusionPrototypeManifest`). Everywhere else null is corruption.
+ */
+const NULLABLE_PATH = /^meta\.inputs\.zone\.prototypes\.files\[\d+\]\.sha256$/;
+
 function assertFinite(value: unknown, path: string): void {
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) throw new DisocclusionSidecarError(`${path} is not finite`);
     return;
   }
-  if (value === null) throw new DisocclusionSidecarError(`${path} is null`);
+  if (value === null) {
+    if (NULLABLE_PATH.test(path)) return;
+    throw new DisocclusionSidecarError(`${path} is null`);
+  }
   if (Array.isArray(value)) value.forEach((v, i) => assertFinite(v, `${path}[${i}]`));
   else if (typeof value === 'object') for (const [k, v] of Object.entries(value as object)) assertFinite(v, `${path}.${k}`);
 }
@@ -209,8 +276,10 @@ export async function decodeDisocclusionSidecar(json: string, payload: Uint8Arra
     throw new DisocclusionSidecarError(`sidecar metadata is not JSON: ${String(error)}`);
   }
   if (meta.format !== DISOCCLUSION_SIDECAR_FORMAT) throw new DisocclusionSidecarError(`unexpected format '${meta.format}'`);
-  if (meta.version !== 1 && meta.version !== 2) throw new DisocclusionSidecarError(`unsupported version ${meta.version}`);
-  if ((meta.version === 2) !== !!meta.stamps) throw new DisocclusionSidecarError('version 2 carries stamp rows, version 1 does not');
+  if (meta.version !== 1 && meta.version !== 2 && meta.version !== 3) throw new DisocclusionSidecarError(`unsupported version ${String(meta.version)}`);
+  if (meta.version === 1 && meta.stamps) throw new DisocclusionSidecarError('version 1 carries no stamp rows');
+  if (meta.version === 2 && !meta.stamps) throw new DisocclusionSidecarError('version 2 carries stamp rows');
+  if ((meta.version === 3) !== !!meta.relied) throw new DisocclusionSidecarError('version 3 carries relied-on blocker rows, earlier versions do not');
   if (meta.experimental !== true) throw new DisocclusionSidecarError('sidecar must be marked experimental');
   assertFinite(meta, 'meta');
   const { world, payload: p, domains } = meta;
@@ -220,7 +289,13 @@ export async function decodeDisocclusionSidecar(json: string, payload: Uint8Arra
   if (p.wordsPerRow !== wordsPerRow) throw new DisocclusionSidecarError(`wordsPerRow ${p.wordsPerRow} != ${wordsPerRow}`);
   const stampWords = meta.stamps ? meta.stamps.wordsPerRow : 0;
   if (meta.stamps && stampWords !== Math.ceil(meta.stamps.count / 32)) throw new DisocclusionSidecarError('stamp wordsPerRow does not match the stamp count');
-  if (p.wordCount !== (wordsPerRow + stampWords) * domains.length) throw new DisocclusionSidecarError('payload word count does not match domains');
+  const reliedClusterWords = meta.relied ? meta.relied.clusterWordsPerRow : 0;
+  if (meta.relied && reliedClusterWords !== Math.ceil(meta.relied.clusters / 32)) {
+    throw new DisocclusionSidecarError('relied cluster wordsPerRow does not match the cluster count');
+  }
+  const reliedStampWords = meta.relied ? stampWords : 0;
+  const perDomain = wordsPerRow + stampWords + reliedClusterWords + reliedStampWords;
+  if (p.wordCount !== perDomain * domains.length) throw new DisocclusionSidecarError('payload word count does not match domains');
   if (payload.byteLength !== p.wordCount * 4) throw new DisocclusionSidecarError(`payload is ${payload.byteLength} bytes, expected ${p.wordCount * 4}`);
   const hash = await sha256Hex(payload);
   if (hash !== p.sha256) throw new DisocclusionSidecarError('payload hash mismatch');
@@ -228,6 +303,15 @@ export async function decodeDisocclusionSidecar(json: string, payload: Uint8Arra
     if (d.wordOffset !== i * wordsPerRow) throw new DisocclusionSidecarError(`domain ${d.id} has wordOffset ${d.wordOffset}`);
     if (meta.stamps && d.stampWordOffset !== wordsPerRow * domains.length + i * stampWords) {
       throw new DisocclusionSidecarError(`domain ${d.id} has stampWordOffset ${d.stampWordOffset}`);
+    }
+    if (meta.relied) {
+      const clusterBase = (wordsPerRow + stampWords) * domains.length;
+      if (d.reliedClusterWordOffset !== clusterBase + i * reliedClusterWords) {
+        throw new DisocclusionSidecarError(`domain ${d.id} has reliedClusterWordOffset ${d.reliedClusterWordOffset}`);
+      }
+      if (meta.stamps && d.reliedStampWordOffset !== clusterBase + reliedClusterWords * domains.length + i * stampWords) {
+        throw new DisocclusionSidecarError(`domain ${d.id} has reliedStampWordOffset ${d.reliedStampWordOffset}`);
+      }
     }
     for (let a = 0; a < 3; a++) {
       if (!(d.capture.sourceMax[a]! > d.capture.sourceMin[a]!)) throw new DisocclusionSidecarError(`domain ${d.id} has an empty source box`);
@@ -247,6 +331,18 @@ export async function decodeDisocclusionSidecar(json: string, payload: Uint8Arra
     const padding = ~((1 << stampTail) - 1) >>> 0;
     domains.forEach(d => {
       if ((words[d.stampWordOffset! + stampWords - 1]! & padding) !== 0) throw new DisocclusionSidecarError(`domain ${d.id} sets stamp padding bits`);
+      if (meta.relied && (words[d.reliedStampWordOffset! + stampWords - 1]! & padding) !== 0) {
+        throw new DisocclusionSidecarError(`domain ${d.id} sets relied stamp padding bits`);
+      }
+    });
+  }
+  const clusterTail = meta.relied ? meta.relied.clusters % 32 : 0;
+  if (meta.relied && clusterTail) {
+    const padding = ~((1 << clusterTail) - 1) >>> 0;
+    domains.forEach(d => {
+      if ((words[d.reliedClusterWordOffset! + reliedClusterWords - 1]! & padding) !== 0) {
+        throw new DisocclusionSidecarError(`domain ${d.id} sets relied cluster padding bits`);
+      }
     });
   }
   return { meta, words };
@@ -293,6 +389,7 @@ export async function verifySidecarInputs(
     // Placed objects are most of a town's blockers (Crownward: 4.1 M of
     // 4.3 M triangles); unverified, the row may hide what an edit exposed.
     if (!files.prototypes) return 'placed-object blockers not verified';
+    if (sidecar.meta.stamps && !inputs.zone.prototypes?.lods) return 'stamp targets were baked without their LOD chains (rebake)';
     const { resolve, ...options } = files.prototypes;
     const prototypes = await verifyPrototypeManifest(world, inputs.zone.prototypes, resolve, options);
     if (prototypes) return prototypes;

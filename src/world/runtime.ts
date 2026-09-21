@@ -86,6 +86,8 @@ export type ShadoWorldObjectLodSelection = {
   thresholds: readonly number[];
   /** How many COARSER levels this prototype has. 0 means model only. */
   levelsFor: (prototype: number) => number;
+  /** Byte per stamp: 1 keeps that stamp at level 0 whatever its size. */
+  pinned?: Uint8Array | null;
 };
 
 /**
@@ -171,7 +173,8 @@ function splitByLevel(
         ? (stamps.radius[stamp] * lod.pixelsPerRadius) / distance
         : Number.POSITIVE_INFINITY;
     let level = 0;
-    while (level < deepest && pixels <= lod.thresholds[level]!) level += 1;
+    // A pinned stamp stays at full detail (a blocker the PVS rows rely on).
+    if (!lod.pinned?.[stamp]) while (level < deepest && pixels <= lod.thresholds[level]!) level += 1;
     levelOf[index] = level;
     if (level > highest) highest = level;
   });
