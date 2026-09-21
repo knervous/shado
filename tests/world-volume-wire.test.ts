@@ -208,3 +208,25 @@ describe('v2 volumes survive the wire', () => {
     expect(select(8, 500, 8)).toBe(0);
   });
 });
+
+describe('a render cell past the geometry bounds', () => {
+  it('gets a region instead of -1', () => {
+    /*
+     * Reported by the disocclusion prototype: geometry ending exactly on a
+     * region edge -- a +X box face at x = 64 with 8-unit regions and tiles --
+     * starts a render tile at 64 whose centre, 68, is past the bounds. The
+     * grid was sized from the bounds alone and that cell got region -1,
+     * which validation refused.
+     */
+    const face = surface('edge', [[64, 0, 0, 64, 0, 8, 64, 8, 8, 64, 8, 0], slab(0, 64, 0)]);
+    const world = compileShadoWorld([face], {
+      name: 'edge-cell',
+      tileSize: 8,
+      visibilityRegionSize: 8,
+      maxClusterTriangles: 2,
+    });
+    stampShadoWorldIntegrity(world);
+    expect(world.visibility!.cellRegion.every((region) => region >= 0)).toBe(true);
+    expect(() => validateShadoWorldPackage(world)).not.toThrow();
+  });
+});

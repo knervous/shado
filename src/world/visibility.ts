@@ -410,8 +410,21 @@ function* compileVisibilityCore(
   const maxDistance = input.maxDistance;
   const originX = Math.floor(input.bounds.min[0] / size) * size;
   const originZ = Math.floor(input.bounds.min[2] / size) * size;
-  const width = Math.max(1, Math.ceil((input.bounds.max[0] - originX) / size));
-  const height = Math.max(1, Math.ceil((input.bounds.max[2] - originZ) / size));
+  /*
+   * The grid covers the geometry bounds AND every render cell's centre. A
+   * face lying exactly on the max edge starts a render tile there whose
+   * centre is half a tile beyond the bounds -- and a grid sized from the
+   * bounds alone gave that cell region -1, which the validator then refused.
+   * Cells can only ever lie at or after the origin, so only the far edges
+   * need extending.
+   */
+  let width = Math.max(1, Math.ceil((input.bounds.max[0] - originX) / size));
+  let height = Math.max(1, Math.ceil((input.bounds.max[2] - originZ) / size));
+  for (const [x, z] of input.renderCellCenters) {
+    // Only a centre actually past the last column or row extends the grid.
+    width = Math.max(width, Math.floor((x - originX) / size) + 1);
+    height = Math.max(height, Math.floor((z - originZ) / size) + 1);
+  }
   const regionCount = width * height;
   const regionForPoint = (x: number, z: number): number => {
     const localX = Math.floor((x - originX) / size);
