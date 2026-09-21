@@ -57,7 +57,16 @@ export type DisocclusionSidecarMeta = {
       prototypesSha256: string;
       prototypeFiles: number;
       releaseRevision?: string;
+      /**
+       * Every placed-object prototype the stamps reference, as content (V3).
+       * A reader re-hashes what IT resolves for each source; any difference,
+       * or a file it cannot verify, makes the sidecar unsupported. Absent on
+       * sidecars baked before V3, which are therefore unsupported too.
+       */
+      prototypes?: DisocclusionPrototypeManifest;
     };
+    /** Clusters whose recovered frame disagreed with the package: admitted in every row, never blockers. */
+    suspectClusters?: number[];
   };
   settings: DisocclusionSettings;
   domains: DisocclusionDomainMeta[];
@@ -65,6 +74,66 @@ export type DisocclusionSidecarMeta = {
 };
 
 export type DisocclusionSidecar = { meta: DisocclusionSidecarMeta; words: Uint32Array };
+
+export type DisocclusionPrototypeManifest = {
+  /** SHADO_OCCLUDER_ELIGIBILITY_REVISION the bake applied to these files. */
+  eligibilityRevision: string;
+  /** Sorted by source. sha256 of the DECOMPRESSED content; null = not found at bake time. */
+  files: Array<{ source: string; sha256: string | null }>;
+};
+
+/**
+ * Resolves a prototype source to the content the client actually loads
+ * (decompressed), or null when the client cannot find it.
+ */
+export type DisocclusionPrototypeResolver = (source: string) => Promise<Uint8Array | null>;
+
+/**
+ * Checks the bake's placed-object blockers against what this client
+ * resolves. Null when every prototype matches; otherwise the reason. `cache`
+ * keys content digests by `release|source` so a hot reload of the sidecar in
+ * the same asset release does not refetch or rehash anything.
+ */
+export async function verifyPrototypeManifest(
+  world: ShadoWorldSpatialPackage,
+  manifest: DisocclusionPrototypeManifest | undefined,
+  resolve: DisocclusionPrototypeResolver,
+  options: { eligibilityRevision: string; release?: string; cache?: Map<string, string | null> }
+): Promise<string | null> {
+  if (!manifest) return 'sidecar has no prototype manifest (baked before blocker validation)';
+  if (manifest.eligibilityRevision !== options.eligibilityRevision) {
+    return `occluder eligibility ${manifest.eligibilityRevision} != reader ${options.eligibilityRevision}`;
+  }
+  const referenced = [...new Set(world.objects?.prototypes.source ?? [])].sort();
+  const listed = manifest.files.map(file => file.source);
+  if (referenced.length !== listed.length || referenced.some((source, i) => source !== listed[i])) {
+    return 'prototype manifest does not cover the prototypes this world references';
+  }
+  for (const file of manifest.files) {
+    const key = `${options.release ?? ''}|${file.source}`;
+    let digest = options.cache?.get(key);
+    if (digest === undefined) {
+      let content: Uint8Array | null;
+      try {
+        content = await resolve(file.source);
+      } catch {
+        return `prototype ${file.source} could not be resolved to verify it`;
+      }
+      digest = content ? await sha256Hex(content) : null;
+      options.cache?.set(key, digest);
+    }
+    if (file.sha256 === null) {
+      // Missing at bake time, so it blocked nothing in the bake. Resolving
+      // now means the inputs drifted; refuse rather than argue which
+      // direction the drift is safe in.
+      if (digest !== null) return `prototype ${file.source} was missing at bake time but resolves now`;
+      continue;
+    }
+    if (digest === null) return `prototype ${file.source} does not resolve (blocker content unverified)`;
+    if (digest !== file.sha256) return `prototype ${file.source} content differs from the baked blocker`;
+  }
+  return null;
+}
 
 export async function sha256Hex(bytes: Uint8Array): Promise<string> {
   const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes as unknown as ArrayBuffer);
@@ -169,7 +238,17 @@ export async function clusterRegionDigest(world: ShadoWorldSpatialPackage): Prom
 export async function verifySidecarInputs(
   sidecar: DisocclusionSidecar,
   world: ShadoWorldSpatialPackage,
-  files: { spatial?: Uint8Array; glb?: Uint8Array } = {}
+  files: {
+    spatial?: Uint8Array;
+    glb?: Uint8Array;
+    /** Required for a zone bake: placed-object blockers are verified or the sidecar is unsupported. */
+    prototypes?: {
+      resolve: DisocclusionPrototypeResolver;
+      eligibilityRevision: string;
+      release?: string;
+      cache?: Map<string, string | null>;
+    };
+  } = {}
 ): Promise<string | null> {
   const shallow = sidecarMismatch(sidecar, world);
   if (shallow) return shallow;
@@ -180,6 +259,14 @@ export async function verifySidecarInputs(
   }
   if (inputs.zone && files.glb && inputs.zone.glbSha256 !== (await sha256Hex(files.glb))) {
     return 'world GLB bytes differ from the baked input';
+  }
+  if (inputs.zone) {
+    // Placed objects are most of a town's blockers (Crownward: 4.1 M of
+    // 4.3 M triangles); unverified, the row may hide what an edit exposed.
+    if (!files.prototypes) return 'placed-object blockers not verified';
+    const { resolve, ...options } = files.prototypes;
+    const prototypes = await verifyPrototypeManifest(world, inputs.zone.prototypes, resolve, options);
+    if (prototypes) return prototypes;
   }
   return null;
 }

@@ -57,6 +57,8 @@ export type DisocclusionPvsOptions = DisocclusionBakeOptions & {
   zone?: NonNullable<Meta['inputs']['zone']>;
   /** Called after each face with its timings. */
   onFace?: (id: string, timings: Record<string, number>) => void;
+  /** Target clusters admitted in every row whatever the raster says (suspect frames, V3). */
+  alwaysAdmitClusters?: readonly number[];
 };
 
 const bytesOf = (view: ArrayBufferView) => new Uint8Array(view.buffer, view.byteOffset, view.byteLength);
@@ -84,6 +86,9 @@ export async function bakeDisocclusionPvs(
       const result = await baker.capture(frame);
       const classifyStarted = performance.now();
       const classification = classifyTargets(frame, settings, result.layers, result.masks, geometry, targets);
+      for (const cluster of options.alwaysAdmitClusters ?? []) {
+        if (cluster >= 0 && cluster < targets) classification.admitted[cluster] = 1;
+      }
       const row = regionRow(world, classification.admitted);
       result.timings.classifyMs = performance.now() - classifyStarted;
       let regionsAdmitted = 0;
@@ -141,6 +146,7 @@ export async function bakeDisocclusionPvs(
       clusterRegionSha256: await clusterRegionDigest(world),
       settingsSha256: await sha256Hex(new TextEncoder().encode(JSON.stringify(settings))),
       ...(options.zone ? { zone: options.zone } : {}),
+      ...(options.alwaysAdmitClusters?.length ? { suspectClusters: [...options.alwaysAdmitClusters] } : {}),
     },
     settings,
     domains: domains.map(d => d.meta),

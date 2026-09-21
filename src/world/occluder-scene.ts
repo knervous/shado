@@ -234,6 +234,13 @@ export function readGlbPrimitives(bytes: Uint8Array): GlbPrimitive[] {
 }
 
 /**
+ * Names the rule set in `occluderEligibility` (and the stamp assembly that
+ * applies it). A bake records it; a reader built with different rules must
+ * not trust rows those rules produced. Bump on any change to what may block.
+ */
+export const SHADO_OCCLUDER_ELIGIBILITY_REVISION = 'occluder-eligibility-1';
+
+/**
  * Is this submesh allowed to hide things?
  *
  * Opacity is read from the material's alpha mode, which is the only statement

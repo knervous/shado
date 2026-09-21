@@ -69,6 +69,20 @@ export type ZoneBakeGeometryManifest = {
   baseExclusions: Record<string, number>;
   /** Clusters whose recovered triangles do not sit inside the package's cluster sphere. */
   frameMismatches: number;
+  /**
+   * Those clusters, named (pvs.md V3). Their triangles are NOT blockers (the
+   * recovered geometry disagrees with the package, so it cannot be trusted to
+   * hide anything) and the bake admits them in every row.
+   */
+  suspectClusters: Array<{
+    cluster: number;
+    primitive: string;
+    triangles: number;
+    center: [number, number, number];
+    radius: number;
+    /** Farthest recovered vertex from the package centre, in radii. */
+    worstDistanceRadii: number;
+  }>;
 };
 
 type GlbPart = {
@@ -150,6 +164,10 @@ export function zoneBakeGeometry(
 
   let blockerTargetTriangles = 0;
   let frameMismatches = 0;
+  const suspectClusters: ZoneBakeGeometryManifest['suspectClusters'] = [];
+  // Recover and check every cluster's frame first: a suspect cluster must not
+  // contribute a single blocker triangle.
+  const suspect = new Uint8Array(clusterCount);
   for (let c = 0; c < clusterCount; c++) {
     const part = matched[world.clusters.primitive[c]!]!;
     const base = partBase.get(part)!;
@@ -158,24 +176,45 @@ export function zoneBakeGeometry(
     const cx = world.clusters.centerX[c]!;
     const cy = world.clusters.centerY[c]!;
     const cz = world.clusters.centerZ[c]!;
-    const r2 = (world.clusters.radius[c]! * 1.01 + 0.01) ** 2;
-    let outside = false;
+    const radius = world.clusters.radius[c]!;
+    const r2 = (radius * 1.01 + 0.01) ** 2;
+    let worst2 = 0;
     for (let k = 0; k < count; k++) {
       const v = base + world.clusterIndices[first + k]!;
-      indices[triangleAt * 3 + (k % 3)] = v;
       const dx = positions[v * 3]! - cx;
       const dy = positions[v * 3 + 1]! - cy;
       const dz = positions[v * 3 + 2]! - cz;
-      if (dx * dx + dy * dy + dz * dz > r2) outside = true;
+      worst2 = Math.max(worst2, dx * dx + dy * dy + dz * dz);
+    }
+    if (worst2 > r2) {
+      suspect[c] = 1;
+      frameMismatches++;
+      suspectClusters.push({
+        cluster: c,
+        primitive: world.primitives[world.clusters.primitive[c]!]?.name ?? '?',
+        triangles: count / 3,
+        center: [cx, cy, cz],
+        radius,
+        worstDistanceRadii: Math.sqrt(worst2) / Math.max(radius, 1e-6),
+      });
+    }
+  }
+  for (let c = 0; c < clusterCount; c++) {
+    const part = matched[world.clusters.primitive[c]!]!;
+    const base = partBase.get(part)!;
+    const first = world.clusters.firstIndex[c]!;
+    const count = world.clusters.indexCount[c]!;
+    const blocks = part.exclusion === null && !suspect[c];
+    for (let k = 0; k < count; k++) {
+      indices[triangleAt * 3 + (k % 3)] = base + world.clusterIndices[first + k]!;
       if (k % 3 === 2) {
         triangleTarget[triangleAt] = c;
-        blocker[triangleAt] = part.exclusion === null ? 1 : 0;
+        blocker[triangleAt] = blocks ? 1 : 0;
         doubleSided[triangleAt] = part.doubleSided ? 1 : 0;
-        if (part.exclusion === null) blockerTargetTriangles++;
+        if (blocks) blockerTargetTriangles++;
         triangleAt++;
       }
     }
-    if (outside) frameMismatches++;
   }
   const pushBlocker = (source: { positions: ArrayLike<number>; indices: ArrayLike<number>; doubleSided?: boolean }) => {
     const base = pushVertices(source.positions);
@@ -225,6 +264,7 @@ export function zoneBakeGeometry(
       sidedness: { doubleSided: two, singleSided: blockerTotal - two },
       baseExclusions,
       frameMismatches,
+      suspectClusters,
     },
   };
 }
