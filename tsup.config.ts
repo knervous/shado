@@ -405,6 +405,8 @@ export default defineConfig({
     'video/node': 'src/video/node.ts',
     'video/cli': 'src/video/cli.ts',
     'world/index': 'src/world/index.ts',
+    'world/disocclusion/index': 'src/world/disocclusion/index.ts',
+    'world/disocclusion/bake': 'src/world/disocclusion/bake-entry.ts',
     cli: 'src/cli.ts',
   },
   // NO_DTS=1 remains useful for fast local JS-only builds. Release builds

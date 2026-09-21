@@ -204,6 +204,18 @@
       "types": "./dist/world/hiz/index.d.ts",
       "import": "./dist/world/hiz/index.js",
       "default": "./dist/world/hiz/index.js"
+    },
+    "./world/disocclusion": {
+      "source": "./src/world/disocclusion/index.ts",
+      "types": "./dist/world/disocclusion/index.d.ts",
+      "import": "./dist/world/disocclusion/index.js",
+      "default": "./dist/world/disocclusion/index.js"
+    },
+    "./world/disocclusion/bake": {
+      "source": "./src/world/disocclusion/bake-entry.ts",
+      "types": "./dist/world/disocclusion/bake.d.ts",
+      "import": "./dist/world/disocclusion/bake.js",
+      "default": "./dist/world/disocclusion/bake.js"
     }
   },
   "bin": {
