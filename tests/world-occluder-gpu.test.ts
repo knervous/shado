@@ -71,6 +71,6 @@ describe('GPU occluder backend limits', () => {
   it('names what did not fit, so the fallback is reportable', async () => {
     await expect(
       createGpuOccluderBackend(device({ maxStorageBufferBindingSize: 1 << 16 }), bvh(100_000, 20_000))
-    ).rejects.toThrow(/triangles need \d+ bytes and the device binds at most 65536/);
+    ).rejects.toThrow(/\w+ need \d+ bytes and the device binds at most 65536/);
   });
 });

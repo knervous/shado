@@ -70,6 +70,8 @@ type Occluders = {
   };
   readonly nodeVisits: () => number;
   readonly references: number;
+  /** The hierarchy itself, when this is one; a GPU backend uploads it. */
+  readonly bvh?: OccluderBvh;
 };
 
 function buildOccluders(
@@ -106,6 +108,7 @@ function buildOccluders(
     counters: bvh.counters,
     nodeVisits: () => bvh.counters.nodeVisits,
     references: bvh.nodeCount,
+    bvh,
   };
 }
 
@@ -301,9 +304,108 @@ export type ShadoWorldSourceTopology = {
   portals: ReadonlyArray<{ a: string; b: string }>;
 };
 
-export function compileShadoWorldVisibility(
+/**
+ * One pair the bake needs answered: is every segment from `forward[0]`'s
+ * points to `forward[1]`'s blocked, and likewise for `back`? A null direction
+ * is one that could not be sampled and counts as blocked, exactly as the
+ * inline test always treated it.
+ */
+export type ShadoVisibilityPairTest = {
+  readonly forward: readonly [Float64Array, Float64Array] | null;
+  readonly back: readonly [Float64Array, Float64Array] | null;
+};
+
+/** A batch of pair tests, and the occluders they are to be answered against. */
+export type ShadoVisibilityPairBatch = {
+  readonly pairs: readonly ShadoVisibilityPairTest[];
+  readonly flat: OccluderBvh | null;
+  readonly instanced: InstancedOccluders | null;
+  /** The CPU answer for one pair, for a backend that must confirm its own. */
+  readonly cpuOccluded: (index: number) => boolean;
+};
+
+/**
+ * Answers pair batches for the bake. The CPU is the reference; anything else
+ * may only ever admit MORE than the CPU would -- an occluded answer it gives
+ * has to have been confirmed by `cpuOccluded` first.
+ */
+export type ShadoVisibilitySegmentBackend = {
+  readonly kind: string;
+  /**
+   * `occluded`: 1 where the pair is occluded, 0 where it must be admitted.
+   * `segments`: segment queries the backend evaluated OUTSIDE the CPU
+   * structures' own counters, so the bake's segment budget is charged for
+   * them too.
+   */
+  resolve(batch: ShadoVisibilityPairBatch): Promise<{ occluded: Uint8Array; segments: number }>;
+};
+
+type PairAnswer = { occluded: Uint8Array; segments: number };
+
+/** Pairs per batch: large enough to fill a dispatch, small enough to stop promptly. */
+const PAIR_BATCH = 512;
+
+type VisibilityResult = NonNullable<ShadoWorldSpatialPackage['visibility']>;
+
+/** The CPU's answer for one pair: the exact test the inline loop always ran. */
+function cpuPairOccluded(
+  grid: Occluders | null,
+  placed: InstancedOccluders | null,
+  pair: ShadoVisibilityPairTest
+): boolean {
+  const forwardBlocked = !pair.forward || !anyClearSegment(grid, placed, pair.forward[0], pair.forward[1]);
+  if (!forwardBlocked) return false;
+  return !pair.back || !anyClearSegment(grid, placed, pair.back[0], pair.back[1]);
+}
+
+/**
+ * Compiles visibility rows, answering every occlusion test on the CPU.
+ *
+ * The synchronous entry every existing caller uses. Its rows and counters are
+ * exactly those of the inline loop it replaces: batches are answered pair by
+ * pair with the same early exits.
+ */
+export function compileShadoWorldVisibility(input: ShadoWorldVisibilityCompileInput): VisibilityResult {
+  const core = compileVisibilityCore(input);
+  let step = core.next(undefined as never);
+  while (!step.done) {
+    const batch = step.value;
+    const out = new Uint8Array(batch.pairs.length);
+    for (let index = 0; index < out.length; index += 1) out[index] = batch.cpuOccluded(index) ? 1 : 0;
+    // The CPU's queries are already on its structures' counters.
+    step = core.next({ occluded: out, segments: 0 });
+  }
+  return step.value;
+}
+
+/**
+ * The same compiler, with occlusion tests answered by an injected backend.
+ *
+ * Not a second compiler: it drives the one core above, so sampling, budgets,
+ * volumes, the flood and the output are shared. Only who answers the pair
+ * batches differs.
+ */
+export async function compileShadoWorldVisibilityWith(
+  input: ShadoWorldVisibilityCompileInput,
+  backend: ShadoVisibilitySegmentBackend
+): Promise<VisibilityResult> {
+  const core = compileVisibilityCore(input);
+  let step = core.next(undefined as never);
+  while (!step.done) {
+    const answer = await backend.resolve(step.value);
+    if (answer.occluded.length !== step.value.pairs.length) {
+      throw new RangeError(
+        `Segment backend '${backend.kind}' answered ${answer.occluded.length} pairs for a batch of ${step.value.pairs.length}`
+      );
+    }
+    step = core.next(answer);
+  }
+  return step.value;
+}
+
+function* compileVisibilityCore(
   input: ShadoWorldVisibilityCompileInput
-): NonNullable<ShadoWorldSpatialPackage['visibility']> {
+): Generator<ShadoVisibilityPairBatch, VisibilityResult, PairAnswer> {
   const size = input.regionSize;
   const maxDistance = input.maxDistance;
   const originX = Math.floor(input.bounds.min[0] / size) * size;
@@ -842,6 +944,43 @@ export function compileShadoWorldVisibility(
   const pairLoopStarted = clock();
   let pairsAdmittedAfterStop = 0;
   const geometry = { originX, originZ, size, width, height, maxDistance };
+  const pendingPairs: ShadoVisibilityPairTest[] = [];
+  const pendingSources: number[] = [];
+  const pendingTargets: number[] = [];
+  const flatBvh = grid?.bvh ?? null;
+  /*
+   * Answers the queued pairs and applies them. Occluded pairs stay clear;
+   * everything else -- including anything a backend was unsure of -- is set.
+   */
+  /*
+   * The segment budget is charged when a pair is QUEUED, at its worst case,
+   * and trued up when the batch is answered. Charging only on answer let a
+   * whole batch through past a budget of one query.
+   */
+  let queuedSegments = 0;
+  let externalSegments = 0;
+  const pairCost = (pair: ShadoVisibilityPairTest): number =>
+    (pair.forward ? (pair.forward[0].length / 3) * (pair.forward[1].length / 3) : 0) +
+    (pair.back ? (pair.back[0].length / 3) * (pair.back[1].length / 3) : 0);
+  const spentSegments = (): number => segmentQueryCount(grid, placed) + externalSegments + queuedSegments;
+  const flushPairs = function* (): Generator<ShadoVisibilityPairBatch, void, PairAnswer> {
+    if (!pendingPairs.length) return;
+    const pairs = pendingPairs.splice(0);
+    const sources = pendingSources.splice(0);
+    const targetsOf = pendingTargets.splice(0);
+    const answer: PairAnswer = yield {
+      pairs,
+      flat: flatBvh,
+      instanced: placed,
+      cpuOccluded: (index: number) => cpuPairOccluded(grid, placed, pairs[index]!),
+    };
+    queuedSegments = 0;
+    externalSegments += answer.segments;
+    for (let index = 0; index < pairs.length; index += 1) {
+      if (answer.occluded[index] === 1) occluded++;
+      else setVisible(sources[index]!, targetsOf[index]!);
+    }
+  };
   for (let source = 0; source < volumeCount; source++) {
     const from = volumeRegion[source]!;
     for (let to = 0; to < regionCount; to++) {
@@ -856,7 +995,7 @@ export function compileShadoWorldVisibility(
          * stopped, every remaining pair is ADMITTED untested, so a truncated
          * bake is a worse PVS and never an unsafe one.
          */
-        if (check('pair-loop', segmentQueryCount(grid, placed))) {
+        if (check('pair-loop', spentSegments())) {
           pairsAdmittedAfterStop++;
         } else {
           /*
@@ -881,20 +1020,28 @@ export function compileShadoWorldVisibility(
           const canBack = back !== null && forward !== null;
           if (canForward || canBack) {
             occlusionTested++;
-            const forwardBlocked =
-              !canForward || !anyClearSegment(grid, placed, eyePoints!, target!);
-            const backBlocked =
-              !canBack || !anyClearSegment(grid, placed, back!, forward!);
-            if (forwardBlocked && backBlocked) {
-              occluded++;
-              continue;
-            }
+            /*
+             * Queued, not answered here. Whoever drives this compiler answers
+             * a whole batch at once -- the CPU pair by pair with its early
+             * exits, or a backend in one dispatch -- and the bit is decided
+             * when the answer comes back.
+             */
+            pendingPairs.push({
+              forward: canForward ? [eyePoints!, target!] : null,
+              back: canBack ? [back!, forward!] : null,
+            });
+            pendingSources.push(source);
+            pendingTargets.push(to);
+            queuedSegments += pairCost(pendingPairs[pendingPairs.length - 1]!);
+            if (pendingPairs.length >= PAIR_BATCH) yield* flushPairs();
+            continue;
           }
         }
       }
       setVisible(source, to);
     }
   }
+  yield* flushPairs();
   /*
    * The union row per region: what a camera at a height no volume covers is
    * allowed to see. It admits everything any volume in that column admits,
@@ -962,7 +1109,8 @@ export function compileShadoWorldVisibility(
         instancedUniqueTriangles: placed?.uniqueTriangles ?? 0,
         instancedPlacedTriangles: placed?.placedTriangles ?? 0,
         indexTrackedBytes: (grid?.trackedBytes ?? 0) + (ground && ground !== grid ? ground.trackedBytes : 0),
-        segmentQueries: segmentQueryCount(grid, placed),
+        // CPU structures' own queries plus whatever a backend evaluated.
+        segmentQueries: segmentQueryCount(grid, placed) + externalSegments,
         blockedQueries: (grid?.counters.blockedQueries ?? 0) + (placed?.counters.blockedQueries ?? 0),
         columnQueries: ground?.counters.columnQueries ?? 0,
         nodeVisits: (grid ? grid.nodeVisits() : 0) + (placed?.counters.nodeVisits ?? 0),
