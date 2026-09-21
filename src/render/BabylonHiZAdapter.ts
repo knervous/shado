@@ -374,6 +374,11 @@ export class BabylonHiZAdapter {
     this.bindInstancedMaterials(false);
   }
 
+  /** Bumped by every setTargets (debug: lets a reader wait for a stable set). */
+  public get targetsGeneration(): number {
+    return this.targetGeneration;
+  }
+
   /** Candidate index -> caller id, for decoding debug flags. */
   public get ids(): readonly number[] {
     return this.candidateIds;
