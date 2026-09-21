@@ -199,12 +199,6 @@
       "require": "./dist/world/index.cjs",
       "default": "./dist/world/index.js"
     },
-    "./world/hiz": {
-      "source": "./src/world/hiz/index.ts",
-      "types": "./dist/world/hiz/index.d.ts",
-      "import": "./dist/world/hiz/index.js",
-      "default": "./dist/world/hiz/index.js"
-    },
     "./world/disocclusion": {
       "source": "./src/world/disocclusion/index.ts",
       "types": "./dist/world/disocclusion/index.d.ts",
@@ -216,6 +210,12 @@
       "types": "./dist/world/disocclusion/bake.d.ts",
       "import": "./dist/world/disocclusion/bake.js",
       "default": "./dist/world/disocclusion/bake.js"
+    },
+    "./world/hiz": {
+      "source": "./src/world/hiz/index.ts",
+      "types": "./dist/world/hiz/index.d.ts",
+      "import": "./dist/world/hiz/index.js",
+      "default": "./dist/world/hiz/index.js"
     }
   },
   "bin": {
@@ -261,10 +261,10 @@
     }
   },
   "devDependencies": {
-    "@babylonjs/core": "9.18.0",
-    "@babylonjs/ktx2decoder": "^9.18.0",
+    "@babylonjs/core": "9.27.1",
+    "@babylonjs/ktx2decoder": "^9.27.1",
     "@babylonjs/lite": "^1.14.0",
-    "@babylonjs/loaders": "9.18.0",
+    "@babylonjs/loaders": "9.27.1",
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
     "@jest/globals": "^30.2.0",
     "@jridgewell/sourcemap-codec": "^1.5.0",
