@@ -134,6 +134,24 @@ export class ShadoWorldHiZ {
   public get lastErrors(): readonly string[] {
     return this.errors;
   }
+  /**
+   * GPU time of the last frame's Hi-Z compute passes, in ms, from Babylon's
+   * per-dispatch timestamp queries; null when the engine was not measuring
+   * (engine.enableGPUTimingMeasurements must be on before this was built, and
+   * the device needs 'timestamp-query').
+   */
+  public gpuComputeMs(): number | null {
+    const shaders = [this.seed, ...this.reducers, this.reset, this.cull, this.finalize];
+    let total = 0;
+    for (const shader of shaders) {
+      const counter = (shader as any).gpuTimeInFrame?.counter;
+      if (!counter) return null;
+      total += counter.current ?? 0;
+    }
+    // Babylon's timestamp counters are nanoseconds.
+    return total / 1e6;
+  }
+
   public segmentOffset(batch: number): number {
     return this.segments[batch] ?? 0;
   }
@@ -312,14 +330,18 @@ export class ShadoWorldHiZ {
 
   /** Debug only: resolves a copy of the per-candidate flags a frame later. */
   public async readFlags(): Promise<Uint32Array> {
+    // The candidate set may be rebuilt while this is in flight; answer for
+    // the buffer that was read, never index past it.
+    const count = this.candidateCount;
     const view = await this.flagsBuffer.read();
-    return new Uint32Array(view.buffer, view.byteOffset, this.candidateCount);
+    return new Uint32Array(view.buffer, view.byteOffset, Math.min(count, Math.floor(view.byteLength / 4)));
   }
 
   /** Debug only. */
   public async readDrawArgs(): Promise<Uint32Array> {
+    const words = this.batchCount * SHADO_HIZ_DRAW_ARGS_WORDS;
     const view = await this.drawArgsBuffer.read();
-    return new Uint32Array(view.buffer, view.byteOffset, this.batchCount * SHADO_HIZ_DRAW_ARGS_WORDS);
+    return new Uint32Array(view.buffer, view.byteOffset, Math.min(words, Math.floor(view.byteLength / 4)));
   }
 
   /** Debug only: level 0 of the pyramid (the seeded depth), row-major. */

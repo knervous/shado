@@ -82,6 +82,14 @@ export interface BabylonHiZStatus {
   readonly depthRenders: number;
   /** Hi-Z depth targets registered on the camera: 1 while on, 0 while off. */
   readonly depthTargets: number;
+  /**
+   * Per-frame cost, exponential averages over recent frames. CPU is encode
+   * time on the main thread (depth prepass render call; cull dispatches +
+   * argument copies). GPU compute is timestamp-measured when available;
+   * Babylon exposes no per-render-target timestamps, so the depth prepass's
+   * GPU time is not separable (null here, always).
+   */
+  readonly cost: { cpuDepthMs: number; cpuCullMs: number; gpuComputeMs: number | null; gpuDepthMs: null };
   readonly convention: 'normal' | 'reversed';
   readonly topLeftOrigin: boolean;
   readonly errors: readonly string[];
@@ -128,6 +136,11 @@ export class BabylonHiZAdapter {
   private depthReady = false;
   /** Depth-prepass renders since construction (V2: zero while off). */
   private depthRenders = 0;
+  private depthStartedAt = 0;
+  /** Bumped by setTargets; debug readbacks spanning a rebuild are stale. */
+  private targetGeneration = 0;
+  private costDepth = 0;
+  private costCull = 0;
   /** Occluder submeshes the depth pass draws, for the readiness sweep. */
   private occluderSubMeshes: Array<{ subMesh: SubMesh; instanced: boolean }> = [];
   private readyCursor = 0;
@@ -138,6 +151,20 @@ export class BabylonHiZAdapter {
    * targets y-flipped unless the wrapper sets `_disableEngineYFlip`.
    */
   public topLeftOrigin = false;
+  /**
+   * Profiling only: stop the per-frame sequence after a stage to attribute
+   * cost. 'depth' renders the prepass and nothing else; 'compute' also runs
+   * the passes but attaches nothing (draws stay ordinary); 'full' is normal.
+   * Anything but 'full' culls nothing.
+   */
+  public debugStage: 'full' | 'depth' | 'compute' = 'full';
+  /**
+   * Mesh targets drawing fewer triangles than this (index count / 3 x
+   * instances, this frame) stay on the ordinary draw. Every indirect draw has
+   * a fixed GPU cost -- measured on Crownward at ~7 ms for ~1,700 of them --
+   * so culling a small mesh can cost more than drawing it.
+   */
+  public minTargetTriangles = 0;
   /** Depth convention; follows engine.useReverseDepthBuffer. */
   public convention: 'normal' | 'reversed' = 'normal';
 
@@ -230,6 +257,7 @@ export class BabylonHiZAdapter {
    */
   public setTargets(meshes: readonly BabylonHiZMeshTarget[], instanced: readonly BabylonHiZInstancedTarget[] = []): void {
     if (!this.hiz) return;
+    this.targetGeneration++;
     this.detachAll();
     for (const entry of this.instanced) entry.matrices.dispose();
     this.instanced = [];
@@ -344,6 +372,12 @@ export class BabylonHiZAdapter {
       lastRun: this.lastRun,
       depthSize: [size?.width ?? 0, size?.height ?? 0],
       depthRenders: this.depthRenders,
+      cost: {
+        cpuDepthMs: this.costDepth,
+        cpuCullMs: this.costCull,
+        gpuComputeMs: this.hiz?.gpuComputeMs() ?? null,
+        gpuDepthMs: null,
+      },
       depthTargets: this.camera.customRenderTargets.filter((target) => (target as any).__shadoHiZ).length,
       convention: this.convention,
       topLeftOrigin: this.topLeftOrigin,
@@ -381,6 +415,10 @@ export class BabylonHiZAdapter {
       this.depthMatrix.set(this.scene.getTransformMatrix().m);
       this.depthFrame = this.engine.frameId;
       this.depthRenders++;
+      this.depthStartedAt = performance.now();
+    });
+    map.onAfterRenderObservable.add(() => {
+      this.costDepth = ema(this.costDepth, performance.now() - this.depthStartedAt);
     });
     // Not registered in scene._depthRenderer (that slot belongs to whatever
     // enableDepthRenderer() the game uses): a custom target of THIS camera
@@ -411,6 +449,62 @@ export class BabylonHiZAdapter {
       this.reason = 'mode off';
       return;
     }
+    const began = performance.now();
+    try {
+      this.cullForDraw();
+    } finally {
+      this.costCull = ema(this.costCull, performance.now() - began);
+    }
+  }
+
+  /**
+   * Debug only (a readback a frame or two late; nothing on the render path
+   * waits for it): the mesh targets the last cull rejected, and the triangles
+   * Babylon submitted for enabled mesh targets vs. what the cull let through.
+   */
+  public async debugCull(): Promise<{
+    rejected: Mesh[];
+    targetTriangles: number;
+    submittedTriangles: number;
+  } | 'stale' | null> {
+    const hiz = this.hiz;
+    if (!hiz || this.status().actual !== 'hiz') return null;
+    const generation = this.targetGeneration;
+    const [flags, args] = await Promise.all([hiz.readFlags(), hiz.readDrawArgs()]);
+    // Targets rebuilt while reading (objects streaming): these flags describe
+    // a candidate set that no longer exists.
+    if (generation !== this.targetGeneration) return 'stale';
+    const rejected = new Set<Mesh>();
+    let targetTriangles = 0;
+    let submittedTriangles = 0;
+    for (const binding of this.bindings) {
+      if (binding.kind !== 'mesh' || binding.mesh.isDisposed() || !binding.mesh.isEnabled()) continue;
+      const triangles = (binding.subMesh.indexCount / 3) * binding.babylonInstances;
+      targetTriangles += triangles;
+      // Only an attached draw context actually draws from the arguments;
+      // a released one (below minTargetTriangles, shared wrapper...) draws
+      // everything whatever the cull said.
+      if (!binding.context) {
+        submittedTriangles += triangles;
+        continue;
+      }
+      const drawn = args[binding.batch * SHADO_HIZ_DRAW_ARGS_WORDS + 1] ?? binding.babylonInstances;
+      submittedTriangles += (binding.subMesh.indexCount / 3) * Math.min(drawn, binding.babylonInstances);
+      if (binding.candidate >= 0 && flags[binding.candidate] === 0) rejected.add(binding.mesh);
+    }
+    return { rejected: [...rejected], targetTriangles, submittedTriangles };
+  }
+
+  private cullForDraw(): void {
+    if (this.debugStage === 'depth') {
+      this.detachAll();
+      this.reason = 'profiling: depth prepass only';
+      return;
+    }
+    if (this.mode !== 'hiz') {
+      this.reason = 'mode off';
+      return;
+    }
     if (!this.bindings.length) {
       this.reason = 'no targets';
       return;
@@ -434,12 +528,17 @@ export class BabylonHiZAdapter {
       worldEpoch: 0,
       opaqueEpoch: 0,
     };
-    const run = this.hiz.run(map ?? null, view, admit);
+    const run = this.hiz!.run(map ?? null, view, admit);
     this.lastRun = run;
     if (!run.complete) {
       // A pass is still compiling: last frame's arguments would be stale.
       this.detachAll();
       this.reason = 'compute passes not ready';
+      return;
+    }
+    if (this.debugStage === 'compute') {
+      this.detachAll();
+      this.reason = 'profiling: depth + compute, nothing attached';
       return;
     }
     this.reason = run.admitAll ? `admit-all: ${run.reason}` : 'culling';
@@ -468,6 +567,10 @@ export class BabylonHiZAdapter {
           continue;
         }
         this.syncMesh(binding);
+        if ((binding.subMesh.indexCount / 3) * binding.babylonInstances < this.minTargetTriangles) {
+          this.release(binding);
+          continue;
+        }
       }
       const wrapper = perSubMesh
         ? (binding.subMesh as any)._getDrawWrapper(passId)
@@ -555,6 +658,10 @@ export class BabylonHiZAdapter {
 function thinInstanceCount(mesh: Mesh): number {
   const count = (mesh as any).thinInstanceCount as number | undefined;
   return count && count > 0 ? count : 1;
+}
+
+function ema(previous: number, sample: number): number {
+  return previous === 0 ? sample : previous * 0.9 + sample * 0.1;
 }
 
 function sameMatrix(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
