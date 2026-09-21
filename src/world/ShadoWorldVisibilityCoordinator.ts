@@ -14,6 +14,12 @@ import {
   type ShadoVisibilityWorkerPort,
 } from './ShadoEntityVisibilityWorker';
 
+/**
+ * How close to a band edge counts as ON it. A camera resting on a floor sits
+ * at the edge by construction, and float noise decides which side it lands.
+ */
+const SOURCE_BAND_EPSILON = 1e-3;
+
 export const ShadoVisibilityBits = {
   Pvs: 1 << 0,
   Geometry: 1 << 1,
@@ -572,16 +578,53 @@ export class ShadoWorldVisibilityCoordinator {
    * any volume in the column admits. Falling back costs draw calls; guessing
    * a volume would cost a hole.
    */
-  public locateSourceRow(x: number, y: number, z: number, region = this.locateRegion(x, z)): number {
-    const volumes = this.world.visibility?.volumes;
-    if (!volumes || region < 0) return region;
-    for (let volume = 0; volume < volumes.count; volume += 1) {
-      if (volumes.region[volume] !== region) continue;
-      if (y >= volumes.minY[volume]! && y < volumes.maxY[volume]!) return volume;
+  /**
+   * The source row a camera at (x, y, z) answers from.
+   *
+   * v1: the region's row, exactly as before. v2: the band that contains y,
+   * found by binary search within that region's own volumes -- or the
+   * region's UNION row whenever more than one band could apply or none does:
+   *
+   * - y outside the package's supported camera domain;
+   * - y on a band edge, where a camera is in both;
+   * - a vertical envelope (camera motion over the result's lifetime, or an
+   *   uncertain eye height) that reaches into a neighbouring band.
+   *
+   * The union row admits everything any of the region's bands admits, so it
+   * can cost draws and can never hide what one of them would show. Picking
+   * the first band that matched, because it came first in an array, is the
+   * alternative this replaces.
+   */
+  public locateSourceRow(
+    x: number,
+    y: number,
+    z: number,
+    region = this.locateRegion(x, z),
+    verticalEnvelope = 0
+  ): number {
+    const visibility = this.world.visibility;
+    const volumes = visibility?.volumes;
+    if (!visibility || !volumes || region < 0) return region;
+    const regionCount = visibility.width * visibility.height;
+    const union = volumes.count + Math.min(region, Math.max(0, regionCount - 1));
+    const domain = visibility.sourceDomain;
+    const offsets = volumes.regionOffset;
+    if (!domain || !offsets || region >= regionCount) return union;
+    if (!Number.isFinite(y) || y < domain.minY || y >= domain.maxY) return union;
+    const envelope = Math.max(0, verticalEnvelope) + SOURCE_BAND_EPSILON;
+    let low = offsets[region]!;
+    let high = offsets[region + 1]! - 1;
+    while (low <= high) {
+      const middle = (low + high) >> 1;
+      if (y < volumes.minY[middle]!) high = middle - 1;
+      else if (y >= volumes.maxY[middle]!) low = middle + 1;
+      else {
+        // Inside this band -- but only answer from it if the whole envelope is.
+        if (y - envelope < volumes.minY[middle]! || y + envelope >= volumes.maxY[middle]!) return union;
+        return middle;
+      }
     }
-    const regionCount =
-      (this.world.visibility!.width ?? 0) * (this.world.visibility!.height ?? 0);
-    return volumes.count + Math.min(region, Math.max(0, regionCount - 1));
+    return union;
   }
 
   public locateRegion(x: number, z: number): number {

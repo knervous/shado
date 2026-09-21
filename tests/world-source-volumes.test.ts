@@ -170,7 +170,9 @@ describe('vertical source volumes', () => {
     expect(bands[0]![0]).toBeCloseTo(-0.5, 5);
     expect(bands[0]![1]).toBeCloseTo(ROOF_Y - 0.5, 5);
     expect(bands[1]![0]).toBeCloseTo(ROOF_Y - 0.5, 5);
-    expect(bands[1]![1]).toBe(Number.POSITIVE_INFINITY);
+    // The top band ends at the declared camera domain: finite, so it survives JSON.
+    expect(bands[1]![1]).toBe(split.sourceDomain!.maxY);
+    expect(Number.isFinite(bands[1]![1])).toBe(true);
     expect(bands[0]![1]).toBe(bands[1]![0]);
   });
 
@@ -339,7 +341,7 @@ describe('vertical source volumes', () => {
     // Tiling, still: each band starts exactly where the one below ends.
     expect(bands[0]![1]).toBe(bands[1]![0]);
     expect(bands[1]![1]).toBe(bands[2]![0]);
-    expect(bands[2]![1]).toBe(Number.POSITIVE_INFINITY);
+    expect(bands[2]![1]).toBe(split.sourceDomain!.maxY);
 
     // The ground floor is walled off from the far street; the roof is not.
     const ground = volumesOf(split, 0)[0]!;

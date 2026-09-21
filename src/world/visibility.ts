@@ -213,6 +213,14 @@ export type ShadoWorldVisibilityCompileInput = {
    */
   verticalVolumes?: boolean;
   /**
+   * The camera heights vertical volumes describe, in world Y. Bands are
+   * clipped to it and a camera outside it answers from its region's union
+   * row. Defaults to the package's Y bounds widened by a standing eye height
+   * above the top; raising it is an explicit input and changes the package's
+   * identity.
+   */
+  cameraExtent?: { minY: number; maxY: number };
+  /**
    * How many regions of camera-position slack each source row carries, in
    * place of {@link CAMERA_ROW_MARGIN}. Lowering it is a measurement lever,
    * not a shipping default: the margin is what stops geometry popping as a
@@ -676,6 +684,73 @@ export function compileShadoWorldVisibility(
       volumesOfRegion[region]!.push(region);
     }
   }
+  /*
+   * The wire contract for volumes: finite bands inside a declared domain,
+   * sorted by region and then by height, with an offset table per region.
+   * Built here, BEFORE any row is computed, because a volume's index is its
+   * row.
+   */
+  let sourceDomain: { minY: number; maxY: number } | null = null;
+  let regionOffset: number[] | null = null;
+  if (useVolumes) {
+    const extent = input.cameraExtent ?? {
+      minY: input.bounds.min[1] - BAND_FOOTING,
+      maxY: input.bounds.max[1] + 2 * EYE_HEIGHTS[0],
+    };
+    if (!Number.isFinite(extent.minY) || !Number.isFinite(extent.maxY) || !(extent.maxY > extent.minY)) {
+      throw new RangeError(
+        `Vertical volumes need a finite camera extent with maxY > minY; got ${extent.minY}..${extent.maxY}`
+      );
+    }
+    sourceDomain = { minY: extent.minY, maxY: extent.maxY };
+    const clippedMin = volumeMinY.map((value) => Math.max(value, extent.minY));
+    const clippedMax = volumeMaxY.map((value) => Math.min(value, extent.maxY));
+    /*
+     * A band clipped to nothing describes no camera the domain supports and
+     * is dropped -- unless it was the region's only one, in which case the
+     * region keeps a band spanning the whole domain, because a region with
+     * no volume has an empty union row and would hide the world.
+     */
+    const kept: number[] = [];
+    const keptPerRegion = new Uint32Array(regionCount);
+    for (let volume = 0; volume < volumeRegion.length; volume += 1) {
+      if (clippedMax[volume]! > clippedMin[volume]!) {
+        kept.push(volume);
+        keptPerRegion[volumeRegion[volume]!] += 1;
+      }
+    }
+    for (let volume = 0; volume < volumeRegion.length; volume += 1) {
+      const region = volumeRegion[volume]!;
+      if (keptPerRegion[region]) continue;
+      clippedMin[volume] = extent.minY;
+      clippedMax[volume] = extent.maxY;
+      kept.push(volume);
+      keptPerRegion[region] = 1;
+    }
+    kept.sort(
+      (left, right) =>
+        volumeRegion[left]! - volumeRegion[right]! || clippedMin[left]! - clippedMin[right]!
+    );
+    const region = kept.map((volume) => volumeRegion[volume]!);
+    const minY = kept.map((volume) => clippedMin[volume]!);
+    const maxY = kept.map((volume) => clippedMax[volume]!);
+    const eyesOut = kept.map((volume) => volumeEyes[volume] ?? null);
+    const targetsOut = kept.map((volume) => volumeTargets[volume] ?? null);
+    volumeRegion.length = 0; volumeRegion.push(...region);
+    volumeMinY.length = 0; volumeMinY.push(...minY);
+    volumeMaxY.length = 0; volumeMaxY.push(...maxY);
+    volumeEyes.length = 0; volumeEyes.push(...eyesOut);
+    volumeTargets.length = 0; volumeTargets.push(...targetsOut);
+    for (const list of volumesOfRegion) list.length = 0;
+    regionOffset = new Array<number>(regionCount + 1).fill(0);
+    for (let volume = 0; volume < volumeRegion.length; volume += 1) {
+      volumesOfRegion[volumeRegion[volume]!]!.push(volume);
+      regionOffset[volumeRegion[volume]! + 1] += 1;
+    }
+    for (let index = 0; index < regionCount; index += 1) {
+      regionOffset[index + 1] += regionOffset[index]!;
+    }
+  }
   const regionSamplingMs = clock() - samplingStarted;
 
   const volumeCount = volumeRegion.length;
@@ -822,7 +897,8 @@ export function compileShadoWorldVisibility(
     });
   }
   return {
-    version: 1,
+    // v2 exactly when the rows are volume-indexed; v1 is untouched.
+    version: useVolumes ? 2 : 1,
     mode,
     size,
     originX,
@@ -835,13 +911,15 @@ export function compileShadoWorldVisibility(
     cellRegion,
     persistentRegions,
     persistentCells,
-    ...(useVolumes
+    ...(useVolumes && sourceDomain && regionOffset
       ? {
+          sourceDomain,
           volumes: {
             count: volumeCount,
             region: volumeRegion,
             minY: volumeMinY,
             maxY: volumeMaxY,
+            regionOffset,
           },
         }
       : {}),

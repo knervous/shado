@@ -997,6 +997,13 @@ export type ShadoWorldCompileOptions = {
    */
   visibilityMode?: ShadoWorldVisibilityMode;
   /**
+   * Split source columns into per-floor volumes (visibility v2). Only takes
+   * effect with `sampled-occlusion`; see `compileShadoWorldVisibility`.
+   */
+  visibilityVerticalVolumes?: boolean;
+  /** The supported camera heights for v2 volumes; part of package identity. */
+  visibilityCameraExtent?: { minY: number; maxY: number };
+  /**
    * Bake diagnostics for the visibility pass: which authority actually ran,
    * what it rejected and why it fell back. Reported rather than stored, so
    * package bytes stay deterministic.
@@ -1259,7 +1266,15 @@ export type ShadoWorldSpatialPackage = {
    * cells, these regions cover every point inside the package bounds.
    */
   visibility?: {
-    version: 1;
+    /**
+     * 1: rows are indexed by region, and nothing else is on the wire.
+     * 2: rows are indexed by VOLUME on the source side, then one union row per
+     *    region; `sourceDomain` and `volumes` are required.
+     *
+     * A reader that does not know a version must refuse it or fall back to
+     * the flood -- never guess a layout. v1 packages read exactly as before.
+     */
+    version: 1 | 2;
     /** How the rows were built. See {@link ShadoWorldVisibilityMode}. */
     mode: ShadoWorldVisibilityMode;
     size: number;
@@ -1298,12 +1313,32 @@ export type ShadoWorldSpatialPackage = {
      */
     volumes?: {
       count: number;
-      /** Which region each volume stands in. */
+      /** Which region each volume stands in. Sorted by region, then by minY. */
       region: number[];
-      /** The band each volume covers, in world Y. */
+      /**
+       * The band each volume covers, in world Y. FINITE: every band lies
+       * inside `sourceDomain`. JSON has no infinity, and an Infinity written
+       * here came back as null -- which then failed validation, or worse,
+       * coerced to zero.
+       */
       minY: number[];
       maxY: number[];
+      /**
+       * Where each region's volumes start: region r owns volumes
+       * `[regionOffset[r], regionOffset[r + 1])`. Length is regionCount + 1.
+       * Lets a reader binary-search one region's bands instead of scanning
+       * every volume in the zone per camera update.
+       */
+      regionOffset: number[];
     };
+    /**
+     * v2: the camera heights the volumes describe, in world Y.
+     *
+     * A camera outside it answers from its region's union row. It is part of
+     * the package's identity, and raising it is an explicit bake input, not
+     * something a reader infers.
+     */
+    sourceDomain?: { minY: number; maxY: number };
     /** Conservative region-to-region potentially-visible rows. */
     pvs: {
       wordsPerRow: number;

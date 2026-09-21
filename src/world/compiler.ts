@@ -399,6 +399,8 @@ export function compileShadoWorld(
     renderCellBounds: cellBounds,
     persistentRenderCells,
     collisionPrimitives: options.collisionPrimitives ?? primitives,
+    ...(options.visibilityVerticalVolumes ? { verticalVolumes: true } : {}),
+    ...(options.visibilityCameraExtent ? { cameraExtent: options.visibilityCameraExtent } : {}),
   });
   const pointLights = authoring
     ? resolveShadoWorldPointLights(authoring).map(light => {

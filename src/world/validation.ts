@@ -118,6 +118,21 @@ export function computeShadoWorldLayoutHash(world: ShadoWorldSpatialPackage): st
     feedArray(world.visibility.persistentCells);
     feed(world.visibility.pvs.wordsPerRow);
     feedArray(world.visibility.pvs.words);
+    /*
+     * Every field that selects a row. A band moved without any row changing
+     * used to leave the hash untouched -- the reader would pick a different
+     * row for the same camera and nothing would say the package differed.
+     */
+    const volumes = world.visibility.volumes;
+    const domain = world.visibility.sourceDomain;
+    if (volumes && domain) {
+      feedFloatArray([domain.minY, domain.maxY]);
+      feed(volumes.count);
+      feedArray(volumes.region);
+      feedArray(volumes.regionOffset ?? []);
+      feedFloatArray(volumes.minY);
+      feedFloatArray(volumes.maxY);
+    }
   }
   const stampIrradiance = world.objects?.stamps.irradianceR
     ? [
@@ -455,8 +470,22 @@ export function validateShadoWorldPackage(world: ShadoWorldSpatialPackage): void
   if (world.visibility) {
     const visibility = world.visibility;
     const visibilityRegionCount = visibility.width * visibility.height;
+    /*
+     * Versions are refused, not guessed. v2 changes what a row index MEANS,
+     * so a reader that took a v2 package for v1 would index volumes as
+     * regions and cull from the wrong camera without any error at all.
+     */
+    const version = visibility.version as number;
+    if (version !== 1 && version !== 2) {
+      throw new Error(`Unsupported Shado world visibility version ${String(version)}`);
+    }
+    if (version === 1 && (visibility.volumes || visibility.sourceDomain)) {
+      throw new Error('Shado world visibility v1 cannot carry volume-indexed rows');
+    }
+    if (version === 2 && (!visibility.volumes || !visibility.sourceDomain)) {
+      throw new Error('Shado world visibility v2 requires volumes and a source domain');
+    }
     if (
-      visibility.version !== 1 ||
       (visibility.mode !== 'distance-flood' &&
         visibility.mode !== 'sampled-occlusion') ||
       !Number.isFinite(visibility.size) ||
@@ -488,22 +517,73 @@ export function validateShadoWorldPackage(world: ShadoWorldSpatialPackage): void
      */
     const volumes = visibility.volumes;
     if (volumes) {
+      const domain = visibility.sourceDomain!;
+      if (
+        typeof domain.minY !== 'number' ||
+        typeof domain.maxY !== 'number' ||
+        !Number.isFinite(domain.minY) ||
+        !Number.isFinite(domain.maxY) ||
+        !(domain.maxY > domain.minY)
+      ) {
+        throw new Error('Invalid Shado world visibility source domain');
+      }
       if (
         !Number.isInteger(volumes.count) ||
         volumes.count <= 0 ||
+        !Array.isArray(volumes.region) ||
+        !Array.isArray(volumes.minY) ||
+        !Array.isArray(volumes.maxY) ||
+        !Array.isArray(volumes.regionOffset) ||
         volumes.region.length !== volumes.count ||
         volumes.minY.length !== volumes.count ||
-        volumes.maxY.length !== volumes.count
+        volumes.maxY.length !== volumes.count ||
+        volumes.regionOffset.length !== visibilityRegionCount + 1
       ) {
         throw new Error('Invalid Shado world visibility volume header');
       }
       for (let volume = 0; volume < volumes.count; volume += 1) {
         const region = volumes.region[volume]!;
+        const minY = volumes.minY[volume]!;
+        const maxY = volumes.maxY[volume]!;
         if (!Number.isInteger(region) || region < 0 || region >= visibilityRegionCount) {
           throw new Error(`Invalid Shado world visibility volume region ${region}`);
         }
-        if (!(volumes.maxY[volume]! > volumes.minY[volume]!)) {
+        /*
+         * Numbers, finite, and inside the domain. A null here is what an
+         * Infinity becomes in JSON, and `null > x` coerces it to zero -- so
+         * a check that only compared bands let the corruption through.
+         */
+        if (typeof minY !== 'number' || typeof maxY !== 'number' || !Number.isFinite(minY) || !Number.isFinite(maxY)) {
+          throw new Error(`Shado world visibility volume ${volume} has a non-finite band`);
+        }
+        if (!(maxY > minY) || minY < domain.minY || maxY > domain.maxY) {
           throw new Error(`Invalid Shado world visibility volume band at ${volume}`);
+        }
+        if (volume > 0) {
+          const previousRegion = volumes.region[volume - 1]!;
+          if (region < previousRegion) {
+            throw new Error(`Shado world visibility volumes are not sorted by region at ${volume}`);
+          }
+          // Within a region the bands must tile: no overlap and no gap.
+          if (region === previousRegion && minY !== volumes.maxY[volume - 1]) {
+            throw new Error(`Shado world visibility volume ${volume} overlaps or leaves a gap below it`);
+          }
+        }
+      }
+      if (volumes.regionOffset[0] !== 0 || volumes.regionOffset[visibilityRegionCount] !== volumes.count) {
+        throw new Error('Invalid Shado world visibility volume offsets');
+      }
+      for (let region = 0; region < visibilityRegionCount; region += 1) {
+        const first = volumes.regionOffset[region]!;
+        const end = volumes.regionOffset[region + 1]!;
+        if (!Number.isInteger(first) || !Number.isInteger(end) || end <= first) {
+          // Every region owns at least one volume, or its union row is empty.
+          throw new Error(`Shado world visibility region ${region} owns no volume`);
+        }
+        for (let volume = first; volume < end; volume += 1) {
+          if (volumes.region[volume] !== region) {
+            throw new Error(`Shado world visibility volume offsets disagree at region ${region}`);
+          }
         }
       }
     }
