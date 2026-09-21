@@ -230,6 +230,9 @@ export class ShadoWorldHiZ {
     const current = this.layout?.levels[0];
     if (current && current.width === width && current.height === height) return;
     this.disposePyramid();
+    // A minimised or not-yet-laid-out canvas: no pyramid, and run() admits
+    // everything until a real size arrives.
+    if (!(Number.isInteger(width) && Number.isInteger(height) && width >= 1 && height >= 1)) return;
     const layout = shadoHiZLayout(width, height);
     this.layout = layout;
     this.pyramid = this.buffer(layout.words * 4, 'Shado Hi-Z pyramid');
@@ -254,7 +257,12 @@ export class ShadoWorldHiZ {
     this.seed.setStorageBuffer('hizPyramid', this.pyramid);
     this.seed.setStorageBuffer('hizLevelParams', this.levelParams[0]!);
     this.cull.setStorageBuffer('hizPyramid', this.pyramid);
-    this.writeLevelParams('normal');
+    // Every new buffer starts zeroed; a zero parameter block makes the seed
+    // write nothing and leaves a pyramid of depth 0 -- a wall at the near
+    // plane that hides everything. Write them now, whatever convention the
+    // previous pyramid used.
+    this.levelParamsWritten = false;
+    this.writeLevelParams(this.convention);
   }
 
   /**
@@ -271,6 +279,12 @@ export class ShadoWorldHiZ {
     if (!reason && view && size && (size.width !== view.viewportWidth || size.height !== view.viewportHeight)) {
       reason = `depth ${size.width}x${size.height} != viewport ${view.viewportWidth}x${view.viewportHeight}`;
     }
+    const base = this.layout?.levels[0];
+    if (!reason && view && (!base || base.width !== view.viewportWidth || base.height !== view.viewportHeight)) {
+      reason = base
+        ? `pyramid ${base.width}x${base.height} != viewport ${view.viewportWidth}x${view.viewportHeight}`
+        : 'no pyramid';
+    }
     const admitAll = reason !== '';
     let dispatches = 0;
     let complete = true;
@@ -283,7 +297,6 @@ export class ShadoWorldHiZ {
     if (!admitAll && view && depth && this.layout) {
       this.writeLevelParams(view.convention);
       this.seed.setTexture('hizDepth', depth, false);
-      const [base] = this.layout.levels;
       go(this.seed, Math.ceil(base!.width / SHADO_HIZ_WORKGROUP_2D), Math.ceil(base!.height / SHADO_HIZ_WORKGROUP_2D));
       this.reducers.forEach((reducer, i) => {
         const dst = this.layout!.levels[i + 1]!;
@@ -332,10 +345,13 @@ export class ShadoWorldHiZ {
     this.layout = undefined;
   }
 
-  private lastConvention = '';
+  private convention: 'normal' | 'reversed' = 'normal';
+  private levelParamsWritten = false;
   private writeLevelParams(convention: 'normal' | 'reversed'): void {
-    if (!this.layout || convention === this.lastConvention) return;
-    this.lastConvention = convention;
+    if (!this.layout) return;
+    if (this.levelParamsWritten && convention === this.convention) return;
+    this.convention = convention;
+    this.levelParamsWritten = true;
     const clear = new Float32Array([convention === 'normal' ? 1 : 0]);
     const clearBits = new Uint32Array(clear.buffer)[0]!;
     this.layout.levels.forEach((dst, l) => {

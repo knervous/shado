@@ -78,6 +78,10 @@ export interface BabylonHiZStatus {
   readonly attachedDrawContexts: number;
   readonly lastRun?: ShadoWorldHiZRunResult;
   readonly depthSize: readonly [number, number];
+  /** Depth prepass renders so far; stays flat while off. */
+  readonly depthRenders: number;
+  /** Hi-Z depth targets registered on the camera: 1 while on, 0 while off. */
+  readonly depthTargets: number;
   readonly convention: 'normal' | 'reversed';
   readonly topLeftOrigin: boolean;
   readonly errors: readonly string[];
@@ -120,6 +124,13 @@ export class BabylonHiZAdapter {
   private resizeObserver?: Observer<unknown>;
   private readonly depthMatrix = new Float32Array(16);
   private depthFrame = -1;
+  /** The current depth target has rendered with every occluder ready at least once. */
+  private depthReady = false;
+  /** Depth-prepass renders since construction (V2: zero while off). */
+  private depthRenders = 0;
+  /** Occluder submeshes the depth pass draws, for the readiness sweep. */
+  private occluderSubMeshes: Array<{ subMesh: SubMesh; instanced: boolean }> = [];
+  private readyCursor = 0;
   private readonly errors: string[] = [];
   /**
    * Pixel row 0 of the depth texture is the top of the view. Read from the
@@ -142,8 +153,10 @@ export class BabylonHiZAdapter {
     }
     if ((this.engine as any).useReverseDepthBuffer) this.convention = 'reversed';
     this.hiz = new ShadoWorldHiZ(this.engine);
-    this.createDepth();
-    this.resizeObserver = this.engine.onResizeObservable.add(() => this.createDepth()) as Observer<unknown>;
+    // No depth target until Hi-Z is switched on: off costs no rendering work.
+    this.resizeObserver = this.engine.onResizeObservable.add(() => {
+      if (this.mode === 'hiz') this.createDepth();
+    }) as Observer<unknown>;
     this.beforeDraw = scene.onBeforeDrawPhaseObservable.add(() => this.onBeforeDraw());
     this.reason = 'idle';
   }
@@ -167,6 +180,39 @@ export class BabylonHiZAdapter {
   public setOccluders(meshes: readonly AbstractMesh[]): void {
     this.occluders = [...meshes];
     if (this.depth) this.depth.getDepthMap().renderList = this.occluders;
+    this.occluderSubMeshes = [];
+    for (const mesh of this.occluders) {
+      const instanced = (mesh as any).hasThinInstances === true || ((mesh as any).instances?.length ?? 0) > 0;
+      for (const subMesh of mesh.subMeshes ?? []) {
+        const material = subMesh.getMaterial();
+        // The same skips DepthRenderer itself applies.
+        if (!material || material.disableDepthWrite || subMesh.verticesCount === 0) continue;
+        this.occluderSubMeshes.push({ subMesh, instanced });
+      }
+    }
+    // New occluders may still be compiling their depth effect.
+    this.depthReady = false;
+    this.readyCursor = 0;
+  }
+
+  /**
+   * Babylon skips an occluder whose depth effect is still compiling, and a
+   * fresh target's first passes are empty. A partial depth only admits more,
+   * so this gates honesty rather than safety: nothing is reported as culling
+   * until every occluder submesh's depth effect is ready. Bounded per frame,
+   * latched once a sweep completes.
+   */
+  private sweepDepthReadiness(): boolean {
+    if (this.depthReady) return true;
+    const depth = this.depth;
+    if (!depth) return false;
+    for (let budget = 256; budget > 0 && this.readyCursor < this.occluderSubMeshes.length; budget--) {
+      const { subMesh, instanced } = this.occluderSubMeshes[this.readyCursor]!;
+      if (!subMesh.getMesh().isDisposed() && !depth.isReady(subMesh, instanced)) return false;
+      this.readyCursor++;
+    }
+    this.depthReady = this.readyCursor >= this.occluderSubMeshes.length;
+    return this.depthReady;
   }
 
   /**
@@ -265,9 +311,22 @@ export class BabylonHiZAdapter {
     return this.candidateIds;
   }
 
+  /**
+   * 'off' removes the depth prepass target and detaches every indirect draw:
+   * no depth render, compute or copy runs while off. 'hiz' creates exactly one
+   * fresh target, and nothing is rejected until it has rendered this frame.
+   */
   public setMode(mode: BabylonHiZMode): void {
+    if (mode === this.mode) return;
     this.mode = mode;
-    if (mode === 'off') this.detachAll();
+    if (mode === 'off') {
+      this.detachAll();
+      this.disposeDepth();
+      this.lastRun = undefined;
+      this.reason = 'mode off';
+    } else if (this.hiz) {
+      this.createDepth();
+    }
   }
 
   public status(): BabylonHiZStatus {
@@ -284,6 +343,8 @@ export class BabylonHiZAdapter {
       attachedDrawContexts: this.bindings.filter(b => b.context).length,
       lastRun: this.lastRun,
       depthSize: [size?.width ?? 0, size?.height ?? 0],
+      depthRenders: this.depthRenders,
+      depthTargets: this.camera.customRenderTargets.filter((target) => (target as any).__shadoHiZ).length,
       convention: this.convention,
       topLeftOrigin: this.topLeftOrigin,
       errors: [...this.errors, ...(this.hiz?.lastErrors ?? [])],
@@ -315,15 +376,23 @@ export class BabylonHiZAdapter {
     depth.clearColor = new BABYLON.Color4(this.convention === 'normal' ? 1 : 0, 0, 0, 1);
     const map = depth.getDepthMap();
     map.renderList = this.occluders;
+    (map as any).__shadoHiZ = true;
     map.onBeforeRenderObservable.add(() => {
       this.depthMatrix.set(this.scene.getTransformMatrix().m);
       this.depthFrame = this.engine.frameId;
+      this.depthRenders++;
     });
     // Not registered in scene._depthRenderer (that slot belongs to whatever
     // enableDepthRenderer() the game uses): a custom target of THIS camera
     // renders once per frame for it, before its main pass.
     this.camera.customRenderTargets.push(map);
     this.depth = depth;
+    // A new target owns nothing yet: no rejection until it has rendered.
+    this.depthFrame = -1;
+    this.depthReady = false;
+    this.readyCursor = 0;
+    this.depthMatrix.fill(NaN);
+    this.detachAll();
     this.hiz?.resize(map.getSize().width, map.getSize().height);
   }
 
@@ -350,6 +419,7 @@ export class BabylonHiZAdapter {
     const matrix = this.scene.getTransformMatrix();
     let admit = '';
     if (!map || this.depthFrame !== this.engine.frameId) admit = 'depth not rendered this frame';
+    else if (!this.sweepDepthReadiness()) admit = 'depth pass not ready';
     else if (!sameMatrix(matrix.m, this.depthMatrix)) admit = 'view changed after the depth pass';
     else if (!this.occluders.length) admit = 'no occluders';
     this.topLeftOrigin = !!(map?.renderTarget as any)?._disableEngineYFlip;
