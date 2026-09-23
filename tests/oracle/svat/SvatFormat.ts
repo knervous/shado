@@ -19,8 +19,6 @@
  *   payload      (concatenated compressed chunks)
  */
 
-import { svatFnv1a32 } from './SvatKernel';
-
 /** "SVAT" read as a little-endian u32. */
 export const SVAT_MAGIC = 0x54415653;
 export const SVAT_VERSION = 1;
@@ -145,7 +143,13 @@ export function svatChunkComponentCount(layout: SvatLayout, frameCount: number):
 
 /** FNV-1a 32-bit. Cheap integrity check, not a cryptographic digest. */
 export function svatChecksum(bytes: Uint8Array): number {
-  return svatFnv1a32(bytes);
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) {
+    hash ^= bytes[i];
+    // hash *= 16777619, kept in u32 without Math.imul overflow surprises.
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash >>> 0;
 }
 
 function encodingWord(filter: SvatFilter, codec: SvatCodec): number {

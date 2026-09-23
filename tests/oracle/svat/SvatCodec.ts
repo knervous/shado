@@ -4,16 +4,18 @@
  * (DecompressionStream / a WASM decoder).
  */
 
-import type { DQClipInfo, PackedDQVAT } from '../extensions/VATBuilder/VATBuilder';
+import type { DQClipInfo, PackedDQVAT } from '../../../src/extensions/VATBuilder/VATBuilder';
 import {
   applyQuaternionContinuity,
   byteShuffle,
+  byteUnshuffle,
   chunkBytes,
+  deltaDecode,
   deltaEncode,
   gatherChunk,
+  scatterChunk,
   type SvatPixels,
 } from './SvatFilters';
-import { svatDecodeChunkInto } from './SvatKernel';
 import {
   decodeSvatDirectory,
   encodeSvatDirectory,
@@ -191,8 +193,6 @@ export async function decodeSvat(
     layout.componentType === 'float16'
       ? new Uint16Array(componentCount)
       : new Float32Array(componentCount);
-  const words: Uint16Array | Uint32Array =
-    pixels instanceof Uint16Array ? pixels : new Uint32Array(pixels.buffer);
 
   for (const chunk of directory.chunks) {
     const clip = directory.clips[chunk.clipIndex];
@@ -216,24 +216,28 @@ export async function decodeSvat(
       }
     }
 
+    const planar =
+      chunk.filter === SvatFilter.DeltaXorShuffle
+        ? byteUnshuffle(decompressed, elementBytes)
+        : decompressed;
+
+    // Copy into an aligned buffer so the typed-array view is always valid.
+    const aligned = new Uint8Array(planar.byteLength);
+    aligned.set(planar);
+    const storage: SvatPixels =
+      layout.componentType === 'float16'
+        ? new Uint16Array(aligned.buffer)
+        : new Float32Array(aligned.buffer);
+
     const expected = svatChunkComponentCount(layout, chunk.frameCount);
-    if (decompressed.byteLength !== expected * elementBytes) {
-      throw new Error(
-        `.svat chunk holds ${(decompressed.byteLength / elementBytes) | 0} components, expected ${expected}`
-      );
+    if (storage.length !== expected) {
+      throw new Error(`.svat chunk holds ${storage.length} components, expected ${expected}`);
     }
 
-    // Unshuffle, XOR-delta and scatter in one pass, as bit patterns.
-    svatDecodeChunkInto(
-      words,
-      decompressed,
-      elementBytes,
-      chunk.filter === SvatFilter.DeltaXorShuffle,
-      chunk.filter === SvatFilter.DeltaXorShuffle,
-      layout,
-      clip.firstFrame + chunk.firstFrame,
-      chunk.frameCount
-    );
+    if (chunk.filter === SvatFilter.DeltaXorShuffle) {
+      deltaDecode(storage, chunk.frameCount);
+    }
+    scatterChunk(pixels, layout, clip.firstFrame + chunk.firstFrame, chunk.frameCount, storage);
   }
 
   const clips: DQClipInfo[] = directory.clips.map(clip => ({

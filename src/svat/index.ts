@@ -47,3 +47,15 @@ export {
   supportsDecompressionFormat,
   type SvatRuntimeDecoderOptions,
 } from './SvatRuntime';
+
+export { svatDecodeChunkInto, svatFnv1a32 } from './SvatKernel';
+
+export {
+  configureSvatDecodeWorkers,
+  decodeSvatInWorker,
+  disposeSvatDecodeWorkers,
+  svatDecodeWorkerSource,
+  type SvatDecodeWorkerConfig,
+  type SvatDecodeWorkerLike,
+  type SvatWorkerDecodeOptions,
+} from './SvatWorker';
