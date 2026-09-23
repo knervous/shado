@@ -2,7 +2,7 @@ import type {
   ShadoWorldBounds,
   ShadoWorldCollisionDescriptor,
   ShadoWorldPrimitive,
-} from './types';
+} from '../../../src/world/types';
 
 const MAGIC = 0x4c434853; // "SHCL" in little-endian byte order.
 const VERSION = 2;
@@ -10,7 +10,6 @@ const HEADER_BYTES = 56;
 const DIRECTORY_ENTRY_BYTES = 48;
 const WELD_SCALE = 10_000;
 const DEFAULT_CHUNK_SIZE = 256;
-const LITTLE_ENDIAN_HOST = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
 
 export const ShadoCollisionFlags = {
   Terrain: 1 << 0,
@@ -287,29 +286,18 @@ export function decodeShadoWorldCollision(
         view.getFloat32(entry + 44, true),
       ],
     };
-    // Raw little-endian payload copied straight into place (Shado artifacts are
-    // little-endian, like every GPU target): a memcpy instead of a DataView
-    // read per float. Bits are preserved exactly.
     const positions = new Float32Array(chunkVertexCount * 3);
+    let offset = payloadOffset;
+    for (let index = 0; index < positions.length; index++, offset += 4) {
+      positions[index] = view.getFloat32(offset, true);
+    }
     const indices = new Uint32Array(chunkIndexCount);
-    const positionsEnd = payloadOffset + positions.byteLength;
-    if (LITTLE_ENDIAN_HOST) {
-      new Uint8Array(positions.buffer).set(bytes.subarray(payloadOffset, positionsEnd));
-      new Uint8Array(indices.buffer).set(bytes.subarray(positionsEnd, payloadEnd));
-    } else {
-      for (let index = 0, offset = payloadOffset; index < positions.length; index++, offset += 4) {
-        positions[index] = view.getFloat32(offset, true);
+    for (let index = 0; index < indices.length; index++, offset += 4) {
+      const target = view.getUint32(offset, true);
+      if (target >= chunkVertexCount) {
+        throw new Error('Shado world collision artifact has an invalid chunk index');
       }
-      for (let index = 0, offset = positionsEnd; index < indices.length; index++, offset += 4) {
-        indices[index] = view.getUint32(offset, true);
-      }
-    }
-    let maxIndex = 0;
-    for (let index = 0; index < indices.length; index++) {
-      if (indices[index]! > maxIndex) maxIndex = indices[index]!;
-    }
-    if (maxIndex >= chunkVertexCount) {
-      throw new Error('Shado world collision artifact has an invalid chunk index');
+      indices[index] = target;
     }
     if (!sameBounds(boundsOfPositions(positions), chunkBounds)) {
       throw new Error('Shado world collision chunk bounds do not match its geometry');
@@ -360,54 +348,26 @@ export function collisionResidencyKeys(
   return keys;
 }
 
-/**
- * FNV-1a 32-bit over the artifact bytes, as 8 hex digits.
- *
- * The collision artifact's content hash, recorded in the spatial package at
- * bake time and checked on every decode: it is what ties a collision file to
- * the spatial package that describes it, so a stale or mismatched pair (a
- * cache that kept one revision of one file and not the other) cannot pass the
- * structural checks by coincidence. The value is part of the package format,
- * so the algorithm cannot change without a re-bake; this keeps it byte-serial
- * but with an int32 state and an indexed loop unrolled by four, which runs at the multiply's
- * latency (~1.25 ns/byte) instead of the ~7 ns/byte the iterator form cost.
- */
 export function fnv1a32Bytes(bytes: Uint8Array): string {
-  let hash = 0x811c9dc5 | 0;
-  const length = bytes.length;
-  const blockEnd = length & ~3;
-  let i = 0;
-  for (; i < blockEnd; i += 4) {
-    hash = Math.imul(hash ^ bytes[i]!, 0x01000193);
-    hash = Math.imul(hash ^ bytes[i + 1]!, 0x01000193);
-    hash = Math.imul(hash ^ bytes[i + 2]!, 0x01000193);
-    hash = Math.imul(hash ^ bytes[i + 3]!, 0x01000193);
+  let hash = 0x811c9dc5;
+  for (const byte of bytes) {
+    hash ^= byte;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
   }
-  for (; i < length; i++) hash = Math.imul(hash ^ bytes[i]!, 0x01000193);
-  return (hash >>> 0).toString(16).padStart(8, '0');
+  return hash.toString(16).padStart(8, '0');
 }
 
 function boundsOfPositions(positions: ArrayLike<number>): ShadoWorldBounds {
-  let minX = Infinity;
-  let minY = Infinity;
-  let minZ = Infinity;
-  let maxX = -Infinity;
-  let maxY = -Infinity;
-  let maxZ = -Infinity;
-  // Math.min/max, not comparisons: a NaN must poison the bounds (and so fail
-  // the chunk-bounds check) exactly as it always has.
+  const min: [number, number, number] = [Infinity, Infinity, Infinity];
+  const max: [number, number, number] = [-Infinity, -Infinity, -Infinity];
   for (let index = 0; index < positions.length; index += 3) {
-    const x = Number(positions[index]);
-    const y = Number(positions[index + 1]);
-    const z = Number(positions[index + 2]);
-    minX = Math.min(minX, x);
-    minY = Math.min(minY, y);
-    minZ = Math.min(minZ, z);
-    maxX = Math.max(maxX, x);
-    maxY = Math.max(maxY, y);
-    maxZ = Math.max(maxZ, z);
+    for (let axis = 0; axis < 3; axis++) {
+      const value = Number(positions[index + axis]);
+      min[axis] = Math.min(min[axis], value);
+      max[axis] = Math.max(max[axis], value);
+    }
   }
-  return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
+  return { min, max };
 }
 
 function sameBounds(left: ShadoWorldBounds, right: ShadoWorldBounds): boolean {

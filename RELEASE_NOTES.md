@@ -1,5 +1,30 @@
 # Release notes
 
+## Unreleased
+
+- `.svat` decode is ~9x cheaper and can leave the main thread:
+  - `decodeSvat` now unshuffles, XOR-delta-decodes and scatters each chunk in
+    one fused pass (`svatDecodeChunkInto`) over integer views, with the atlas
+    addressing tabulated per chunk; the FNV chunk checksum keeps an int32
+    state. Output is byte-identical to the previous decoder on every shipped
+    Eltania container (tests/svat-decode-oracle.test.ts keeps the old decoder
+    as the oracle).
+  - New `decodeSvatInWorker(bytes, { verifyChecksums?, zstdFallback? })` runs
+    the same kernel (spliced into a `blob:` worker by `toString()`) in a pool
+    of up to two workers and transfers the atlas back. It falls back to the
+    main thread when workers are unavailable or a Zstd container meets a
+    platform without `DecompressionStream('zstd')`; corrupt data still rejects.
+    `configureSvatDecodeWorkers` / `disposeSvatDecodeWorkers` /
+    `svatDecodeWorkerSource` tune or replace the pool.
+- World loading: `decodeShadoWorldCollision` copies chunk payloads with a
+  memcpy instead of a DataView read per value and hashes with an indexed
+  int32 FNV-1a (the iterator form was 5x slower); `computeShadoWorldLayoutHash`
+  keeps its state in locals instead of a closure slot; grass placement
+  validation no longer allocates per placement. Hash values and every
+  rejection are unchanged (tests/world-decode-oracle.test.ts). The collision
+  content hash stays on: it is what binds the collision file to its spatial
+  package, and at ~1.3 ns/byte it is now most of what the decode costs.
+
 ## 1.10.1 — unreleased
 
 - `ShadoSprite2DRenderer` scales with what changes, not with what exists:

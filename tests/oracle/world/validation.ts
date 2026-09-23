@@ -1,4 +1,4 @@
-import type { ShadoWorldSpatialPackage } from './types';
+import type { ShadoWorldSpatialPackage } from '../../../src/world/types';
 
 const CELL_FIELDS = [
   'kind',
@@ -13,60 +13,29 @@ const CELL_FIELDS = [
   'phaseMask',
 ] as const;
 
-const FNV_PRIME = 0x01000193;
-const FLOAT_SCRATCH = new Float32Array(1);
-const FLOAT_BITS = new Uint32Array(FLOAT_SCRATCH.buffer);
-
-/*
- * FNV-1a over each value's u32 little-endian bytes. These run the big arrays
- * with the state in a local int32 -- the closure form kept it in a context
- * slot and paid a call and a `>>> 0` per byte. `value & 0xff` / `>>> 8` read
- * the same bytes ToUint32 would, so the hash is unchanged.
- */
-function fnvWord(hash: number, value: number): number {
-  hash = Math.imul(hash ^ (value & 0xff), FNV_PRIME);
-  hash = Math.imul(hash ^ ((value >>> 8) & 0xff), FNV_PRIME);
-  hash = Math.imul(hash ^ ((value >>> 16) & 0xff), FNV_PRIME);
-  return Math.imul(hash ^ (value >>> 24), FNV_PRIME);
-}
-
-/** Each value, no length prefix (the historical `values.forEach(feed)`). */
-function fnvEach(hash: number, values: ArrayLike<number>): number {
-  for (let i = 0; i < values.length; i++) hash = fnvWord(hash, values[i]!);
-  return hash;
-}
-
-/** Length, then each value through Number() (the historical `feedArray`). */
-function fnvArray(hash: number, values: ArrayLike<number>): number {
-  hash = fnvWord(hash, values.length);
-  for (let i = 0; i < values.length; i++) hash = fnvWord(hash, Number(values[i]));
-  return hash;
-}
-
-/** Length, then each value's float32 bits (the historical `feedFloatArray`). */
-function fnvFloatArray(hash: number, values: ArrayLike<number>): number {
-  hash = fnvWord(hash, values.length);
-  for (let i = 0; i < values.length; i++) {
-    FLOAT_SCRATCH[0] = Number(values[i]);
-    hash = fnvWord(hash, FLOAT_BITS[0]!);
-  }
-  return hash;
-}
-
 /** Deterministic checksum for the package's index topology and reducer-facing layout. */
 export function computeShadoWorldLayoutHash(world: ShadoWorldSpatialPackage): string {
-  let hash = 0x811c9dc5 | 0;
+  let hash = 0x811c9dc5;
   const feed = (value: number) => {
-    hash = fnvWord(hash, value);
+    let word = value >>> 0;
+    for (let byte = 0; byte < 4; byte++) {
+      hash ^= word & 0xff;
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+      word >>>= 8;
+    }
   };
   const feedArray = (values: ArrayLike<number>) => {
-    hash = fnvArray(hash, values);
+    feed(values.length);
+    for (let i = 0; i < values.length; i++) feed(Number(values[i]));
   };
+  const float = new Float32Array(1);
+  const bits = new Uint32Array(float.buffer);
   const feedFloatArray = (values: ArrayLike<number>) => {
-    hash = fnvFloatArray(hash, values);
-  };
-  const feedEach = (values: ArrayLike<number>) => {
-    hash = fnvEach(hash, values);
+    feed(values.length);
+    for (let index = 0; index < values.length; index++) {
+      float[0] = Number(values[index]);
+      feed(bits[0]!);
+    }
   };
 
   feed(world.version);
@@ -183,25 +152,25 @@ export function computeShadoWorldLayoutHash(world: ShadoWorldSpatialPackage): st
     ].forEach(feedArray);
     Object.values(world.grass.placements).forEach(feedFloatArray);
     if (world.grass.coverage) {
-      feedEach(world.grass.coverage.words);
+      world.grass.coverage.words.forEach(feed);
       const heightField = world.grass.coverage.heightField;
       if (heightField) {
-        feedEach(heightField.words);
+        heightField.words.forEach(feed);
         feedFloatArray(heightField.minimumY);
         feedFloatArray(heightField.heightRange);
-        feedEach(heightField.samples);
+        heightField.samples.forEach(feed);
       }
     }
   }
   if (world.grassField) {
     [world.grassField.cells.x, world.grassField.cells.z].forEach(feedArray);
-    feedEach(world.grassField.coverage.words);
-    feedEach(world.grassField.heightField.words);
+    world.grassField.coverage.words.forEach(feed);
+    world.grassField.heightField.words.forEach(feed);
     feedFloatArray(world.grassField.heightField.minimumY);
     feedFloatArray(world.grassField.heightField.heightRange);
-    feedEach(world.grassField.heightField.samples);
+    world.grassField.heightField.samples.forEach(feed);
   }
-  return (hash >>> 0).toString(16).padStart(8, '0');
+  return hash.toString(16).padStart(8, '0');
 }
 
 export function stampShadoWorldIntegrity(world: ShadoWorldSpatialPackage): void {
@@ -761,41 +730,28 @@ function validateGrass(
       }
     }
   }
-  const {
-    positionX,
-    positionY,
-    positionZ,
-    yaw,
-    width,
-    height,
-    phase,
-    stiffness,
-    colorVariation,
-  } = grass.placements;
   for (let placement = 0; placement < placementCount; placement++) {
-    const w = width[placement]!;
-    const h = height[placement]!;
-    const p = phase[placement]!;
-    const k = stiffness[placement]!;
-    const v = colorVariation[placement]!;
+    const finite = [
+      grass.placements.positionX[placement],
+      grass.placements.positionY[placement],
+      grass.placements.positionZ[placement],
+      grass.placements.yaw[placement],
+      grass.placements.width[placement],
+      grass.placements.height[placement],
+      grass.placements.phase[placement],
+      grass.placements.stiffness[placement],
+      grass.placements.colorVariation[placement],
+    ].every(Number.isFinite);
     if (
-      !Number.isFinite(positionX[placement]) ||
-      !Number.isFinite(positionY[placement]) ||
-      !Number.isFinite(positionZ[placement]) ||
-      !Number.isFinite(yaw[placement]) ||
-      !Number.isFinite(w) ||
-      !Number.isFinite(h) ||
-      !Number.isFinite(p) ||
-      !Number.isFinite(k) ||
-      !Number.isFinite(v) ||
-      w <= 0 ||
-      h <= 0 ||
-      p < 0 ||
-      p > 1 ||
-      k < 0 ||
-      k > 1 ||
-      v < 0 ||
-      v > 1
+      !finite ||
+      grass.placements.width[placement] <= 0 ||
+      grass.placements.height[placement] <= 0 ||
+      grass.placements.phase[placement] < 0 ||
+      grass.placements.phase[placement] > 1 ||
+      grass.placements.stiffness[placement] < 0 ||
+      grass.placements.stiffness[placement] > 1 ||
+      grass.placements.colorVariation[placement] < 0 ||
+      grass.placements.colorVariation[placement] > 1
     ) {
       throw new Error(`Invalid Shado world grass placement ${placement}`);
     }
