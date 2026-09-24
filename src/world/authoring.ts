@@ -326,6 +326,13 @@ function validateParticleEmitters(environment: ShadoWorldEnvironmentAuthoring): 
       throw new Error(`${label} blendMode must be add or standard`);
     }
     if (emitter.texture !== undefined && !emitter.texture.trim()) throw new Error(`${label} texture must be a non-empty URL`);
+    for (const name of ['angularSpeed', 'initialRotation'] as const) {
+      const pair = emitter[name];
+      if (pair === undefined) continue;
+      if (!Array.isArray(pair) || pair.length !== 2 || pair.some(v => !Number.isFinite(v) || Math.abs(v) > 100) || pair[1] < pair[0]) {
+        throw new Error(`${label} ${name} must be [min, max] radians within +/-100, min <= max`);
+      }
+    }
     if (emitter.hours !== undefined) {
       if (!Array.isArray(emitter.hours) || emitter.hours.length !== 2 || emitter.hours.some(hour => !Number.isFinite(hour) || hour < 0 || hour > 24)) {
         throw new Error(`${label} hours must be two hours within 0..24`);

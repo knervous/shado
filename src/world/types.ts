@@ -561,6 +561,13 @@ export type ShadoWorldParticleEmitter = {
   /** Additive reads as light, standard as matter. */
   blendMode?: 'add' | 'standard';
   /**
+   * Spin, radians per second, `[min, max]`. What makes a falling leaf read as a
+   * leaf rather than confetti; motes leave it out and do not turn.
+   */
+  angularSpeed?: [number, number];
+  /** Rotation at birth, radians, `[min, max]`. */
+  initialRotation?: [number, number];
+  /**
    * How far away the emitter still runs.
    *
    * Ambient particles are a near-field effect and a zone may author many, so
