@@ -93,6 +93,44 @@ export const ELTANIA_TERRAIN_PALETTE_MATERIALS: readonly EltaniaTerrainMaterial[
     "heightContrast": 0.7
   },
   {
+    "id": "eltania-ground-v1/forestLitterDeep",
+    "family": "eltania-ground-v1",
+    "key": "forestLitterDeep",
+    "label": "Deep forest litter",
+    "role": "terrain.soil",
+    "note": "forestLitter at 0.7x luminance, warmed toward humus: leaf litter under a closed canopy (client/scripts/material-ai/derive-forest-litter-deep.mjs; hand-registered while the family sources are off disk)",
+    "source": "forrest_ground_01",
+    "textures": {
+      "albedo": "/eltania/terrain/palette/eltania-ground-v1/forestLitterDeep-albedo.webp",
+      "normal": "/eltania/terrain/palette/eltania-ground-v1/forestLitterDeep-normal.webp",
+      "hrm": "/eltania/terrain/palette/eltania-ground-v1/forestLitterDeep-hrm.webp"
+    },
+    "preview": "/eltania/terrain/palette/eltania-ground-v1/previews/forestLitterDeep-preview.webp",
+    "tileMetres": 4.5,
+    "normalScale": 1.3,
+    "roughness": 1,
+    "heightContrast": 0.7
+  },
+  {
+    "id": "eltania-ground-v1/forestBlight",
+    "family": "eltania-ground-v1",
+    "key": "forestBlight",
+    "label": "Blighted forest floor",
+    "role": "terrain.soil",
+    "note": "forestLitter with its hue moved to violet and its luminance kept: the Wounded Grove's sick ground (client/scripts/material-ai/derive-forest-blight.mjs; hand-registered while the family sources are off disk)",
+    "source": "forrest_ground_01",
+    "textures": {
+      "albedo": "/eltania/terrain/palette/eltania-ground-v1/forestBlight-albedo.webp",
+      "normal": "/eltania/terrain/palette/eltania-ground-v1/forestBlight-normal.webp",
+      "hrm": "/eltania/terrain/palette/eltania-ground-v1/forestBlight-hrm.webp"
+    },
+    "preview": "/eltania/terrain/palette/eltania-ground-v1/previews/forestBlight-preview.webp",
+    "tileMetres": 4.5,
+    "normalScale": 1.3,
+    "roughness": 1,
+    "heightContrast": 0.7
+  },
+  {
     "id": "eltania-ground-v1/grassDry",
     "family": "eltania-ground-v1",
     "key": "grassDry",
@@ -125,6 +163,25 @@ export const ELTANIA_TERRAIN_PALETTE_MATERIALS: readonly EltaniaTerrainMaterial[
       "hrm": "/eltania/terrain/palette/eltania-ground-v1/grassLush-hrm.webp"
     },
     "preview": "/eltania/terrain/palette/eltania-ground-v1/previews/grassLush-preview.webp",
+    "tileMetres": 6,
+    "normalScale": 1.2,
+    "roughness": 1,
+    "heightContrast": 0.55
+  },
+  {
+    "id": "eltania-ground-v1/grassMeadow",
+    "family": "eltania-ground-v1",
+    "key": "grassMeadow",
+    "label": "Green meadow grass",
+    "role": "terrain.grass",
+    "note": "grassLush with its hue moved to green and its luminance kept, for pasture that reads green under any biome tint (client/scripts/material-ai/derive-grass-meadow.mjs; hand-registered while the family sources are off disk)",
+    "source": "leafy_grass",
+    "textures": {
+      "albedo": "/eltania/terrain/palette/eltania-ground-v1/grassMeadow-albedo.webp",
+      "normal": "/eltania/terrain/palette/eltania-ground-v1/grassMeadow-normal.webp",
+      "hrm": "/eltania/terrain/palette/eltania-ground-v1/grassMeadow-hrm.webp"
+    },
+    "preview": "/eltania/terrain/palette/eltania-ground-v1/previews/grassMeadow-preview.webp",
     "tileMetres": 6,
     "normalScale": 1.2,
     "roughness": 1,
