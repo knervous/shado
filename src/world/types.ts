@@ -715,7 +715,13 @@ export type ShadoWorldEnvironmentAuthoring = {
   interior?: boolean;
   weather: { preset: string; intensity: number; wind: WorldVec3 };
   timeOfDay: { hour: number; cycleSeconds: number; running: boolean };
-  water: { enabled: boolean; level: number; material?: string; reflections: boolean };
+  /**
+   * Authored lakes and rivers. Each owns a `kind: 'water'` region, which the
+   * validator requires: the navmesh, the lake reseat and the runtime's region
+   * tree all find water by its region, so a body without one is water the
+   * rest of the world cannot see.
+   */
+  waterBodies?: ShadoWorldWaterBody[];
   audioEmitters: Array<{ id: string; source: string; position: WorldVec3; range: number; volume: number; loop: boolean; metadata: Record<string, unknown> }>;
   reflectionProbes: Array<{ id: string; position: WorldVec3; size: WorldVec3; resolution: number; refresh: 'bake' | 'once' | 'runtime'; metadata: Record<string, unknown> }>;
   /** Authored participating-media volumes. Absent or empty is the zone default alone. */
@@ -816,6 +822,37 @@ export type ShadoWorldPlayabilityAuthoring = {
   entrances: Array<{ id: string; position: WorldVec3; radius: number; required: boolean }>;
   criticalRegions: string[];
   probes: Array<{ id: string; from: WorldVec3; to: WorldVec3; kind: 'walk' | 'line-of-sight' | 'fall-recovery'; required: boolean }>;
+};
+
+/**
+ * A lake or a river, authored as a shape rather than a mesh.
+ *
+ * The surface is generated from this at bake time against the zone's final
+ * ground (sculpting included), so its depth-to-bed and flow attributes can
+ * never drift from the ground they describe. Everything is in world units.
+ */
+export type ShadoWorldWaterBody = {
+  id: string;
+  name: string;
+  enabled: boolean;
+  kind: 'lake' | 'river';
+  /** Lake: the surface height. River: the height of any path point without its own. */
+  level: number;
+  /** Lake: the waterline, a closed polygon in world XZ. */
+  outline?: Array<[number, number]>;
+  /** River: the centreline, upstream first; each point carries its width and surface height. */
+  path?: Array<{ x: number; z: number; width: number; level: number }>;
+  /** Current in units per second: along the path for a river, along `flowDirection` for a lake. */
+  flowSpeed: number;
+  /** Lake drift direction in XZ; ignored by rivers. */
+  flowDirection?: [number, number];
+  /** Extra foam, 0..1, on top of what depth and slope produce. */
+  foam: number;
+  /** How far below the surface the owned region reaches, to take in the bed. */
+  depth: number;
+  /** The `kind: 'water'` region this body owns. */
+  regionId: string;
+  metadata: Record<string, unknown>;
 };
 
 export type ShadoWorldAuthoringDocument = {

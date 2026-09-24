@@ -32,7 +32,7 @@ export const DEFAULT_SHADO_WORLD_ENVIRONMENT: ShadoWorldEnvironmentAuthoring = {
   ambient: { color: [0.65, 0.72, 0.88], intensity: 1.15 },
   weather: { preset: 'clear', intensity: 0, wind: [0, 0, 0] },
   timeOfDay: { hour: 12, cycleSeconds: 0, running: false },
-  water: { enabled: false, level: 0, reflections: true },
+  waterBodies: [],
   audioEmitters: [],
   reflectionProbes: [],
   mediaVolumes: [],
@@ -117,6 +117,10 @@ export function validateShadoWorldAuthoring(
   document.terrain ??= { enabled: false, controlMaps: [], layers: [] };
   document.bake ??= { ...DEFAULT_SHADO_WORLD_BAKE_SETTINGS };
   document.environment ??= structuredClone(DEFAULT_SHADO_WORLD_ENVIRONMENT);
+  // The old zone-wide water switch drove nothing at runtime; water is authored
+  // as bodies now. Dropped on load so documents shed it on their next save.
+  delete (document.environment as { water?: unknown }).water;
+  document.environment.waterBodies ??= [];
   document.performanceBudgets ??= { ...DEFAULT_SHADO_WORLD_PERFORMANCE_BUDGETS };
   document.playability ??= { fallRecoveryY: -10_000, recoveryPosition: [0, 0, 0], entrances: [], criticalRegions: [], probes: [] };
   const ids = new Set<string>();
@@ -153,15 +157,44 @@ function validateEnvironment(document: ShadoWorldAuthoringDocument): void {
   validateVec3(environment.weather.wind, 'World weather wind', false);
   validateZoneAmbience(environment.ambience);
   if (environment.sky.texture !== undefined && !environment.sky.texture.trim()) throw new Error('World sky texture must be a non-empty URL');
-  for (const [name, value] of Object.entries({ skyIntensity: environment.sky.intensity, fogDensity: environment.fog.density, fogStart: environment.fog.start, fogEnd: environment.fog.end, ambientIntensity: environment.ambient.intensity, weatherIntensity: environment.weather.intensity, hour: environment.timeOfDay.hour, cycleSeconds: environment.timeOfDay.cycleSeconds, waterLevel: environment.water.level })) if (!Number.isFinite(value)) throw new Error(`World environment ${name} must be finite`);
+  for (const [name, value] of Object.entries({ skyIntensity: environment.sky.intensity, fogDensity: environment.fog.density, fogStart: environment.fog.start, fogEnd: environment.fog.end, ambientIntensity: environment.ambient.intensity, weatherIntensity: environment.weather.intensity, hour: environment.timeOfDay.hour, cycleSeconds: environment.timeOfDay.cycleSeconds })) if (!Number.isFinite(value)) throw new Error(`World environment ${name} must be finite`);
   const ids = new Set<string>();
   for (const emitter of environment.audioEmitters) { if (!emitter.id?.trim() || ids.has(emitter.id) || !emitter.source?.trim()) throw new Error('World audio emitters require unique IDs and sources'); validateComponentSource(emitter.source, `Audio emitter '${emitter.id}'`); ids.add(emitter.id); validateVec3(emitter.position, `Audio emitter '${emitter.id}' position`, false); positive(emitter.range, `Audio emitter '${emitter.id}' range`); if (!Number.isFinite(emitter.volume) || emitter.volume < 0) throw new Error(`Audio emitter '${emitter.id}' volume must be non-negative`); validateMetadata(emitter.metadata, `Audio emitter '${emitter.id}'`); }
   ids.clear();
   validateMediaVolumes(environment);
+  validateWaterBodies(document);
   validateVolumetricMedium(environment);
   validateParticleEmitters(environment);
   ids.clear();
   for (const probe of environment.reflectionProbes) { if (!probe.id?.trim() || ids.has(probe.id)) throw new Error('World reflection probes require unique IDs'); ids.add(probe.id); validateVec3(probe.position, `Reflection probe '${probe.id}' position`, false); validateVec3(probe.size, `Reflection probe '${probe.id}' size`, true); positive(probe.resolution, `Reflection probe '${probe.id}' resolution`); validateMetadata(probe.metadata, `Reflection probe '${probe.id}'`); }
+}
+
+/** Lakes and rivers: well-formed shapes, and each owning a water region. */
+function validateWaterBodies(document: ShadoWorldAuthoringDocument): void {
+  const ids = new Set<string>();
+  const owners = new Map<string, string>();
+  for (const body of document.environment.waterBodies ?? []) {
+    const label = `Water body '${body?.id}'`;
+    if (!body?.id?.trim() || ids.has(body.id)) throw new Error('World water bodies require unique IDs');
+    ids.add(body.id);
+    if (body.kind !== 'lake' && body.kind !== 'river') throw new Error(`${label} kind must be lake or river`);
+    for (const [name, value] of Object.entries({ level: body.level, flowSpeed: body.flowSpeed, foam: body.foam, depth: body.depth })) {
+      if (!Number.isFinite(value)) throw new Error(`${label} ${name} must be finite`);
+    }
+    if (body.depth <= 0) throw new Error(`${label} depth must be positive`);
+    if (body.kind === 'lake') {
+      if (!Array.isArray(body.outline) || body.outline.length < 3 || body.outline.some(point => !Array.isArray(point) || !Number.isFinite(point[0]) || !Number.isFinite(point[1]))) {
+        throw new Error(`${label} needs an outline of at least three finite points`);
+      }
+    } else if (!Array.isArray(body.path) || body.path.length < 2 || body.path.some(point => ![point?.x, point?.z, point?.level].every(Number.isFinite) || !(point.width > 0))) {
+      throw new Error(`${label} needs a path of at least two points with positive widths`);
+    }
+    const region = document.regions.find(entry => entry.id === body.regionId);
+    if (!region || region.kind !== 'water') throw new Error(`${label} must own a water region; '${body.regionId}' is ${region ? `a ${region.kind} region` : 'missing'}`);
+    if (owners.has(body.regionId)) throw new Error(`${label} and '${owners.get(body.regionId)}' cannot share region '${body.regionId}'`);
+    owners.set(body.regionId, body.id);
+    validateMetadata(body.metadata, label);
+  }
 }
 
 /**
