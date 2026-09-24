@@ -79,7 +79,8 @@ export type EltaniaTerrainControlChannel =
   | 'exposure'
   | 'wetness'
   | 'paving'
-  | 'gravel';
+  | 'gravel'
+  | 'tillage';
 
 export type EltaniaTerrainControlDefinition = {
   channel: EltaniaTerrainControlChannel;
@@ -152,6 +153,22 @@ export const ELTANIA_TERRAIN_CONTROLS: readonly EltaniaTerrainControlDefinition[
     component: 1,
     label: 'Loose stone',
     effect: 'Brings up scree and gravel on flat ground, for verges, yards and the edges of made surfaces.',
+  },
+  /*
+   * Ploughed ground is not a path and not wet.
+   *
+   * A cabbage plot borrowing `path` would take the cart track's causeway
+   * protrusion and read as a road; borrowing `wetness` would darken every
+   * field as though it had flooded. Tilth is a decision a farmer made about a
+   * rectangle, like paving is a decision a mason made, so it gets its own
+   * brush. Farmland zones (the Greymarch) paint it from their field plan.
+   */
+  {
+    channel: 'tillage',
+    map: 1,
+    component: 2,
+    label: 'Tilled soil',
+    effect: 'Brings up ploughed earth in worked fields and kitchen plots, and stops grass there.',
   },
 ];
 
