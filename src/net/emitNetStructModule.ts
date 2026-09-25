@@ -36,11 +36,13 @@ export function emitNetStructModule(
   lines.push(declarations.join('\n\n'), '');
   for (const spec of specs) lines.push(emitPacket(layouts.get(spec.name)!), '');
   lines.push(emitHelpers(), '');
+  if ([...layouts.values()].some(layout => layout.variable)) lines.push(emitHeapHelpers(), '');
   return `${lines.join('\n').trimEnd()}\n`;
 }
 
 function emitPacket(layout: NetStructLayout): string {
   if (layout.storage === 'soa') return emitSoAPacket(layout);
+  if (layout.variable) return emitMessagePacket(layout);
   const constant = constantName(layout.name);
   return `export const ${constant}_SCHEMA_ID = ${layout.schemaId};
 export const ${constant}_VERSION = ${layout.version};
@@ -109,6 +111,86 @@ export function encode${layout.name}(
 export function decode${layout.name}(bytes: Uint8Array): ${layout.name} | null {
   const view = view${layout.name}(bytes);
   return view ? read${layout.name}(view) : null;
+}`;
+}
+
+function emitMessagePacket(layout: NetStructLayout): string {
+  const constant = constantName(layout.name);
+  const name = layout.name;
+  return `export const ${constant}_SCHEMA_ID = ${layout.schemaId};
+export const ${constant}_VERSION = ${layout.version};
+export const ${constant}_STRIDE = ${layout.stride};
+export const ${constant}_SCHEMA_HASH = 0x${layout.schemaHash.toString(16)}n;
+
+export class ${name}BatchView {
+  readonly count: number;
+  readonly heapOffset: number;
+  readonly heapLength: number;
+
+  constructor(readonly bytes: Uint8Array) {
+    this.count = readNetMessageHeader(
+      bytes,
+      ${constant}_SCHEMA_ID,
+      ${constant}_VERSION,
+      ${constant}_SCHEMA_HASH,
+      ${constant}_STRIDE
+    );
+    const heapStart = netHeapStart(${constant}_STRIDE, this.count);
+    this.heapOffset = bytes.byteOffset + heapStart;
+    this.heapLength = bytes.byteLength - heapStart;
+  }
+
+  record(index: number): ${name}View {
+    assertRecordIndex(index, this.count);
+    return new ${name}View(
+      this.bytes.buffer,
+      this.bytes.byteOffset + NET_HEADER_BYTES + index * ${constant}_STRIDE,
+      this.heapOffset,
+      this.heapLength
+    );
+  }
+}
+
+export function encode${name}Batch(values: readonly Readonly<${name}>[]): Uint8Array {
+  let heapBytes = 0;
+  for (const value of values) heapBytes = measure${name}(value, heapBytes);
+  const bytes = createNetMessagePacket(
+    ${constant}_SCHEMA_ID,
+    ${constant}_VERSION,
+    ${constant}_SCHEMA_HASH,
+    ${constant}_STRIDE,
+    values.length,
+    heapBytes
+  );
+  const heap: NetHeapWriter = {
+    base: bytes.byteOffset + netHeapStart(${constant}_STRIDE, values.length),
+    cursor: 0,
+  };
+  for (let i = 0; i < values.length; i++) {
+    write${name}(
+      new ${name}View(bytes.buffer, bytes.byteOffset + NET_HEADER_BYTES + i * ${constant}_STRIDE),
+      values[i]!,
+      heap
+    );
+  }
+  return bytes;
+}
+
+export function encode${name}(value: Readonly<${name}>): Uint8Array {
+  return encode${name}Batch([value]);
+}
+
+export function view${name}(bytes: Uint8Array, index = 0): ${name}View | null {
+  try {
+    return new ${name}BatchView(bytes).record(index);
+  } catch {
+    return null;
+  }
+}
+
+export function decode${name}(bytes: Uint8Array): ${name} | null {
+  const view = view${name}(bytes);
+  return view ? read${name}(view) : null;
 }`;
 }
 
@@ -195,6 +277,11 @@ function flattenSoAFields(
 }> {
   return layout.fields.flatMap(field => {
     const path = prefix ? `${prefix}${capitalize(field.name)}` : field.name;
+    if (field.kind === 'var') {
+      throw new Error(
+        `${layout.name}.${field.name}: SoA planes cannot hold variable-length fields`
+      );
+    }
     if (field.kind === 'struct') {
       if (field.count !== 1) {
         throw new Error(
@@ -226,9 +313,10 @@ function emitRecord(
   emitted.add(viewName);
 
   for (const field of layout.fields) {
-    if (field.kind !== 'struct') continue;
-    const names = nestedNames(field, interfaceName);
-    emitRecord(field.struct, names.interfaceName, names.viewName, output, emitted);
+    const struct = field.kind === 'scalar' ? undefined : field.struct;
+    if (!struct) continue;
+    const names = nestedNames(field.name, struct, interfaceName);
+    emitRecord(struct, names.interfaceName, names.viewName, output, emitted);
   }
 
   const members = layout.fields.map(
@@ -247,7 +335,9 @@ export class ${viewName} {
 
   constructor(
     readonly buffer: ArrayBufferLike,
-    readonly byteOffset = 0
+    readonly byteOffset = 0${
+      layout.variable ? ',\n    readonly heapOffset = 0,\n    readonly heapLength = 0' : ''
+    }
   ) {
     assertViewBounds(buffer, byteOffset, ${layout.stride}, '${viewName}');
   }
@@ -257,11 +347,11 @@ ${indent(accessors, 2)}
 
 export function write${interfaceName}(
   target: ${viewName},
-  value: Readonly<${interfaceName}>
+  value: Readonly<${interfaceName}>${layout.variable ? ',\n  heap: NetHeapWriter' : ''}
 ): void {
 ${indent(writes, 2)}
 }
-
+${layout.variable ? `\n${emitMeasure(layout, interfaceName)}\n` : ''}
 export function read${interfaceName}(source: ${viewName}): ${interfaceName} {
   return {
 ${indent(reads, 4)}
@@ -270,27 +360,72 @@ ${indent(reads, 4)}
 }
 
 function fieldInterfaceType(field: NetFieldLayout, owner: string): string {
+  if (field.kind === 'var') {
+    if (field.varKind === 'str') return 'string';
+    if (field.varKind === 'bytes') return 'Uint8Array';
+    if (field.varKind === 'scalarList') return `readonly ${tsType(field.element!)}[]`;
+    return `readonly ${nestedNames(field.name, field.struct!, owner).interfaceName}[]`;
+  }
   if (field.kind === 'struct') {
-    const type = nestedNames(field, owner).interfaceName;
+    const type = nestedNames(field.name, field.struct, owner).interfaceName;
     return field.count === 1 ? type : `readonly ${type}[]`;
   }
   const scalar = tsType(field.type);
   return field.count === 1 ? scalar : `readonly ${scalar}[]`;
 }
 
+function heapArgs(struct: NetStructLayout): string {
+  return struct.variable ? ', this.heapOffset, this.heapLength' : '';
+}
+
+function emitVarAccessor(field: Extract<NetFieldLayout, { kind: 'var' }>, owner: string): string {
+  const slot = field.byteOffset;
+  if (field.varKind === 'str' || field.varKind === 'bytes') {
+    const bytesName = field.varKind === 'str' ? `${field.name}Bytes` : field.name;
+    const bytes = `get ${bytesName}(): Uint8Array {
+  return new Uint8Array(this.buffer, netHeapAt(this, ${slot}, 1), netHeapCount(this, ${slot}));
+}`;
+    if (field.varKind === 'bytes') return bytes;
+    return `get ${field.name}(): string {
+  return netTextDecoder.decode(this.${bytesName});
+}
+
+${bytes}`;
+  }
+  if (field.varKind === 'scalarList') {
+    return `get ${field.name}(): ${typedArrayName(field.element!)} {
+  return netHeapTyped(${typedArrayName(field.element!)}, this, ${slot});
+}`;
+  }
+  const struct = field.struct!;
+  const nested = nestedNames(field.name, struct, owner);
+  return `get ${field.name}Length(): number {
+  return netHeapCount(this, ${slot});
+}
+
+${field.name}(index: number): ${nested.viewName} {
+  assertRecordIndex(index, this.${field.name}Length);
+  return new ${nested.viewName}(
+    this.buffer,
+    netHeapAt(this, ${slot}, ${struct.stride}) + index * ${struct.stride}${heapArgs(struct)}
+  );
+}`;
+}
+
 function emitAccessor(field: NetFieldLayout, owner: string): string {
+  if (field.kind === 'var') return emitVarAccessor(field, owner);
   if (field.kind === 'struct') {
-    const nested = nestedNames(field, owner);
+    const nested = nestedNames(field.name, field.struct, owner);
     if (field.count === 1) {
       return `get ${field.name}(): ${nested.viewName} {
-  return new ${nested.viewName}(this.buffer, this.byteOffset + ${field.byteOffset});
+  return new ${nested.viewName}(this.buffer, this.byteOffset + ${field.byteOffset}${heapArgs(field.struct)});
 }`;
     }
     return `${field.name}(index: number): ${nested.viewName} {
   assertRecordIndex(index, ${field.count});
   return new ${nested.viewName}(
     this.buffer,
-    this.byteOffset + ${field.byteOffset} + index * ${field.struct.stride}
+    this.byteOffset + ${field.byteOffset} + index * ${field.struct.stride}${heapArgs(field.struct)}
   );
 }`;
   }
@@ -320,14 +455,52 @@ set ${field.name}(value: ${tsType(field.type)}) {
 }`;
 }
 
+function emitVarWrite(field: Extract<NetFieldLayout, { kind: 'var' }>, owner: string): string {
+  const slot = field.byteOffset;
+  const value = `value.${field.name}`;
+  if (field.varKind === 'str') return `netWriteText(target, ${slot}, ${value}, heap);`;
+  if (field.varKind === 'bytes') {
+    return `new Uint8Array(target.buffer).set(
+  ${value},
+  netHeapReserve(target, ${slot}, heap, ${value}.byteLength, 1, 1)
+);`;
+  }
+  if (field.varKind === 'scalarList') {
+    const type = field.element!;
+    const size = scalarByteSize(type);
+    const littleEndian = size > 1 ? ', true' : '';
+    const item = type === 'bool' ? `${value}[i] ? 1 : 0` : `${value}[i]!`;
+    return `{
+  const at = netHeapReserve(target, ${slot}, heap, ${value}.length, ${size}, ${size});
+  const view = new DataView(target.buffer);
+  for (let i = 0; i < ${value}.length; i++) {
+    view.set${scalarDataViewSuffix(type)}(at + i * ${size}, ${item}${littleEndian});
+  }
+}`;
+  }
+  const struct = field.struct!;
+  const nested = nestedNames(field.name, struct, owner);
+  return `{
+  const at = netHeapReserve(target, ${slot}, heap, ${value}.length, ${struct.stride}, ${struct.alignment});
+  for (let i = 0; i < ${value}.length; i++) {
+    write${nested.interfaceName}(
+      new ${nested.viewName}(target.buffer, at + i * ${struct.stride}),
+      ${value}[i]!${struct.variable ? ',\n      heap' : ''}
+    );
+  }
+}`;
+}
+
 function emitObjectWrite(field: NetFieldLayout, owner: string): string {
+  if (field.kind === 'var') return emitVarWrite(field, owner);
   if (field.kind === 'struct') {
-    const nested = nestedNames(field, owner);
+    const nested = nestedNames(field.name, field.struct, owner);
+    const heap = field.struct.variable ? ', heap' : '';
     if (field.count === 1)
-      return `write${nested.interfaceName}(target.${field.name}, value.${field.name});`;
+      return `write${nested.interfaceName}(target.${field.name}, value.${field.name}${heap});`;
     return `assertArrayCount(value.${field.name}, ${field.count}, '${owner}.${field.name}');
   for (let i = 0; i < ${field.count}; i++) {
-    write${nested.interfaceName}(target.${field.name}(i), value.${field.name}[i]!);
+    write${nested.interfaceName}(target.${field.name}(i), value.${field.name}[i]!${heap});
   }`;
   }
   if (field.count === 1) return `target.${field.name} = value.${field.name};`;
@@ -339,9 +512,60 @@ function emitObjectWrite(field: NetFieldLayout, owner: string): string {
   target.${field.name}.set(value.${field.name});`;
 }
 
+/**
+ * The heap bytes a record needs, walked in exactly the order its writer
+ * reserves them, so a packet is sized once and written without growing.
+ */
+function emitMeasure(layout: NetStructLayout, interfaceName: string): string {
+  const steps = layout.fields.flatMap(field => {
+    const value = `value.${field.name}`;
+    if (field.kind === 'scalar') return [];
+    if (field.kind === 'struct') {
+      if (!field.struct.variable) return [];
+      const nested = nestedNames(field.name, field.struct, interfaceName);
+      if (field.count === 1) return [`cursor = measure${nested.interfaceName}(${value}, cursor);`];
+      return [
+        `for (const item of ${value}) cursor = measure${nested.interfaceName}(item, cursor);`,
+      ];
+    }
+    if (field.varKind === 'str')
+      return [`cursor = netHeapMeasure(cursor, netUtf8Length(${value}), 1, 1);`];
+    if (field.varKind === 'bytes')
+      return [`cursor = netHeapMeasure(cursor, ${value}.byteLength, 1, 1);`];
+    if (field.varKind === 'scalarList') {
+      const size = scalarByteSize(field.element!);
+      return [`cursor = netHeapMeasure(cursor, ${value}.length, ${size}, ${size});`];
+    }
+    const struct = field.struct!;
+    const reserve = `cursor = netHeapMeasure(cursor, ${value}.length, ${struct.stride}, ${struct.alignment});`;
+    if (!struct.variable) return [reserve];
+    const nested = nestedNames(field.name, struct, interfaceName);
+    return [
+      reserve,
+      `for (const item of ${value}) cursor = measure${nested.interfaceName}(item, cursor);`,
+    ];
+  });
+  return `export function measure${interfaceName}(value: Readonly<${interfaceName}>, cursor: number): number {
+${steps.map(step => `  ${step}`).join('\n')}
+  return cursor;
+}`;
+}
+
 function emitObjectRead(field: NetFieldLayout, owner: string): string {
+  if (field.kind === 'var') {
+    if (field.varKind === 'str') return `${field.name}: source.${field.name},`;
+    if (field.varKind === 'bytes') return `${field.name}: source.${field.name}.slice(),`;
+    if (field.varKind === 'scalarList') {
+      return field.element === 'bool'
+        ? `${field.name}: Array.from(source.${field.name}, value => value !== 0),`
+        : `${field.name}: Array.from(source.${field.name}),`;
+    }
+    const nested = nestedNames(field.name, field.struct!, owner);
+    return `${field.name}: Array.from({ length: source.${field.name}Length }, (_, i) =>
+      read${nested.interfaceName}(source.${field.name}(i))),`;
+  }
   if (field.kind === 'struct') {
-    const nested = nestedNames(field, owner);
+    const nested = nestedNames(field.name, field.struct, owner);
     if (field.count === 1)
       return `${field.name}: read${nested.interfaceName}(source.${field.name}),`;
     return `${field.name}: Array.from({ length: ${field.count} }, (_, i) =>
@@ -353,11 +577,11 @@ function emitObjectRead(field: NetFieldLayout, owner: string): string {
   return `${field.name}: Array.from(source.${field.name}),`;
 }
 
-function nestedNames(field: Extract<NetFieldLayout, { kind: 'struct' }>, owner: string) {
-  if (!field.struct.projectionOf) {
-    return { interfaceName: field.struct.name, viewName: `${field.struct.name}View` };
+function nestedNames(fieldName: string, struct: NetStructLayout, owner: string) {
+  if (!struct.projectionOf) {
+    return { interfaceName: struct.name, viewName: `${struct.name}View` };
   }
-  const interfaceName = `${owner}${capitalize(field.name)}`;
+  const interfaceName = `${owner}${capitalize(fieldName)}`;
   return { interfaceName, viewName: `${interfaceName}View` };
 }
 
@@ -452,6 +676,151 @@ function netSoAPlaneOffset(
   }
   const plane = planes[planeIndex]!;
   return Math.ceil(offset / plane.alignment) * plane.alignment;
+}`;
+}
+
+function emitHeapHelpers(): string {
+  return `// Variable-length data lives in a heap after the records, starting on an
+// 8-byte boundary. A record holds a \`u32 offset | u32 count\` slot per field,
+// with the offset relative to the heap and aligned for the element type, so
+// scalar lists read back as typed arrays over the packet without a copy.
+const netTextEncoder = new TextEncoder();
+const netTextDecoder = new TextDecoder('utf-8', { fatal: true });
+
+interface NetHeapSource {
+  readonly buffer: ArrayBufferLike;
+  readonly byteOffset: number;
+  readonly heapOffset: number;
+  readonly heapLength: number;
+}
+
+export interface NetHeapWriter {
+  /** Absolute byte offset of the heap in the packet's buffer. */
+  readonly base: number;
+  /** Heap bytes reserved so far. */
+  cursor: number;
+}
+
+function netHeapStart(stride: number, count: number): number {
+  return NET_HEADER_BYTES + Math.ceil((stride * count) / 8) * 8;
+}
+
+function createNetMessagePacket(
+  schemaId: number,
+  version: number,
+  schemaHash: bigint,
+  stride: number,
+  count: number,
+  heapBytes: number
+): Uint8Array {
+  if (!Number.isSafeInteger(count) || count < 0) throw new RangeError('net record count must be a non-negative safe integer');
+  if (count > 0xffffffff) throw new RangeError('net record count exceeds u32');
+  const bytes = new Uint8Array(netHeapStart(stride, count) + heapBytes);
+  const view = new DataView(bytes.buffer);
+  view.setUint32(0, NET_MAGIC, true);
+  view.setUint16(4, NET_CODEC_VERSION, true);
+  view.setUint32(8, schemaId, true);
+  view.setUint16(12, version, true);
+  view.setUint16(14, NET_HEADER_BYTES, true);
+  view.setBigUint64(16, schemaHash, true);
+  view.setUint32(24, stride, true);
+  view.setUint32(28, count, true);
+  return bytes;
+}
+
+function readNetMessageHeader(
+  bytes: Uint8Array,
+  schemaId: number,
+  version: number,
+  schemaHash: bigint,
+  stride: number
+): number {
+  if (bytes.byteLength < NET_HEADER_BYTES) throw new RangeError('truncated net header');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  if (
+    view.getUint32(0, true) !== NET_MAGIC ||
+    view.getUint16(4, true) !== NET_CODEC_VERSION ||
+    view.getUint32(8, true) !== schemaId ||
+    view.getUint16(12, true) !== version ||
+    view.getUint16(14, true) !== NET_HEADER_BYTES ||
+    view.getBigUint64(16, true) !== schemaHash ||
+    view.getUint32(24, true) !== stride
+  ) throw new TypeError('net schema or ABI mismatch');
+  const count = view.getUint32(28, true);
+  if (bytes.byteLength < netHeapStart(stride, count)) throw new RangeError('invalid net payload length');
+  return count;
+}
+
+function netHeapCount(source: NetHeapSource, slot: number): number {
+  return new DataView(source.buffer).getUint32(source.byteOffset + slot + 4, true);
+}
+
+function netHeapAt(source: NetHeapSource, slot: number, elementSize: number): number {
+  const view = new DataView(source.buffer);
+  const start = view.getUint32(source.byteOffset + slot, true);
+  const count = view.getUint32(source.byteOffset + slot + 4, true);
+  if (start + count * elementSize > source.heapLength) throw new RangeError('net heap reference out of bounds');
+  return source.heapOffset + start;
+}
+
+function netHeapTyped<T>(
+  type: { new (buffer: ArrayBufferLike, byteOffset: number, length: number): T; readonly BYTES_PER_ELEMENT: number },
+  source: NetHeapSource,
+  slot: number
+): T {
+  const count = netHeapCount(source, slot);
+  const at = netHeapAt(source, slot, type.BYTES_PER_ELEMENT);
+  if (at % type.BYTES_PER_ELEMENT === 0) return new type(source.buffer, at, count);
+  // Only a packet copied to a misaligned offset lands here; it reads through one copy.
+  const copy = new Uint8Array(count * type.BYTES_PER_ELEMENT);
+  copy.set(new Uint8Array(source.buffer, at, copy.byteLength));
+  return new type(copy.buffer, 0, count);
+}
+
+function netHeapMeasure(cursor: number, count: number, elementSize: number, alignment: number): number {
+  return Math.ceil(cursor / alignment) * alignment + count * elementSize;
+}
+
+function netHeapReserve(
+  target: { readonly buffer: ArrayBufferLike; readonly byteOffset: number },
+  slot: number,
+  heap: NetHeapWriter,
+  count: number,
+  elementSize: number,
+  alignment: number
+): number {
+  const start = Math.ceil(heap.cursor / alignment) * alignment;
+  heap.cursor = start + count * elementSize;
+  const view = new DataView(target.buffer);
+  view.setUint32(target.byteOffset + slot, start, true);
+  view.setUint32(target.byteOffset + slot + 4, count, true);
+  return heap.base + start;
+}
+
+function netWriteText(
+  target: { readonly buffer: ArrayBufferLike; readonly byteOffset: number },
+  slot: number,
+  value: string,
+  heap: NetHeapWriter
+): void {
+  const length = netUtf8Length(value);
+  const at = netHeapReserve(target, slot, heap, length, 1, 1);
+  netTextEncoder.encodeInto(value, new Uint8Array(target.buffer, at, length));
+}
+
+/** UTF-8 byte length without encoding, matching TextEncoder (lone surrogates become U+FFFD). */
+function netUtf8Length(value: string): number {
+  let length = 0;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code < 0x80) length += 1;
+    else if (code < 0x800) length += 2;
+    else if (code >= 0xd800 && code < 0xdc00 && (value.charCodeAt(i + 1) & 0xfc00) === 0xdc00) {
+      length += 4;
+      i++;
+    } else length += 3;
+  }
+  return length;
 }`;
 }
 

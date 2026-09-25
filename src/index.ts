@@ -12,6 +12,7 @@ export * from './net/NetLayout';
 export * from './net/NetSoA';
 export * from './core/ShadoInstanceSoA';
 export * from './net/emitNetStructModule';
+export * from './net/emitNetStructRustModule';
 export * from './includes/register';
 export * from './backings/DataTexBacking';
 export * from './backings/StorageBacking';

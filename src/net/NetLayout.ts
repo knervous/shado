@@ -24,7 +24,30 @@ export interface NetStructFieldSpec {
   readonly visibility?: 'public' | 'private';
 }
 
-export type NetFieldSpec = NetScalarFieldSpec | NetStructFieldSpec;
+/**
+ * A list stored out of line in the packet's heap: scalars, or fixed records
+ * (which may themselves carry variable-length fields).
+ */
+export interface NetListType {
+  readonly list: AoSScalarType | NetStructRef;
+}
+
+/** Variable-length data: UTF-8 text, raw bytes, or a list. */
+export type NetVarType = 'str' | 'bytes' | NetListType;
+
+/**
+ * A field whose data lives in the heap after the records. The record keeps an
+ * 8-byte slot, `u32 heap offset | u32 element count`, so the fixed region never
+ * moves and a reader can reach any value without walking anything before it.
+ */
+export interface NetVarFieldSpec {
+  readonly id: number;
+  readonly name: string;
+  readonly type: NetVarType;
+  readonly visibility?: 'public' | 'private';
+}
+
+export type NetFieldSpec = NetScalarFieldSpec | NetStructFieldSpec | NetVarFieldSpec;
 
 export interface NetStructSpec {
   readonly name: string;
@@ -59,7 +82,29 @@ export interface NetStructFieldLayout extends NetStructFieldSpec {
   readonly struct: NetStructLayout;
 }
 
-export type NetFieldLayout = NetScalarFieldLayout | NetStructFieldLayout;
+export interface NetVarFieldLayout extends NetVarFieldSpec {
+  readonly kind: 'var';
+  readonly varKind: 'str' | 'bytes' | 'scalarList' | 'structList';
+  /** Element scalar type for `str`/`bytes` (u8) and scalar lists. */
+  readonly element?: AoSScalarType;
+  /** Element record for struct lists. */
+  readonly struct?: NetStructLayout;
+  readonly elementSize: number;
+  readonly elementAlignment: number;
+  readonly count: 1;
+  readonly byteOffset: number;
+  readonly byteSize: 8;
+  readonly alignment: 4;
+}
+
+export type NetFieldLayout = NetScalarFieldLayout | NetStructFieldLayout | NetVarFieldLayout;
+
+/** Bytes of the in-record slot a variable-length field occupies. */
+export const NET_VAR_SLOT_BYTES = 8;
+
+export function isNetVarType(type: NetFieldSpec['type']): type is NetVarType {
+  return type === 'str' || type === 'bytes' || (typeof type === 'object' && 'list' in type);
+}
 
 export interface NetStructLayout {
   readonly name: string;
@@ -75,6 +120,8 @@ export interface NetStructLayout {
   readonly projectionOf?: string;
   readonly storage: 'aos' | 'soa';
   readonly variants: readonly NetVariantSpec[];
+  /** True when this record, or any record inside it, has heap data. */
+  readonly variable: boolean;
 }
 
 /**
@@ -140,12 +187,59 @@ function compileFields(
     if (!Number.isSafeInteger(field.id) || field.id <= 0 || ids.has(field.id)) {
       throw new Error(`Invalid or duplicate field id: ${field.id}`);
     }
-    const count = field.count ?? 1;
+    const count = ('count' in field ? field.count : undefined) ?? 1;
     if (!Number.isSafeInteger(count) || count <= 0) {
       throw new Error(`${owner.name}.${field.name} count must be a positive safe integer`);
     }
     names.add(field.name);
     ids.add(field.id);
+
+    if (isNetVarType(field.type)) {
+      if (count !== 1)
+        throw new Error(
+          `${owner.name}.${field.name}: variable fields cannot be arrays; use a list`
+        );
+      const type = field.type;
+      let varLayout: Omit<
+        NetVarFieldLayout,
+        keyof NetVarFieldSpec | 'kind' | 'count' | 'byteOffset' | 'byteSize' | 'alignment'
+      >;
+      if (type === 'str' || type === 'bytes') {
+        varLayout = { varKind: type, element: 'u8', elementSize: 1, elementAlignment: 1 };
+      } else if (typeof type.list === 'string') {
+        const info = AOS_SCALAR_INFO[type.list];
+        if (!info) throw new Error(`Unsupported net list element type: ${String(type.list)}`);
+        varLayout = {
+          varKind: 'scalarList',
+          element: type.list,
+          elementSize: info.byteSize,
+          elementAlignment: info.alignment,
+        };
+      } else {
+        const element = resolveStructRef(owner, field.name, type.list, resolve);
+        varLayout = {
+          varKind: 'structList',
+          struct: element,
+          elementSize: element.stride,
+          elementAlignment: element.alignment,
+        };
+      }
+      cursor = alignUp(cursor, 4);
+      laidOut.push(
+        Object.freeze({
+          ...(field as NetVarFieldSpec),
+          ...varLayout,
+          kind: 'var',
+          count: 1,
+          byteOffset: cursor,
+          byteSize: NET_VAR_SLOT_BYTES,
+          alignment: 4,
+        } as NetVarFieldLayout)
+      );
+      cursor += NET_VAR_SLOT_BYTES;
+      alignment = Math.max(alignment, 4);
+      continue;
+    }
 
     if (typeof field.type === 'string') {
       const info = AOS_SCALAR_INFO[field.type];
@@ -154,7 +248,7 @@ function compileFields(
       const byteSize = info.byteSize * count;
       laidOut.push(
         Object.freeze({
-          ...field,
+          ...(field as NetScalarFieldSpec),
           kind: 'scalar',
           count,
           byteOffset: cursor,
@@ -167,48 +261,13 @@ function compileFields(
       continue;
     }
 
-    const referenced = resolve(field.type.struct);
-    let nested = referenced;
-    if (field.type.pick && field.type.visibility) {
-      throw new Error(`${owner.name}.${field.name} cannot specify both pick and visibility`);
-    }
-    const selection =
-      field.type.pick ??
-      (field.type.visibility === 'public'
-        ? referenced.fields
-            .filter(candidate => candidate.visibility !== 'private')
-            .map(candidate => candidate.name)
-        : undefined);
-    if (selection) {
-      const picked = selection.map(fieldName => {
-        const match = referenced.fields.find(candidate => candidate.name === fieldName);
-        if (!match)
-          throw new Error(
-            `${owner.name}.${field.name} picks unknown field ${referenced.name}.${fieldName}`
-          );
-        return toSpec(match);
-      });
-      if (new Set(selection).size !== selection.length) {
-        throw new Error(`${owner.name}.${field.name} contains duplicate picked fields`);
-      }
-      nested = compileFields(
-        {
-          ...owner,
-          name: `${owner.name}_${field.name}`,
-          schemaId: 0,
-          storage: 'aos',
-          variants: undefined,
-        },
-        picked,
-        resolve,
-        referenced.name
-      );
-    }
+    const structField = field as NetStructFieldSpec;
+    const nested = resolveStructRef(owner, field.name, structField.type, resolve);
     cursor = alignUp(cursor, nested.alignment);
     const byteSize = nested.stride * count;
     laidOut.push(
       Object.freeze({
-        ...field,
+        ...structField,
         kind: 'struct',
         count,
         byteOffset: cursor,
@@ -226,11 +285,19 @@ function compileFields(
   validateVariants(owner, laidOut);
   const storage = owner.storage ?? 'aos';
   const variants = owner.variants ?? [];
+  const variable = laidOut.some(
+    field => field.kind === 'var' || (field.kind === 'struct' && field.struct.variable)
+  );
+  if (variable && storage === 'soa') {
+    throw new Error(`${owner.name}: SoA packets cannot carry variable-length fields`);
+  }
   const normalized = `${version}|${storage}|${stride}|${laidOut
     .map(field =>
       field.kind === 'scalar'
         ? `${field.id}:${field.type}:${field.count}:${field.byteOffset}:${field.visibility ?? 'public'}`
-        : `${field.id}:struct:${field.count}:${field.byteOffset}:${field.struct.schemaHash.toString(16)}:${field.visibility ?? 'public'}`
+        : field.kind === 'var'
+          ? `${field.id}:var:${field.varKind}:${field.struct ? field.struct.schemaHash.toString(16) : field.element}:${field.byteOffset}:${field.visibility ?? 'public'}`
+          : `${field.id}:struct:${field.count}:${field.byteOffset}:${field.struct.schemaHash.toString(16)}:${field.visibility ?? 'public'}`
     )
     .join('|')}|${variants.map(variant => `${variant.tag}:${variant.fields.join(',')}`).join(';')}`;
   return Object.freeze({
@@ -245,12 +312,59 @@ function compileFields(
     fields: Object.freeze(laidOut),
     ...(projectionOf ? { projectionOf } : {}),
     storage,
+    variable,
     variants: Object.freeze(
       variants.map(variant =>
         Object.freeze({ ...variant, fields: Object.freeze([...variant.fields]) })
       )
     ),
   });
+}
+
+function resolveStructRef(
+  owner: NetStructSpec,
+  fieldName: string,
+  ref: NetStructRef,
+  resolve: (name: string) => NetStructLayout
+): NetStructLayout {
+  const referenced = resolve(ref.struct);
+  let nested = referenced;
+  if (ref.pick && ref.visibility) {
+    throw new Error(`${owner.name}.${fieldName} cannot specify both pick and visibility`);
+  }
+  const selection =
+    ref.pick ??
+    (ref.visibility === 'public'
+      ? referenced.fields
+          .filter(candidate => candidate.visibility !== 'private')
+          .map(candidate => candidate.name)
+      : undefined);
+  if (selection) {
+    const picked = selection.map(pickedName => {
+      const match = referenced.fields.find(candidate => candidate.name === pickedName);
+      if (!match)
+        throw new Error(
+          `${owner.name}.${fieldName} picks unknown field ${referenced.name}.${pickedName}`
+        );
+      return toSpec(match);
+    });
+    if (new Set(selection).size !== selection.length) {
+      throw new Error(`${owner.name}.${fieldName} contains duplicate picked fields`);
+    }
+    nested = compileFields(
+      {
+        ...owner,
+        name: `${owner.name}_${fieldName}`,
+        schemaId: 0,
+        storage: 'aos',
+        variants: undefined,
+      },
+      picked,
+      resolve,
+      referenced.name
+    );
+  }
+  return nested;
 }
 
 function validateVariants(owner: NetStructSpec, fields: readonly NetFieldLayout[]): void {
@@ -284,6 +398,9 @@ function validateVariants(owner: NetStructSpec, fields: readonly NetFieldLayout[
 }
 
 function toSpec(field: NetFieldLayout): NetFieldSpec {
+  if (field.kind === 'var') {
+    return { id: field.id, name: field.name, type: field.type, visibility: field.visibility };
+  }
   return field.kind === 'scalar'
     ? {
         id: field.id,
