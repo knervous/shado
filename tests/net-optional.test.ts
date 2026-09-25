@@ -110,6 +110,9 @@ describe('optional, enum and string-list net fields', () => {
     expect(source).not.toContain('TAG_SCHEMA_ID');
     expect(source).toContain('[COMBAT_SCHEMA_ID]: {');
     expect(source).not.toContain('[POSE_SCHEMA_ID]');
+    // No scalar list in these specs, so its reader is left out for noUnusedLocals.
+    expect(source).not.toContain('function netHeapTyped');
+    expect(source).toContain('function netHeapTextAt');
 
     const rust = emitNetStructRustModule(specs);
     expect(rust).toContain('pub enum CombatOutcome {');
