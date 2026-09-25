@@ -1,11 +1,27 @@
 import { AOS_SCALAR_INFO, alignUp, type AoSScalarType } from '../schema/AoSLayout';
 
+/**
+ * A closed set of names stored as its index: `u8`, or `u16` past 256 values.
+ * Readers see the name; an index outside the set reads as the first name.
+ */
+export interface NetEnumType {
+  readonly enum: readonly string[];
+}
+
+/**
+ * `true`: the field may be absent, recorded in a presence bit, and reads back
+ * as `undefined` (Rust `Option`). `'null'`: the same, but absent reads back as
+ * `null`, for values the other side distinguishes with `null`.
+ */
+export type NetOptional = true | 'null';
+
 export interface NetScalarFieldSpec {
   readonly id: number;
   readonly name: string;
-  readonly type: AoSScalarType;
+  readonly type: AoSScalarType | NetEnumType;
   readonly count?: number;
   readonly visibility?: 'public' | 'private';
+  readonly optional?: NetOptional;
 }
 
 export interface NetStructRef {
@@ -22,6 +38,7 @@ export interface NetStructFieldSpec {
   readonly type: NetStructRef;
   readonly count?: number;
   readonly visibility?: 'public' | 'private';
+  readonly optional?: NetOptional;
 }
 
 /**
@@ -29,7 +46,7 @@ export interface NetStructFieldSpec {
  * (which may themselves carry variable-length fields).
  */
 export interface NetListType {
-  readonly list: AoSScalarType | NetStructRef;
+  readonly list: AoSScalarType | 'str' | NetStructRef;
 }
 
 /** Variable-length data: UTF-8 text, raw bytes, or a list. */
@@ -45,6 +62,7 @@ export interface NetVarFieldSpec {
   readonly name: string;
   readonly type: NetVarType;
   readonly visibility?: 'public' | 'private';
+  readonly optional?: NetOptional;
 }
 
 export type NetFieldSpec = NetScalarFieldSpec | NetStructFieldSpec | NetVarFieldSpec;
@@ -52,7 +70,8 @@ export type NetFieldSpec = NetScalarFieldSpec | NetStructFieldSpec | NetVarField
 export interface NetStructSpec {
   readonly name: string;
   readonly layout: 'net';
-  readonly schemaId: number;
+  /** Packet identity. Omit for a record that only ever travels inside another. */
+  readonly schemaId?: number;
   readonly version?: number;
   readonly storage?: 'aos' | 'soa';
   readonly variants?: readonly NetVariantSpec[];
@@ -65,12 +84,18 @@ export interface NetVariantSpec {
   readonly fields: readonly string[];
 }
 
-export interface NetScalarFieldLayout extends NetScalarFieldSpec {
+export interface NetScalarFieldLayout extends Omit<NetScalarFieldSpec, 'type'> {
   readonly kind: 'scalar';
+  /** Storage type; an enum field stores its index as `u8` or `u16`. */
+  readonly type: AoSScalarType;
+  /** The names an enum field's index selects from. */
+  readonly enumValues?: readonly string[];
   readonly count: number;
   readonly byteOffset: number;
   readonly byteSize: number;
   readonly alignment: number;
+  /** Bit in the record's presence words, for an optional field. */
+  readonly presenceBit?: number;
 }
 
 export interface NetStructFieldLayout extends NetStructFieldSpec {
@@ -80,11 +105,14 @@ export interface NetStructFieldLayout extends NetStructFieldSpec {
   readonly byteSize: number;
   readonly alignment: number;
   readonly struct: NetStructLayout;
+  readonly presenceBit?: number;
 }
 
 export interface NetVarFieldLayout extends NetVarFieldSpec {
   readonly kind: 'var';
-  readonly varKind: 'str' | 'bytes' | 'scalarList' | 'structList';
+  readonly presenceBit?: number;
+  /** `strList`: a list of strings, each element an 8-byte slot of its own. */
+  readonly varKind: 'str' | 'bytes' | 'scalarList' | 'strList' | 'structList';
   /** Element scalar type for `str`/`bytes` (u8) and scalar lists. */
   readonly element?: AoSScalarType;
   /** Element record for struct lists. */
@@ -122,6 +150,11 @@ export interface NetStructLayout {
   readonly variants: readonly NetVariantSpec[];
   /** True when this record, or any record inside it, has heap data. */
   readonly variable: boolean;
+  /**
+   * `u32` words at the start of the record holding one presence bit per
+   * optional field, in field order. Zero when no field is optional.
+   */
+  readonly presenceWords: number;
 }
 
 /**
@@ -139,14 +172,16 @@ export function compileNetLayouts(
     }
     if (spec.layout !== 'net') throw new Error(`${spec.name} must use layout \"net\"`);
     if (
-      !Number.isSafeInteger(spec.schemaId) ||
-      spec.schemaId <= 0 ||
-      schemaIds.has(spec.schemaId)
+      spec.schemaId !== undefined &&
+      (!Number.isSafeInteger(spec.schemaId) ||
+        spec.schemaId <= 0 ||
+        spec.schemaId > 0xffffffff ||
+        schemaIds.has(spec.schemaId))
     ) {
       throw new Error(`Invalid or duplicate net schema ID: ${spec.schemaId}`);
     }
     byName.set(spec.name, spec);
-    schemaIds.add(spec.schemaId);
+    if (spec.schemaId !== undefined) schemaIds.add(spec.schemaId);
   }
 
   const compiled = new Map<string, NetStructLayout>();
@@ -178,8 +213,11 @@ function compileFields(
   const names = new Set<string>();
   const ids = new Set<number>();
   const laidOut: NetFieldLayout[] = [];
-  let cursor = 0;
-  let alignment = 1;
+  const optionalCount = fields.filter(field => field.optional).length;
+  const presenceWords = Math.ceil(optionalCount / 32);
+  let cursor = presenceWords * 4;
+  let alignment = presenceWords ? 4 : 1;
+  let nextPresenceBit = 0;
 
   for (const field of fields) {
     if (!field.name || names.has(field.name))
@@ -193,6 +231,10 @@ function compileFields(
     }
     names.add(field.name);
     ids.add(field.id);
+    if (field.optional && field.optional !== true && field.optional !== 'null') {
+      throw new Error(`${owner.name}.${field.name}: optional must be true or 'null'`);
+    }
+    const presence = field.optional ? { presenceBit: nextPresenceBit++ } : {};
 
     if (isNetVarType(field.type)) {
       if (count !== 1)
@@ -206,6 +248,12 @@ function compileFields(
       >;
       if (type === 'str' || type === 'bytes') {
         varLayout = { varKind: type, element: 'u8', elementSize: 1, elementAlignment: 1 };
+      } else if (type.list === 'str') {
+        varLayout = {
+          varKind: 'strList',
+          elementSize: NET_VAR_SLOT_BYTES,
+          elementAlignment: 4,
+        };
       } else if (typeof type.list === 'string') {
         const info = AOS_SCALAR_INFO[type.list];
         if (!info) throw new Error(`Unsupported net list element type: ${String(type.list)}`);
@@ -229,6 +277,7 @@ function compileFields(
         Object.freeze({
           ...(field as NetVarFieldSpec),
           ...varLayout,
+          ...presence,
           kind: 'var',
           count: 1,
           byteOffset: cursor,
@@ -241,14 +290,34 @@ function compileFields(
       continue;
     }
 
-    if (typeof field.type === 'string') {
-      const info = AOS_SCALAR_INFO[field.type];
+    const enumValues =
+      typeof field.type === 'object' && 'enum' in field.type ? field.type.enum : undefined;
+    if (typeof field.type === 'string' || enumValues) {
+      if (enumValues) {
+        if (count !== 1)
+          throw new Error(`${owner.name}.${field.name}: enum fields cannot be arrays`);
+        if (!enumValues.length || new Set(enumValues).size !== enumValues.length) {
+          throw new Error(`${owner.name}.${field.name}: enum values must be unique and non-empty`);
+        }
+        if (enumValues.length > 0xffff) {
+          throw new Error(`${owner.name}.${field.name}: enum has more than 65536 values`);
+        }
+      }
+      const type: AoSScalarType = enumValues
+        ? enumValues.length > 0x100
+          ? 'u16'
+          : 'u8'
+        : (field.type as AoSScalarType);
+      const info = AOS_SCALAR_INFO[type];
       if (!info) throw new Error(`Unsupported net scalar type: ${String(field.type)}`);
       cursor = alignUp(cursor, info.alignment);
       const byteSize = info.byteSize * count;
       laidOut.push(
         Object.freeze({
-          ...(field as NetScalarFieldSpec),
+          ...(field as Omit<NetScalarFieldSpec, 'type'>),
+          type,
+          ...(enumValues ? { enumValues: Object.freeze([...enumValues]) } : {}),
+          ...presence,
           kind: 'scalar',
           count,
           byteOffset: cursor,
@@ -268,6 +337,7 @@ function compileFields(
     laidOut.push(
       Object.freeze({
         ...structField,
+        ...presence,
         kind: 'struct',
         count,
         byteOffset: cursor,
@@ -291,19 +361,26 @@ function compileFields(
   if (variable && storage === 'soa') {
     throw new Error(`${owner.name}: SoA packets cannot carry variable-length fields`);
   }
+  if (presenceWords && storage === 'soa') {
+    throw new Error(`${owner.name}: SoA packets cannot carry optional fields`);
+  }
+  const extra = (field: NetFieldLayout) =>
+    `${field.presenceBit !== undefined ? `?${field.presenceBit}${field.optional === 'null' ? 'n' : ''}` : ''}${
+      field.kind === 'scalar' && field.enumValues ? `=${field.enumValues.join(',')}` : ''
+    }`;
   const normalized = `${version}|${storage}|${stride}|${laidOut
     .map(field =>
       field.kind === 'scalar'
-        ? `${field.id}:${field.type}:${field.count}:${field.byteOffset}:${field.visibility ?? 'public'}`
+        ? `${field.id}:${field.type}:${field.count}:${field.byteOffset}:${field.visibility ?? 'public'}${extra(field)}`
         : field.kind === 'var'
-          ? `${field.id}:var:${field.varKind}:${field.struct ? field.struct.schemaHash.toString(16) : field.element}:${field.byteOffset}:${field.visibility ?? 'public'}`
-          : `${field.id}:struct:${field.count}:${field.byteOffset}:${field.struct.schemaHash.toString(16)}:${field.visibility ?? 'public'}`
+          ? `${field.id}:var:${field.varKind}:${field.struct ? field.struct.schemaHash.toString(16) : field.element}:${field.byteOffset}:${field.visibility ?? 'public'}${extra(field)}`
+          : `${field.id}:struct:${field.count}:${field.byteOffset}:${field.struct.schemaHash.toString(16)}:${field.visibility ?? 'public'}${extra(field)}`
     )
     .join('|')}|${variants.map(variant => `${variant.tag}:${variant.fields.join(',')}`).join(';')}`;
   return Object.freeze({
     name: owner.name,
     layout: 'net',
-    schemaId: owner.schemaId,
+    schemaId: owner.schemaId ?? 0,
     version,
     byteSize: cursor,
     stride,
@@ -313,6 +390,7 @@ function compileFields(
     ...(projectionOf ? { projectionOf } : {}),
     storage,
     variable,
+    presenceWords,
     variants: Object.freeze(
       variants.map(variant =>
         Object.freeze({ ...variant, fields: Object.freeze([...variant.fields]) })
@@ -398,16 +476,24 @@ function validateVariants(owner: NetStructSpec, fields: readonly NetFieldLayout[
 }
 
 function toSpec(field: NetFieldLayout): NetFieldSpec {
+  const optional = field.optional ? { optional: field.optional } : {};
   if (field.kind === 'var') {
-    return { id: field.id, name: field.name, type: field.type, visibility: field.visibility };
+    return {
+      id: field.id,
+      name: field.name,
+      type: field.type,
+      visibility: field.visibility,
+      ...optional,
+    };
   }
   return field.kind === 'scalar'
     ? {
         id: field.id,
         name: field.name,
-        type: field.type,
+        type: field.enumValues ? { enum: field.enumValues } : field.type,
         count: field.count,
         visibility: field.visibility,
+        ...optional,
       }
     : {
         id: field.id,
@@ -415,6 +501,7 @@ function toSpec(field: NetFieldLayout): NetFieldSpec {
         type: field.type,
         count: field.count,
         visibility: field.visibility,
+        ...optional,
       };
 }
 
