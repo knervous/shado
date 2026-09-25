@@ -34,10 +34,78 @@ export function emitNetStructModule(
     emitRecord(layout, layout.name, `${layout.name}View`, declarations, emitted);
   }
   lines.push(declarations.join('\n\n'), '');
-  for (const spec of specs) lines.push(emitPacket(layouts.get(spec.name)!), '');
+  const packets = specs.map(spec => layouts.get(spec.name)!).filter(layout => layout.schemaId > 0);
+  for (const layout of packets) lines.push(emitPacket(layout), '');
+  const registry = packets.filter(layout => layout.storage === 'aos');
+  if (registry.some(layout => layout.variable || layout.presenceWords)) {
+    lines.push(emitRegistry(registry), '');
+  }
   lines.push(emitHelpers(), '');
-  if ([...layouts.values()].some(layout => layout.variable)) lines.push(emitHeapHelpers(), '');
+  const all = [...layouts.values()];
+  if (all.some(layout => hasPresence(layout))) lines.push(emitPresenceHelpers(), '');
+  if (all.some(layout => layout.variable)) lines.push(emitHeapHelpers(), '');
   return `${lines.join('\n').trimEnd()}\n`;
+}
+
+/** True when this record or any record nested in it has optional fields. */
+function hasPresence(layout: NetStructLayout): boolean {
+  return (
+    layout.presenceWords > 0 ||
+    layout.fields.some(
+      field => field.kind !== 'scalar' && field.struct && hasPresence(field.struct)
+    )
+  );
+}
+
+/** Every array-of-structs packet by schema id, for code that routes on the id alone. */
+function emitRegistry(layouts: readonly NetStructLayout[]): string {
+  const rows = layouts.map(
+    layout => `  [${constantName(layout.name)}_SCHEMA_ID]: {
+    name: '${layout.name}',
+    encode: (value: unknown) => encode${layout.name}(value as ${layout.name}),
+    decode: (bytes: Uint8Array): ${layout.name} | null => decode${layout.name}(bytes),
+  },`
+  );
+  return `export interface NetPacketCodec {
+  readonly name: string;
+  encode(value: unknown): Uint8Array;
+  decode(bytes: Uint8Array): unknown;
+}
+
+export const NET_PACKET_CODECS: Readonly<Record<number, NetPacketCodec>> = Object.freeze({
+${rows.join('\n')}
+});
+
+/** The schema id of a Shado net packet, or null when the bytes are not one. */
+export function peekNetSchemaId(bytes: Uint8Array): number | null {
+  if (bytes.byteLength < NET_HEADER_BYTES) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return view.getUint32(0, true) === NET_MAGIC ? view.getUint32(8, true) : null;
+}`;
+}
+
+function emitPresenceHelpers(): string {
+  return `// Optional fields keep one presence bit each in u32 words at the start of
+// their record, in field order.
+function netHasPresence(
+  target: { readonly buffer: ArrayBufferLike; readonly byteOffset: number },
+  bit: number
+): boolean {
+  const word = new DataView(target.buffer).getUint32(target.byteOffset + (bit >>> 5) * 4, true);
+  return (word & (1 << (bit & 31))) !== 0;
+}
+
+function netSetPresence(
+  target: { readonly buffer: ArrayBufferLike; readonly byteOffset: number },
+  bit: number,
+  present: boolean
+): void {
+  const view = new DataView(target.buffer);
+  const at = target.byteOffset + (bit >>> 5) * 4;
+  const mask = 1 << (bit & 31);
+  const word = view.getUint32(at, true);
+  view.setUint32(at, present ? (word | mask) >>> 0 : (word & ~mask) >>> 0, true);
+}`;
 }
 
 function emitPacket(layout: NetStructLayout): string {
@@ -320,13 +388,33 @@ function emitRecord(
   }
 
   const members = layout.fields.map(
-    field => `  ${field.name}: ${fieldInterfaceType(field, interfaceName)};`
+    field =>
+      `  ${field.name}${field.optional ? '?' : ''}: ${fieldInterfaceType(field, interfaceName)}${
+        field.optional === 'null' ? ' | null' : ''
+      };`
   );
-  const accessors = layout.fields.map(field => emitAccessor(field, interfaceName)).join('\n\n');
+  const enums = layout.fields
+    .filter(field => field.kind === 'scalar' && field.enumValues)
+    .map(
+      field =>
+        `const ${enumConstant(viewName, field.name)} = [${(
+          field as Extract<NetFieldLayout, { kind: 'scalar' }>
+        )
+          .enumValues!.map(value => JSON.stringify(value))
+          .join(', ')}] as const;`
+    );
+  const accessors = layout.fields
+    .map(field => {
+      const accessor = emitAccessor(field, interfaceName, viewName);
+      return field.presenceBit === undefined
+        ? accessor
+        : `${emitPresenceAccessor(field.name, field.presenceBit)}\n\n${accessor}`;
+    })
+    .join('\n\n');
   const writes = layout.fields.map(field => emitObjectWrite(field, interfaceName)).join('\n');
   const reads = layout.fields.map(field => emitObjectRead(field, interfaceName)).join('\n');
 
-  output.push(`export interface ${interfaceName} {
+  output.push(`${enums.length ? `${enums.join('\n')}\n\n` : ''}export interface ${interfaceName} {
 ${members.join('\n')}
 }
 
@@ -363,6 +451,7 @@ function fieldInterfaceType(field: NetFieldLayout, owner: string): string {
   if (field.kind === 'var') {
     if (field.varKind === 'str') return 'string';
     if (field.varKind === 'bytes') return 'Uint8Array';
+    if (field.varKind === 'strList') return 'readonly string[]';
     if (field.varKind === 'scalarList') return `readonly ${tsType(field.element!)}[]`;
     return `readonly ${nestedNames(field.name, field.struct!, owner).interfaceName}[]`;
   }
@@ -370,8 +459,24 @@ function fieldInterfaceType(field: NetFieldLayout, owner: string): string {
     const type = nestedNames(field.name, field.struct, owner).interfaceName;
     return field.count === 1 ? type : `readonly ${type}[]`;
   }
+  if (field.enumValues) return field.enumValues.map(value => JSON.stringify(value)).join(' | ');
   const scalar = tsType(field.type);
   return field.count === 1 ? scalar : `readonly ${scalar}[]`;
+}
+
+function enumConstant(viewName: string, fieldName: string): string {
+  return `${constantName(viewName)}_${constantName(fieldName)}_VALUES`;
+}
+
+function emitPresenceAccessor(name: string, bit: number): string {
+  return `/** Whether the optional \`${name}\` is present. */
+get has${capitalize(name)}(): boolean {
+  return netHasPresence(this, ${bit});
+}
+
+set has${capitalize(name)}(present: boolean) {
+  netSetPresence(this, ${bit}, present);
+}`;
 }
 
 function heapArgs(struct: NetStructLayout): string {
@@ -397,6 +502,16 @@ ${bytes}`;
   return netHeapTyped(${typedArrayName(field.element!)}, this, ${slot});
 }`;
   }
+  if (field.varKind === 'strList') {
+    return `get ${field.name}Length(): number {
+  return netHeapCount(this, ${slot});
+}
+
+${field.name}(index: number): string {
+  assertRecordIndex(index, this.${field.name}Length);
+  return netHeapTextAt(this, ${slot}, index);
+}`;
+  }
   const struct = field.struct!;
   const nested = nestedNames(field.name, struct, owner);
   return `get ${field.name}Length(): number {
@@ -412,7 +527,7 @@ ${field.name}(index: number): ${nested.viewName} {
 }`;
 }
 
-function emitAccessor(field: NetFieldLayout, owner: string): string {
+function emitAccessor(field: NetFieldLayout, owner: string, viewName: string): string {
   if (field.kind === 'var') return emitVarAccessor(field, owner);
   if (field.kind === 'struct') {
     const nested = nestedNames(field.name, field.struct, owner);
@@ -440,6 +555,27 @@ function emitAccessor(field: NetFieldLayout, owner: string): string {
 }`;
   }
   const getter = scalarOperation(field.type, 'get', `this.byteOffset + ${field.byteOffset}`);
+  const presence =
+    field.presenceBit === undefined ? '' : `\n  netSetPresence(this, ${field.presenceBit}, true);`;
+  if (field.enumValues) {
+    const values = enumConstant(viewName, field.name);
+    const type = `(typeof ${values})[number]`;
+    const setter = scalarOperation(
+      field.type,
+      'set',
+      `this.byteOffset + ${field.byteOffset}`,
+      'index'
+    );
+    return `get ${field.name}(): ${type} {
+  return ${values}[${getter}] ?? ${values}[0];
+}
+
+set ${field.name}(value: ${type}) {
+  const index = ${values}.indexOf(value);
+  if (index < 0) throw new RangeError('${owner}.${field.name} has no value ' + String(value));${presence}
+  ${setter};
+}`;
+  }
   const setter = scalarOperation(
     field.type,
     'set',
@@ -450,14 +586,17 @@ function emitAccessor(field: NetFieldLayout, owner: string): string {
   return ${getter};
 }
 
-set ${field.name}(value: ${tsType(field.type)}) {
+set ${field.name}(value: ${tsType(field.type)}) {${presence}
   ${setter};
 }`;
 }
 
-function emitVarWrite(field: Extract<NetFieldLayout, { kind: 'var' }>, owner: string): string {
+function emitVarWrite(
+  field: Extract<NetFieldLayout, { kind: 'var' }>,
+  owner: string,
+  value: string
+): string {
   const slot = field.byteOffset;
-  const value = `value.${field.name}`;
   if (field.varKind === 'str') return `netWriteText(target, ${slot}, ${value}, heap);`;
   if (field.varKind === 'bytes') {
     return `new Uint8Array(target.buffer).set(
@@ -470,46 +609,65 @@ function emitVarWrite(field: Extract<NetFieldLayout, { kind: 'var' }>, owner: st
     const size = scalarByteSize(type);
     const littleEndian = size > 1 ? ', true' : '';
     const item = type === 'bool' ? `${value}[i] ? 1 : 0` : `${value}[i]!`;
-    return `{
-  const at = netHeapReserve(target, ${slot}, heap, ${value}.length, ${size}, ${size});
-  const view = new DataView(target.buffer);
-  for (let i = 0; i < ${value}.length; i++) {
-    view.set${scalarDataViewSuffix(type)}(at + i * ${size}, ${item}${littleEndian});
+    return `const at = netHeapReserve(target, ${slot}, heap, ${value}.length, ${size}, ${size});
+const view = new DataView(target.buffer);
+for (let i = 0; i < ${value}.length; i++) {
+  view.set${scalarDataViewSuffix(type)}(at + i * ${size}, ${item}${littleEndian});
+}`;
   }
+  if (field.varKind === 'strList') {
+    return `const at = netHeapReserve(target, ${slot}, heap, ${value}.length, 8, 4);
+for (let i = 0; i < ${value}.length; i++) {
+  netWriteText({ buffer: target.buffer, byteOffset: at + i * 8 }, 0, ${value}[i] ?? '', heap);
 }`;
   }
   const struct = field.struct!;
   const nested = nestedNames(field.name, struct, owner);
-  return `{
-  const at = netHeapReserve(target, ${slot}, heap, ${value}.length, ${struct.stride}, ${struct.alignment});
-  for (let i = 0; i < ${value}.length; i++) {
-    write${nested.interfaceName}(
-      new ${nested.viewName}(target.buffer, at + i * ${struct.stride}),
-      ${value}[i]!${struct.variable ? ',\n      heap' : ''}
-    );
-  }
+  return `const at = netHeapReserve(target, ${slot}, heap, ${value}.length, ${struct.stride}, ${struct.alignment});
+for (let i = 0; i < ${value}.length; i++) {
+  write${nested.interfaceName}(
+    new ${nested.viewName}(target.buffer, at + i * ${struct.stride}),
+    ${value}[i]!${struct.variable ? ',\n    heap' : ''}
+  );
 }`;
 }
 
+/**
+ * Every write is guarded: a missing value leaves the zeroed field alone, so a
+ * partial object still encodes, and an optional one also leaves its presence
+ * bit clear.
+ */
 function emitObjectWrite(field: NetFieldLayout, owner: string): string {
-  if (field.kind === 'var') return emitVarWrite(field, owner);
+  const value = `value.${field.name}`;
+  const body = emitFieldWrite(field, owner, value);
+  const presence =
+    field.presenceBit === undefined
+      ? ''
+      : `\n  netSetPresence(target, ${field.presenceBit}, true);`;
+  return `if (${value} !== undefined && ${value} !== null) {${presence}
+${indent(body, 2)}
+}`;
+}
+
+function emitFieldWrite(field: NetFieldLayout, owner: string, value: string): string {
+  if (field.kind === 'var') return emitVarWrite(field, owner, value);
   if (field.kind === 'struct') {
     const nested = nestedNames(field.name, field.struct, owner);
     const heap = field.struct.variable ? ', heap' : '';
     if (field.count === 1)
-      return `write${nested.interfaceName}(target.${field.name}, value.${field.name}${heap});`;
-    return `assertArrayCount(value.${field.name}, ${field.count}, '${owner}.${field.name}');
-  for (let i = 0; i < ${field.count}; i++) {
-    write${nested.interfaceName}(target.${field.name}(i), value.${field.name}[i]!${heap});
-  }`;
+      return `write${nested.interfaceName}(target.${field.name}, ${value}${heap});`;
+    return `assertArrayCount(${value}, ${field.count}, '${owner}.${field.name}');
+for (let i = 0; i < ${field.count}; i++) {
+  write${nested.interfaceName}(target.${field.name}(i), ${value}[i]!${heap});
+}`;
   }
-  if (field.count === 1) return `target.${field.name} = value.${field.name};`;
+  if (field.count === 1) return `target.${field.name} = ${value};`;
   if (field.type === 'bool') {
-    return `assertArrayCount(value.${field.name}, ${field.count}, '${owner}.${field.name}');
-  for (let i = 0; i < ${field.count}; i++) target.${field.name}[i] = value.${field.name}[i] ? 1 : 0;`;
+    return `assertArrayCount(${value}, ${field.count}, '${owner}.${field.name}');
+for (let i = 0; i < ${field.count}; i++) target.${field.name}[i] = ${value}[i] ? 1 : 0;`;
   }
-  return `assertArrayCount(value.${field.name}, ${field.count}, '${owner}.${field.name}');
-  target.${field.name}.set(value.${field.name});`;
+  return `assertArrayCount(${value}, ${field.count}, '${owner}.${field.name}');
+target.${field.name}.set(${value});`;
 }
 
 /**
@@ -519,62 +677,84 @@ function emitObjectWrite(field: NetFieldLayout, owner: string): string {
 function emitMeasure(layout: NetStructLayout, interfaceName: string): string {
   const steps = layout.fields.flatMap(field => {
     const value = `value.${field.name}`;
+    const guard = (lines: string[]) =>
+      lines.length
+        ? [
+            `if (${value} !== undefined && ${value} !== null) {\n${lines.map(line => `  ${line}`).join('\n')}\n}`,
+          ]
+        : [];
     if (field.kind === 'scalar') return [];
     if (field.kind === 'struct') {
       if (!field.struct.variable) return [];
       const nested = nestedNames(field.name, field.struct, interfaceName);
-      if (field.count === 1) return [`cursor = measure${nested.interfaceName}(${value}, cursor);`];
-      return [
+      if (field.count === 1)
+        return guard([`cursor = measure${nested.interfaceName}(${value}, cursor);`]);
+      return guard([
         `for (const item of ${value}) cursor = measure${nested.interfaceName}(item, cursor);`,
-      ];
+      ]);
     }
     if (field.varKind === 'str')
-      return [`cursor = netHeapMeasure(cursor, netUtf8Length(${value}), 1, 1);`];
+      return guard([`cursor = netHeapMeasure(cursor, netUtf8Length(${value}), 1, 1);`]);
     if (field.varKind === 'bytes')
-      return [`cursor = netHeapMeasure(cursor, ${value}.byteLength, 1, 1);`];
+      return guard([`cursor = netHeapMeasure(cursor, ${value}.byteLength, 1, 1);`]);
     if (field.varKind === 'scalarList') {
       const size = scalarByteSize(field.element!);
-      return [`cursor = netHeapMeasure(cursor, ${value}.length, ${size}, ${size});`];
+      return guard([`cursor = netHeapMeasure(cursor, ${value}.length, ${size}, ${size});`]);
+    }
+    if (field.varKind === 'strList') {
+      return guard([
+        `cursor = netHeapMeasure(cursor, ${value}.length, 8, 4);`,
+        `for (const item of ${value}) cursor = netHeapMeasure(cursor, netUtf8Length(item ?? ''), 1, 1);`,
+      ]);
     }
     const struct = field.struct!;
     const reserve = `cursor = netHeapMeasure(cursor, ${value}.length, ${struct.stride}, ${struct.alignment});`;
-    if (!struct.variable) return [reserve];
+    if (!struct.variable) return guard([reserve]);
     const nested = nestedNames(field.name, struct, interfaceName);
-    return [
+    return guard([
       reserve,
       `for (const item of ${value}) cursor = measure${nested.interfaceName}(item, cursor);`,
-    ];
+    ]);
   });
   return `export function measure${interfaceName}(value: Readonly<${interfaceName}>, cursor: number): number {
-${steps.map(step => `  ${step}`).join('\n')}
+${steps.map(step => indent(step, 2)).join('\n')}
   return cursor;
 }`;
 }
 
 function emitObjectRead(field: NetFieldLayout, owner: string): string {
+  const expression = emitReadExpression(field, owner);
+  if (field.presenceBit === undefined) return `${field.name}: ${expression},`;
+  const has = `source.has${capitalize(field.name)}`;
+  if (field.optional === 'null') return `${field.name}: ${has} ? ${expression} : null,`;
+  return `...(${has} ? { ${field.name}: ${expression} } : {}),`;
+}
+
+function emitReadExpression(field: NetFieldLayout, owner: string): string {
   if (field.kind === 'var') {
-    if (field.varKind === 'str') return `${field.name}: source.${field.name},`;
-    if (field.varKind === 'bytes') return `${field.name}: source.${field.name}.slice(),`;
+    if (field.varKind === 'str') return `source.${field.name}`;
+    if (field.varKind === 'bytes') return `source.${field.name}.slice()`;
     if (field.varKind === 'scalarList') {
       return field.element === 'bool'
-        ? `${field.name}: Array.from(source.${field.name}, value => value !== 0),`
-        : `${field.name}: Array.from(source.${field.name}),`;
+        ? `Array.from(source.${field.name}, value => value !== 0)`
+        : `Array.from(source.${field.name})`;
+    }
+    if (field.varKind === 'strList') {
+      return `Array.from({ length: source.${field.name}Length }, (_, i) => source.${field.name}(i))`;
     }
     const nested = nestedNames(field.name, field.struct!, owner);
-    return `${field.name}: Array.from({ length: source.${field.name}Length }, (_, i) =>
-      read${nested.interfaceName}(source.${field.name}(i))),`;
+    return `Array.from({ length: source.${field.name}Length }, (_, i) =>
+      read${nested.interfaceName}(source.${field.name}(i)))`;
   }
   if (field.kind === 'struct') {
     const nested = nestedNames(field.name, field.struct, owner);
-    if (field.count === 1)
-      return `${field.name}: read${nested.interfaceName}(source.${field.name}),`;
-    return `${field.name}: Array.from({ length: ${field.count} }, (_, i) =>
-      read${nested.interfaceName}(source.${field.name}(i))),`;
+    if (field.count === 1) return `read${nested.interfaceName}(source.${field.name})`;
+    return `Array.from({ length: ${field.count} }, (_, i) =>
+      read${nested.interfaceName}(source.${field.name}(i)))`;
   }
-  if (field.count === 1) return `${field.name}: source.${field.name},`;
-  if (field.type === 'bool')
-    return `${field.name}: Array.from(source.${field.name}, value => value !== 0),`;
-  return `${field.name}: Array.from(source.${field.name}),`;
+  if (field.count === 1) return `source.${field.name}`;
+  if (field.type === 'bool') return `Array.from(source.${field.name}, value => value !== 0)`;
+  return `Array.from(source.${field.name})`;
 }
 
 function nestedNames(fieldName: string, struct: NetStructLayout, owner: string) {
@@ -775,6 +955,18 @@ function netHeapTyped<T>(
   const copy = new Uint8Array(count * type.BYTES_PER_ELEMENT);
   copy.set(new Uint8Array(source.buffer, at, copy.byteLength));
   return new type(copy.buffer, 0, count);
+}
+
+function netHeapTextAt(source: NetHeapSource, slot: number, index: number): string {
+  const element = {
+    buffer: source.buffer,
+    byteOffset: netHeapAt(source, slot, 8) + index * 8,
+    heapOffset: source.heapOffset,
+    heapLength: source.heapLength,
+  };
+  return netTextDecoder.decode(
+    new Uint8Array(source.buffer, netHeapAt(element, 0, 1), netHeapCount(element, 0))
+  );
 }
 
 function netHeapMeasure(cursor: number, count: number, elementSize: number, alignment: number): number {
