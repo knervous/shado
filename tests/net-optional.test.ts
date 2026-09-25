@@ -42,7 +42,7 @@ const specs = [
     fields: [
       { id: 1, name: 'hp', type: 'i32' },
       { id: 2, name: 'maxHp', type: 'i32', optional: true },
-      { id: 3, name: 'stance', type: { enum: ['stand', 'sit'] } },
+      { id: 3, name: 'stance', type: { enum: ['stand', 'sit', 'self'] } },
     ],
   },
   {
@@ -267,6 +267,7 @@ fn main() {
 
     let vitals = Vitals { hp: -3, max_hp: Some(40), stance: VitalsStance::Sit };
     assert_eq!(Vitals::decode(&read(&dir, "vitals")).unwrap(), vitals);
+    assert_eq!(VitalsStance::Self_.as_str(), "self");
     println!("{}", hex(&vitals.encode()));
 
     let pose = PoseBatch::decode(&read(&dir, "pose")).unwrap();

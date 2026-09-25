@@ -109,6 +109,8 @@ function emitEnum(name: string, values: readonly string[]): string {
   const variants = values.map(value => {
     let variant = pascalCase(value.replace(/[^A-Za-z0-9]+/g, ' ')) || 'Empty';
     if (/^[0-9]/.test(variant)) variant = `V${variant}`;
+    // \`Self\` is the one keyword a PascalCase name can collide with.
+    if (variant === 'Self') variant = 'Self_';
     while (used.has(variant)) variant = `${variant}_`;
     used.add(variant);
     return variant;
