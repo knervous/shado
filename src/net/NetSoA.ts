@@ -134,6 +134,8 @@ function flatten(fields: readonly NetFieldLayout[], prefix = ''): NetSoAPlane[] 
   const out: NetSoAPlane[] = [];
   for (const field of fields) {
     const path = prefix ? `${prefix}.${field.name}` : field.name;
+    if (field.kind === 'var')
+      throw new Error(`${path}: SoA planes cannot hold variable-length fields`);
     if (field.kind === 'struct') {
       if (field.count !== 1)
         throw new Error(`${path}: arrays of nested structs need an explicit projection`);

@@ -131,11 +131,10 @@ describe('rust net struct emitter', () => {
         writeFileSync(path.join(dir, 'snapshot.bin'), snapshotBytes);
         writeFileSync(path.join(dir, 'net_structs.rs'), emitNetStructRustModule(specs));
         writeFileSync(path.join(dir, 'main.rs'), RUST_MAIN);
-        execFileSync(
-          'rustc',
-          ['--edition', '2021', '-D', 'warnings', 'main.rs', '-o', 'parity'],
-          { cwd: dir, stdio: 'pipe' }
-        );
+        execFileSync('rustc', ['--edition', '2021', '-D', 'warnings', 'main.rs', '-o', 'parity'], {
+          cwd: dir,
+          stdio: 'pipe',
+        });
         const output = execFileSync(path.join(dir, 'parity'), [dir], { encoding: 'utf8' });
         const [sampleBuilt, sampleRoundTrip, snapshotBuilt, snapshotRoundTrip] = output
           .trim()
