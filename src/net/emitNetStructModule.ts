@@ -43,8 +43,30 @@ export function emitNetStructModule(
   lines.push(emitHelpers(), '');
   const all = [...layouts.values()];
   if (all.some(layout => hasPresence(layout))) lines.push(emitPresenceHelpers(), '');
-  if (all.some(layout => layout.variable)) lines.push(emitHeapHelpers(), '');
-  return `${lines.join('\n').trimEnd()}\n`;
+  const body = lines.join('\n');
+  const heap = all.some(layout => layout.variable) ? pruneUnused(emitHeapHelpers(), body) : '';
+  return `${[body, heap].join('\n').trimEnd()}\n`;
+}
+
+/**
+ * Drop the private declarations in \`helpers\` that neither \`body\` nor the
+ * helpers still kept refer to, so a schema that never uses, say, a string list
+ * does not ship an unused reader that \`noUnusedLocals\` would reject.
+ */
+function pruneUnused(helpers: string, body: string): string {
+  let chunks = helpers.split('\n\n');
+  const namesOf = (chunk: string) =>
+    [...chunk.matchAll(/^(?:function|const|interface) (\w+)/gm)].map(match => match[1]!);
+  for (;;) {
+    const kept = chunks.filter(chunk => {
+      const names = namesOf(chunk);
+      if (!names.length) return true;
+      const others = [body, ...chunks.filter(other => other !== chunk)].join('\n');
+      return names.some(name => new RegExp(`\\b${name}\\b`).test(others));
+    });
+    if (kept.length === chunks.length) return kept.join('\n\n');
+    chunks = kept;
+  }
 }
 
 /** True when this record or any record nested in it has optional fields. */
