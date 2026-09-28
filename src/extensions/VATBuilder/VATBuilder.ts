@@ -105,6 +105,19 @@ export class VATBuilder {
   public get dqTex() {
     return this._dqTex;
   }
+
+  /**
+   * Drop the CPU copy of the DQ atlas once its texture exists.
+   *
+   * The pixels are kept so `toPacked()` / `toSerialized()` can export the
+   * VAT -- a preprocessing concern. A runtime that only renders never reads
+   * them again, and they are the whole atlas: 1-7 MB per body, ~75 MB of a
+   * Crownward client's JS heap across its 21 bodies. After this the builder
+   * still binds and animates; only the two exporters throw.
+   */
+  public releaseCpuPixels(): void {
+    this._dqPixels = undefined;
+  }
   public get dqWidthBones() {
     return this._dqWidthBones;
   }
