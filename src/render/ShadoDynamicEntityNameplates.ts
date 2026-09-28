@@ -39,6 +39,8 @@ type DynamicNameplateRecord = {
   id: string;
   text: string;
   actor: ShadoDynamicNameplateActor;
+  /** The `updateActors` pass that last found an input for this record. */
+  seen?: number;
 };
 
 const DEFAULT_FONT_JSON_URL = 'https://assets.babylonjs.com/fonts/roboto-regular.json';
@@ -210,14 +212,24 @@ const rgbaFromColor = (value: string | undefined): [number, number, number, numb
   ];
 };
 
-const syncSignature = (inputs: readonly ShadoDynamicEntityNameplateInput[]): string =>
-  inputs
-    // Visibility is hot reducer output. Keep it out of the structural
-    // signature so culling never rebuilds glyph buffers or GPU resources.
-    .filter(input => input.text.trim())
-    .map(input => `${input.id}\u0000${input.text.trim()}`)
-    .sort()
-    .join('\u0001');
+/**
+ * Parsed colours, by string. A caller that fades plates by distance sends a
+ * few hundred distinct strings, each every frame; parsing each one with a regex
+ * every frame was garbage the size of the crowd. Bounded: a fade has at most
+ * 256 alphas per hue, and the cache is dropped wholesale if it ever grows past
+ * that many hues' worth.
+ */
+const COLOR_CACHE_LIMIT = 8192;
+const colorCache = new Map<string, readonly [number, number, number, number]>();
+const cachedRgba = (value: string): readonly [number, number, number, number] => {
+  let rgba = colorCache.get(value);
+  if (!rgba) {
+    if (colorCache.size >= COLOR_CACHE_LIMIT) colorCache.clear();
+    rgba = rgbaFromColor(value);
+    colorCache.set(value, rgba);
+  }
+  return rgba;
+};
 
 export class ShadoDynamicEntityNameplateLayer {
   private readonly scene: Scene;
@@ -235,7 +247,10 @@ export class ShadoDynamicEntityNameplateLayer {
   private nameplates: NameplateData | null = null;
   private mesh: Mesh | null = null;
   private records = new Map<string, DynamicNameplateRecord>();
-  private signature = '';
+  /** Counts `updateActors` passes; see `DynamicNameplateRecord.seen`. */
+  private updatePass = 0;
+  /** Whether a layout exists at all; an empty one is still one. */
+  private built = false;
   private latestInputs: readonly ShadoDynamicEntityNameplateInput[] = [];
   private disposed = false;
 
@@ -341,10 +356,14 @@ export class ShadoDynamicEntityNameplateLayer {
   }
 
   private applySync(inputs: readonly ShadoDynamicEntityNameplateInput[]): void {
-    const nextSignature = syncSignature(inputs);
-    if (nextSignature !== this.signature) {
+    // Rebuild only when something new has to be drawn: an id this layer has
+    // never laid out, or an id whose text changed. An entry that has gone is
+    // simply hidden by `updateActors` until the next rebuild sweeps it up, so
+    // a combat number expiring costs nothing, and the check itself is a map
+    // lookup per input rather than a sorted, joined string of every plate.
+    if (this.needsRebuild(inputs)) {
       this.rebuild(inputs);
-      this.signature = nextSignature;
+      this.built = true;
     }
     this.updateActors(inputs);
     this.mesh?.setEnabled(this.enabled && this.records.size > 0);
@@ -392,32 +411,62 @@ export class ShadoDynamicEntityNameplateLayer {
     this.records = records;
   }
 
-  private updateActors(inputs: readonly ShadoDynamicEntityNameplateInput[]): void {
-    const byId = new Map(inputs.map(input => [input.id, input]));
-    for (const [id, record] of this.records) {
-      const input = byId.get(id);
-      const visible = Boolean(input && input.visible !== false && input.text.trim());
-      const fontSize = Math.max(
-        8,
-        Number(input?.fontSize ?? this.options.fontSize ?? DEFAULT_FONT_SIZE)
-      );
-      const worldScale = Math.max(0.001, Number(this.options.worldScale ?? DEFAULT_WORLD_SCALE));
-      const actor = record.actor;
-      actor.visibleFlag = visible ? 1 : 0;
-      if (input) {
-        actor.translation.set([
-          input.x,
-          input.z ?? this.options.zOffset ?? DEFAULT_Z_OFFSET,
-          input.y,
-          1,
-        ]);
-        actor.nameWorldPerEM = fontSize * worldScale;
-        actor.nameLiftWorld = Number(this.options.nameLiftWorld ?? DEFAULT_NAME_LIFT_WORLD);
-        actor.nameplateColor.set(rgbaFromColor(input.color ?? this.options.color ?? DEFAULT_COLOR));
-        actor.billboardFlag = input.billboard === false ? 0 : 1;
+  private needsRebuild(inputs: readonly ShadoDynamicEntityNameplateInput[]): boolean {
+    if (!this.built) return true;
+    for (let index = 0; index < inputs.length; index++) {
+      const input = inputs[index]!;
+      const text = input.text;
+      if (!text) continue;
+      const record = this.records.get(input.id);
+      if (record) {
+        if (record.text === text || record.text === text.trim()) continue;
+        return true;
       }
+      if (text.trim()) return true;
+    }
+    return false;
+  }
+
+  private updateActors(inputs: readonly ShadoDynamicEntityNameplateInput[]): void {
+    // A stamp per pass instead of an id map rebuilt every frame: each input
+    // finds its record directly, and whatever no input reached is hidden.
+    const pass = ++this.updatePass;
+    const fallbackSize = Number(this.options.fontSize ?? DEFAULT_FONT_SIZE);
+    const worldScale = Math.max(0.001, Number(this.options.worldScale ?? DEFAULT_WORLD_SCALE));
+    const lift = Number(this.options.nameLiftWorld ?? DEFAULT_NAME_LIFT_WORLD);
+    for (let index = 0; index < inputs.length; index++) {
+      const input = inputs[index]!;
+      const record = this.records.get(input.id);
+      if (!record) continue;
+      record.seen = pass;
+      const actor = record.actor;
+      actor.visibleFlag = input.visible !== false && input.text.trim() ? 1 : 0;
+      const fontSize = Math.max(8, Number(input.fontSize ?? fallbackSize));
+      // Element writes: a literal per plate per frame was garbage the size
+      // of the crowd.
+      const translation = actor.translation;
+      translation[0] = input.x;
+      translation[1] = input.z ?? this.options.zOffset ?? DEFAULT_Z_OFFSET;
+      translation[2] = input.y;
+      translation[3] = 1;
+      actor.nameWorldPerEM = fontSize * worldScale;
+      actor.nameLiftWorld = lift;
+      const rgba = cachedRgba(input.color ?? this.options.color ?? DEFAULT_COLOR);
+      const color = actor.nameplateColor;
+      color[0] = rgba[0];
+      color[1] = rgba[1];
+      color[2] = rgba[2];
+      color[3] = rgba[3];
+      actor.billboardFlag = input.billboard === false ? 0 : 1;
       actor.emitHeaderDirty();
     }
+    // `forEach`, not `for...of`: the iterator hands back a fresh [key, value]
+    // pair per entry.
+    this.records.forEach(record => {
+      if (record.seen === pass) return;
+      record.actor.visibleFlag = 0;
+      record.actor.emitHeaderDirty();
+    });
     this.container?.arena.markDirty?.();
   }
 }

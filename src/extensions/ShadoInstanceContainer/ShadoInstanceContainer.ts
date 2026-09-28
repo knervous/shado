@@ -432,7 +432,7 @@ export class ShadoInstanceContainer<T extends ShadoActor> extends Shado {
   }
 
   public getVisibilityFlag(index: number): number {
-    return this._instanceSoA.visibilityFlags[index] ?? 0;
+    return this._instanceSoA.visibilityAt(index);
   }
 
   private _setLegacyVisibleCount(value: number): void {

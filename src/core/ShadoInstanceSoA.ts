@@ -86,6 +86,15 @@ export class ShadoInstanceSoA {
     return this.visibilityValue.subarray(0, this.countValue);
   }
 
+  /**
+   * One instance's flag, without the `visibilityFlags` view: readers asking
+   * about a single actor every frame were allocating a subarray per read.
+   */
+  public visibilityAt(index: number): number {
+    this.refreshWasmViews();
+    return index >= 0 && index < this.countValue ? (this.visibilityValue[index] ?? 0) : 0;
+  }
+
   public get dirtyFlags(): Uint8Array {
     this.refreshWasmViews();
     return this.dirtyValue.subarray(0, this.countValue);

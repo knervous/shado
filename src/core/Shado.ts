@@ -45,6 +45,9 @@ import {
   type ShadoPublishedProperty,
 } from '../publish';
 
+
+/** `getSchema`'s no-extra-fields argument, shared rather than allocated per call. */
+const NO_EXTRA_FIELDS: PendingField[] = Object.freeze([]) as unknown as PendingField[];
 export type ASCExtension = {
   /** Extra AssemblyScript source to concat into the module (strings, not files). */
   source?: (schema: ShadoStructSchema) => string | string[];
@@ -964,8 +967,9 @@ export abstract class Shado {
 
   public getSchema(): ShadoStructSchema {
     const ctor = this.constructor as any as ShadoBaseCtor;
-
-    return ctor.getSchema([]);
+    // A shared empty list: this is asked on every field write, and a fresh
+    // `[]` per call was measurable garbage in a busy scene.
+    return ctor.getSchema(NO_EXTRA_FIELDS);
   }
 
   /**

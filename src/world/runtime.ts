@@ -114,18 +114,16 @@ export function buildShadoWorldObjectRenderBatches(
     const stampIndices = Uint32Array.from(sourceRows);
     const matrices = new Float32Array(stampIndices.length * 16);
     const colors = new Float32Array(stampIndices.length * 4);
-    stampIndices.forEach((stamp, index) => {
+    const { irradianceR, irradianceG, irradianceB, irradianceA } = objects.stamps;
+    for (let index = 0; index < stampIndices.length; index++) {
+      const stamp = stampIndices[index];
       writeStampMatrix(objects.stamps, stamp, matrices, index * 16);
-      colors.set(
-        [
-          objects.stamps.irradianceR?.[stamp] ?? 1,
-          objects.stamps.irradianceG?.[stamp] ?? 1,
-          objects.stamps.irradianceB?.[stamp] ?? 1,
-          objects.stamps.irradianceA?.[stamp] ?? 1,
-        ],
-        index * 4
-      );
-    });
+      const at = index * 4;
+      colors[at] = irradianceR?.[stamp] ?? 1;
+      colors[at + 1] = irradianceG?.[stamp] ?? 1;
+      colors[at + 2] = irradianceB?.[stamp] ?? 1;
+      colors[at + 3] = irradianceA?.[stamp] ?? 1;
+    }
     return {
       prototype,
       id,
@@ -190,11 +188,13 @@ function splitByLevel(
     const levelMatrices = new Float32Array(rows.length * 16);
     const levelColors = new Float32Array(rows.length * 4);
     const levelStamps = new Uint32Array(rows.length);
-    rows.forEach((row, index) => {
-      levelMatrices.set(matrices.subarray(row * 16, row * 16 + 16), index * 16);
-      levelColors.set(colors.subarray(row * 4, row * 4 + 4), index * 4);
+    for (let index = 0; index < rows.length; index += 1) {
+      const row = rows[index]!;
+      // Element copies: two subarray views per stamp were garbage every pass.
+      for (let k = 0; k < 16; k += 1) levelMatrices[index * 16 + k] = matrices[row * 16 + k]!;
+      for (let k = 0; k < 4; k += 1) levelColors[index * 4 + k] = colors[row * 4 + k]!;
       levelStamps[index] = stampIndices[row]!;
-    });
+    }
     out.push({ level, stampIndices: levelStamps, matrices: levelMatrices, colors: levelColors });
   }
   return out;
@@ -237,7 +237,13 @@ function writeStampMatrix(
   target: Float32Array,
   offset: number
 ): void {
-  const [x, y, z, w] = shadoWorldStampQuaternion(stamps, stamp, QUATERNION_SCRATCH);
+  // Indexed, not destructured: destructuring a typed array runs its iterator,
+  // an allocation per stamp per pass.
+  const q = shadoWorldStampQuaternion(stamps, stamp, QUATERNION_SCRATCH);
+  const x = q[0]!,
+    y = q[1]!,
+    z = q[2]!,
+    w = q[3]!;
   const x2 = x + x,
     y2 = y + y,
     z2 = z + z;
@@ -253,25 +259,23 @@ function writeStampMatrix(
   const sx = stamps.scaleX[stamp],
     sy = stamps.scaleY[stamp],
     sz = stamps.scaleZ[stamp];
-  target.set(
-    [
-      (1 - (yy + zz)) * sx,
-      (xy + wz) * sx,
-      (xz - wy) * sx,
-      0,
-      (xy - wz) * sy,
-      (1 - (xx + zz)) * sy,
-      (yz + wx) * sy,
-      0,
-      (xz + wy) * sz,
-      (yz - wx) * sz,
-      (1 - (xx + yy)) * sz,
-      0,
-      stamps.positionX[stamp],
-      stamps.positionY[stamp],
-      stamps.positionZ[stamp],
-      1,
-    ],
-    offset
-  );
+  // Element writes, not `target.set([...])`: this runs for every visible
+  // stamp on every visibility pass, and the sixteen-number literal it used to
+  // build was the largest single source of garbage in a running zone.
+  target[offset] = (1 - (yy + zz)) * sx;
+  target[offset + 1] = (xy + wz) * sx;
+  target[offset + 2] = (xz - wy) * sx;
+  target[offset + 3] = 0;
+  target[offset + 4] = (xy - wz) * sy;
+  target[offset + 5] = (1 - (xx + zz)) * sy;
+  target[offset + 6] = (yz + wx) * sy;
+  target[offset + 7] = 0;
+  target[offset + 8] = (xz + wy) * sz;
+  target[offset + 9] = (yz - wx) * sz;
+  target[offset + 10] = (1 - (xx + yy)) * sz;
+  target[offset + 11] = 0;
+  target[offset + 12] = stamps.positionX[stamp];
+  target[offset + 13] = stamps.positionY[stamp];
+  target[offset + 14] = stamps.positionZ[stamp];
+  target[offset + 15] = 1;
 }
