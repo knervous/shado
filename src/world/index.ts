@@ -10,6 +10,7 @@ export * from './grass-field';
 export * from './authoring';
 export * from './compiler';
 export * from './collision';
+export * from './physics-pack';
 export * from './occlusion';
 export * from './occluder-scene';
 export * from './occluder-bvh';

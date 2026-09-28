@@ -15,8 +15,11 @@ import {
   type WorldObjectAssetLoader,
 } from './world-core';
 import { installNodeXMLHttpRequest } from './models';
+import { buildShadoPhysicsPack, type ShadoPhysicsPackStats } from './physics-pack-build';
+import { encodeShadoPhysicsPack } from '../world/physics-pack';
 
 export * from './world-core';
+export * from './physics-pack-build';
 
 const gunzipAsync = promisify(gunzip);
 const gzipAsync = promisify(gzip);
@@ -184,6 +187,51 @@ export async function packShadoWorld(config: ShadoWorldPackConfig): Promise<Shad
     collisionSourceTriangleCount: world.collision.sourceTriangleCount,
     collisionChunkCount: world.collision.chunkCount,
   };
+}
+
+/**
+ * Regenerate a published zone's physics pack from its published inputs, with
+ * no rebake: the runtime world GLB, the authoring document and the spatial
+ * package whose collision descriptor the pack must sit beside.
+ */
+export async function packShadoWorldPhysics(config: {
+  name: string;
+  glbFile: string;
+  authoringFile: string;
+  spatialFile: string;
+  /** Written gzipped: `<zone>.physics.bin.gz`. */
+  outFile: string;
+  objectAssetRoot: string;
+  inputTransform?: ShadoWorldCompileOptions['sourceTransform'];
+  inputHandedness?: 'left' | 'right';
+}): Promise<ShadoPhysicsPackStats & { outFile: string; bytes: number }> {
+  const read = async (file: string) => {
+    const bytes = await fs.readFile(path.resolve(process.cwd(), file));
+    return file.endsWith('.gz') ? await gunzipAsync(bytes) : bytes;
+  };
+  const glb = new Uint8Array(await read(config.glbFile));
+  validateGlb(glb, config.glbFile);
+  const authoring = upgradeShadoWorldAuthoring(
+    JSON.parse((await read(config.authoringFile)).toString('utf8')),
+    config.name
+  );
+  const spatial = JSON.parse((await read(config.spatialFile)).toString('utf8')) as {
+    collision: { contentHash: string; chunkSize: number };
+  };
+  const { pack, stats } = await buildShadoPhysicsPack({
+    glb,
+    authoring,
+    loadObjectAsset: nodeObjectAssetLoader(path.resolve(process.cwd(), config.objectAssetRoot)),
+    sourceHash: spatial.collision.contentHash,
+    chunkSize: spatial.collision.chunkSize,
+    inputTransform: config.inputTransform ?? 'identity',
+    inputRightHanded: (config.inputHandedness ?? 'right') === 'right',
+  });
+  const bytes = await gzipAsync(encodeShadoPhysicsPack(pack), { level: 9 });
+  const outFile = path.resolve(process.cwd(), config.outFile);
+  await fs.mkdir(path.dirname(outFile), { recursive: true });
+  await fs.writeFile(outFile, bytes);
+  return { ...stats, outFile, bytes: bytes.byteLength };
 }
 
 /**

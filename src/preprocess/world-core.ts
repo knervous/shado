@@ -147,9 +147,30 @@ export function stampBlocksGrass(
   return !isShadoWorldFoliageMetadata(prototype.id, prototype.metadata);
 }
 
+/**
+ * One stamp's contribution to player collision, before it is flattened: the
+ * prototype's collision primitives in their own local space (already swapped
+ * for a box when the prototype asks for one) and the stamp's placement. The
+ * physics pack instances these instead of copying them per stamp.
+ */
+export type StampedCollisionInstance = {
+  prototypeId: string;
+  primitives: readonly ShadoWorldPrimitive[];
+  position: [number, number, number];
+  /** Babylon yaw/pitch/roll order, as the flattening transform uses. */
+  rotationDegrees: [number, number, number];
+  scale: [number, number, number];
+};
+
 export async function importStampedObjectGeometry(
   authoring: ShadoWorldCompileOptions['authoring'],
-  loadObjectAsset?: WorldObjectAssetLoader
+  loadObjectAsset?: WorldObjectAssetLoader,
+  /**
+   * Receives every stamp that contributes collision, alongside the flattened
+   * primitives. The selection rules live here once; the physics pack reads
+   * them through this rather than re-deriving which stamps are solid.
+   */
+  instances?: StampedCollisionInstance[]
 ): Promise<{
   collision: ShadoWorldPrimitive[];
   grassBlockers: ShadoWorldPrimitive[];
@@ -276,6 +297,13 @@ export async function importStampedObjectGeometry(
           transformPrimitive(primitive, 'collision')
         )
       );
+      instances?.push({
+        prototypeId: prototype.id,
+        primitives: collisionSource,
+        position: [stamp.position[0], stamp.position[1], stamp.position[2]],
+        rotationDegrees: [stamp.rotationDegrees[0], stamp.rotationDegrees[1], stamp.rotationDegrees[2]],
+        scale: [stamp.scale[0], stamp.scale[1], stamp.scale[2]],
+      });
     }
     if (includeGrassBlocker) {
       grassBlockers.push(
