@@ -211,6 +211,7 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     float randomPhase = Shado_grassHash(bladeUV.yx + cellRand.yx * 24.29);
     float randomFamily = Shado_grassHash(bladeUV + cellRand.yx * 27.61);
     float randomTone = Shado_grassHash(bladeUV.yx + cellRand * 31.37);
+    float randomDry = Shado_grassHash(bladeUV.yx + cellRand * 35.71);
 
     // R2 low-discrepancy roots. Every prefix of this sequence is evenly spread,
     // so raising density adds blades into the gaps instead of reshuffling the
@@ -273,8 +274,18 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
       1.0
     );
     float understory = mix(0.62, 1.0, smoothstep(0.08, 0.30, randomFamily));
+    // Tussocks. Grass does not grow as an even pile: it stands in clumps a
+    // metre or two across, taller and greener at the heart, thinner and paler
+    // between. A product of two slow sines is enough -- smooth, so f32 keeps
+    // it exact at any world coordinate, unlike a hash of the position.
+    float clump = clamp(
+      0.5 + 0.5 * sin(dot(root.xz, vec2(0.83, 0.47)) + 1.3)
+        * sin(dot(root.xz, vec2(-0.41, 0.91)) - 0.4),
+      0.0,
+      1.0
+    );
     float bladeHeight = (uShadoGrassSize.x + randomSize * uShadoGrassSize.y)
-      * mix(0.86, 1.12, macroPatch) * understory;
+      * mix(0.86, 1.12, macroPatch) * understory * mix(0.72, 1.22, clump);
     float yaw = randomYaw * 6.2831853;
     vec2 facing = vec2(cos(yaw), sin(yaw));
     vec2 across = vec2(-facing.y, facing.x);
@@ -329,7 +340,15 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
       1.0
     );
     shadoFoliageVariation = clamp(randomVariation * 0.52 + colorPatch * 0.48, 0.0, 1.0);
-    shadoColor.rgb *= mix(0.86, 1.12, randomTone) * mix(0.94, 1.06, macroPatch);
+    shadoColor.rgb *= mix(0.86, 1.12, randomTone) * mix(0.94, 1.06, macroPatch)
+      * mix(0.9, 1.08, clump);
+    // A meadow is never one green. One blade in a dozen or so has gone to
+    // straw -- more of them between the tussocks than in their hearts -- and
+    // every tip is sun-bleached toward yellow along its last third.
+    float dry = smoothstep(0.86, 0.97, randomDry) * mix(1.0, 0.55, clump);
+    float strawValue = dot(shadoColor.rgb, vec3(0.2126, 0.7152, 0.0722));
+    shadoColor.rgb = mix(shadoColor.rgb, strawValue * vec3(1.22, 1.04, 0.62), dry * 0.8);
+    shadoColor.rgb *= mix(vec3(1.0), vec3(1.1, 1.07, 0.84), t * t * 0.65);
     shadoFoliageTangent = curveTangent;
     shadoFoliageAcross = bladeAcross;
   }`,
@@ -361,8 +380,18 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
       float wrapped = clamp((dot(shadingNormal, uShadoLightDirection) + 0.45) / 1.45, 0.0, 1.0);
       float backscatter =
         pow(max(dot(viewDirection, -uShadoLightDirection), 0.0), 3.0) * 0.35;
-      vShadoLighting = uShadoAmbientColor + uShadoLightColor
-        * (wrapped + backscatter * smoothstep(0.25, 1.0, shadoFoliageUp));
+      // Inside a sward the light is spent before it reaches the ground: the
+      // sky sees the tips and little of the roots, and the sun reaches down
+      // only part way. This is the depth that makes a field read as a volume
+      // rather than as a layer of ribbons.
+      float occlusion = mix(0.6, 1.0, smoothstep(0.0, 0.85, shadoFoliageUp));
+      float sunDepth = mix(0.8, 1.0, shadoFoliageUp);
+      // A blade is waxy: a narrow sheen where it tips toward the sun and the
+      // eye at once, strongest on the upper blade that catches it.
+      vec3 halfVector = normalize(uShadoLightDirection + viewDirection);
+      float sheen = pow(max(dot(bladeNormal, halfVector), 0.0), 24.0) * 0.3 * shadoFoliageUp;
+      vShadoLighting = uShadoAmbientColor * occlusion + uShadoLightColor
+        * (wrapped * sunDepth + sheen + backscatter * smoothstep(0.25, 1.0, shadoFoliageUp));
     }
   }`,
     },
@@ -395,6 +424,7 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
     let randomPhase = Shado_grassHash(bladeUV.yx + cellRand.yx * 24.29);
     let randomFamily = Shado_grassHash(bladeUV + cellRand.yx * 27.61);
     let randomTone = Shado_grassHash(bladeUV.yx + cellRand * 31.37);
+    let randomDry = Shado_grassHash(bladeUV.yx + cellRand * 35.71);
 
     let stratum = 0.62 / sqrt(max(uniforms.uShadoGrassShape.w, 1.0));
     let randomU = fract(
@@ -440,8 +470,14 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
       1.0
     );
     let understory = mix(0.62, 1.0, smoothstep(0.08, 0.30, randomFamily));
+    let clump = clamp(
+      0.5 + 0.5 * sin(dot(root.xz, vec2f(0.83, 0.47)) + 1.3)
+        * sin(dot(root.xz, vec2f(-0.41, 0.91)) - 0.4),
+      0.0,
+      1.0
+    );
     let bladeHeight = (uniforms.uShadoGrassSize.x + randomSize * uniforms.uShadoGrassSize.y)
-      * mix(0.86, 1.12, macroPatch) * understory;
+      * mix(0.86, 1.12, macroPatch) * understory * mix(0.72, 1.22, clump);
     let yaw = randomYaw * 6.2831853;
     let facing = vec2f(cos(yaw), sin(yaw));
     let across = vec2f(-facing.y, facing.x);
@@ -492,8 +528,13 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
       1.0
     );
     shadoFoliageVariation = clamp(randomVariation * 0.52 + colorPatch * 0.48, 0.0, 1.0);
+    let toned = shadoColor.rgb * mix(0.86, 1.12, randomTone) * mix(0.94, 1.06, macroPatch)
+      * mix(0.9, 1.08, clump);
+    let dry = smoothstep(0.86, 0.97, randomDry) * mix(1.0, 0.55, clump);
+    let strawValue = dot(toned, vec3f(0.2126, 0.7152, 0.0722));
+    let weathered = mix(toned, strawValue * vec3f(1.22, 1.04, 0.62), dry * 0.8);
     shadoColor = vec4f(
-      shadoColor.rgb * mix(0.86, 1.12, randomTone) * mix(0.94, 1.06, macroPatch),
+      weathered * mix(vec3f(1.0), vec3f(1.1, 1.07, 0.84), t * t * 0.65),
       shadoColor.a
     );
     shadoFoliageTangent = curveTangent;
@@ -528,9 +569,13 @@ fn Shado_grassBezierTangent(p0: vec3f, p1: vec3f, p2: vec3f, p3: vec3f, t: f32) 
       );
       let backscatter =
         pow(max(dot(viewDirection, -uniforms.uShadoLightDirection), 0.0), 3.0) * 0.35;
-      vertexOutputs.vShadoLighting = uniforms.uShadoAmbientColor
+      let occlusion = mix(0.6, 1.0, smoothstep(0.0, 0.85, shadoFoliageUp));
+      let sunDepth = mix(0.8, 1.0, shadoFoliageUp);
+      let halfVector = normalize(uniforms.uShadoLightDirection + viewDirection);
+      let sheen = pow(max(dot(bladeNormal, halfVector), 0.0), 24.0) * 0.3 * shadoFoliageUp;
+      vertexOutputs.vShadoLighting = uniforms.uShadoAmbientColor * occlusion
         + uniforms.uShadoLightColor
-          * (wrapped + backscatter * smoothstep(0.25, 1.0, shadoFoliageUp));
+          * (wrapped * sunDepth + sheen + backscatter * smoothstep(0.25, 1.0, shadoFoliageUp));
     }
   }`,
     },

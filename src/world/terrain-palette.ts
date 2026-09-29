@@ -262,8 +262,23 @@ export type TerrainLayerAuthoring = {
   controlChannel?: EltaniaTerrainControlChannel;
   /** Set false for a layer a control channel should suppress rather than add. */
   controlAdds?: boolean;
+  /**
+   * The layer exists only where its control channel is painted.
+   *
+   * A layer's weight drives two terms in the shader: a procedural one, windowed
+   * by slope and altitude, and the painted one. A made surface like laid paving
+   * wants only the second -- a street is where someone laid it, not wherever
+   * the ground happens to be flat -- and without this, raising its weight to
+   * make painted streets read also paves every flat meadow in the zone.
+   * Resolved as a slope window no ground can reach, so the shader and the
+   * uniform layout are unchanged.
+   */
+  paintOnly?: boolean;
   macroMetres?: number;
 };
+
+/** A steepness past vertical: the procedural window of a paint-only layer. */
+const UNREACHABLE_STEEPNESS = 2;
 
 function authoring(layer: ShadoWorldTerrainLayer): TerrainLayerAuthoring {
   const value = layer.metadata?.authoring;
@@ -284,6 +299,11 @@ export function resolveTerrainLayer(layer: ShadoWorldTerrainLayer): ResolvedTerr
     ? [steepnessFromDegrees(authored.slopeDegrees[0]), steepnessFromDegrees(authored.slopeDegrees[1])]
     : [layer.slope[0], layer.slope[1]];
   const control = authored.controlChannel ? ELTANIA_TERRAIN_CONTROL_BY_CHANNEL[authored.controlChannel] ?? null : null;
+  // Paint-only needs paint: without a channel the layer would simply vanish.
+  if (authored.paintOnly && control) {
+    slope[0] = UNREACHABLE_STEEPNESS;
+    slope[1] = UNREACHABLE_STEEPNESS;
+  }
   const macroMetres = authored.macroMetres ?? layer.noiseScale;
   return {
     id: layer.id,
