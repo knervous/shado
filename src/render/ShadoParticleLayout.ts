@@ -35,6 +35,25 @@ export const ShadoParticleField = {
   extra: 20,
 } as const;
 
+/**
+ * Tagging particles for a renderer outside the quad pass (mesh particles), which finds them
+ * among the container's written slots by their layer:
+ *
+ *   -(1 + tag)                          drawn only by that renderer; the quad pass skips it
+ *   layer + STRIDE * (1 + tag)          drawn by both; the quad pass samples `layer`
+ *
+ * Both stay exact in a float32 for tags below `SHADO_PARTICLE_LAYER_TAG_LIMIT`.
+ */
+export const SHADO_PARTICLE_LAYER_TAG_STRIDE = 4096;
+export const SHADO_PARTICLE_LAYER_TAG_LIMIT = 4000;
+
+/** The tag a record's layer carries, or -1 when it carries none. */
+export function shadoParticleLayerTag(layer: number): number {
+  if (layer < -0.5) return Math.round(-layer) - 1;
+  if (layer >= SHADO_PARTICLE_LAYER_TAG_STRIDE) return Math.floor(layer / SHADO_PARTICLE_LAYER_TAG_STRIDE) - 1;
+  return -1;
+}
+
 /** Floats per emitter slot in the reducer's emitter table. */
 export const SHADO_PARTICLE_EMITTER_FLOATS = 48;
 

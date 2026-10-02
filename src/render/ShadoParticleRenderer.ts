@@ -34,7 +34,10 @@ const NAME = 'shadoParticle';
  *   colour     the curve's colour row at age/life
  *   rotation   initial + spin*t, as a camera-facing quad
  *
- * Dead slots (never written, or older than their life) are moved outside clip space.
+ * Dead slots (never written, or older than their life) are moved outside clip space, and so
+ * are records with a negative atlas layer: those belong only to a renderer outside this one,
+ * which reads the same records to place meshes. A layer at or above
+ * `SHADO_PARTICLE_LAYER_TAG_STRIDE` is drawn here too, from its low part.
  * Blending is premultiplied: an alpha particle writes (rgb*a, a); an additive one writes
  * (rgb, 0), which the same blend state adds. So both kinds share this one draw. Additive
  * ignores alpha entirely, like a ONE/ONE blend: authored additive curves often fade by
@@ -247,7 +250,8 @@ void main(void) {
   vColor = vec4(0.0);
   vLayer = 0.0;
   vAdditive = 0.0;
-  if (life <= 0.0 || age < 0.0 || age > life) {
+  // A negative layer is a record some other renderer draws (mesh particles): no quad.
+  if (life <= 0.0 || age < 0.0 || age > life || particle.look.y < -0.5) {
     gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
     return;
   }
@@ -283,7 +287,8 @@ void main(void) {
   // Every atlas image fills its own layer, so a quad samples the whole cell.
   vUV = vec2(uv.x, 1.0 - uv.y);
   vColor = color;
-  vLayer = particle.look.y;
+  // A tagged layer carries its atlas layer in the low part (see SHADO_PARTICLE_LAYER_TAG_STRIDE).
+  vLayer = mod(particle.look.y, 4096.0);
   vAdditive = mod(flags, 2.0);
   gl_Position = worldViewProjection * vec4(world, 1.0);
 }
@@ -414,7 +419,8 @@ fn main(input: VertexInputs) -> FragmentInputs {
   vertexOutputs.vColor = vec4f(0.0);
   vertexOutputs.vLayer = 0.0;
   vertexOutputs.vAdditive = 0.0;
-  if (life <= 0.0 || age < 0.0 || age > life) {
+  // A negative layer is a record some other renderer draws (mesh particles): no quad.
+  if (life <= 0.0 || age < 0.0 || age > life || particle.look.y < -0.5) {
     vertexOutputs.position = vec4f(2.0, 2.0, 2.0, 1.0);
     return vertexOutputs;
   }
@@ -453,7 +459,8 @@ fn main(input: VertexInputs) -> FragmentInputs {
   // Every atlas image fills its own layer, so a quad samples the whole cell.
   vertexOutputs.vUV = vec2f(vertexInputs.uv.x, 1.0 - vertexInputs.uv.y);
   vertexOutputs.vColor = color;
-  vertexOutputs.vLayer = particle.look.y;
+  // A tagged layer carries its atlas layer in the low part (see SHADO_PARTICLE_LAYER_TAG_STRIDE).
+  vertexOutputs.vLayer = particle.look.y - 4096.0 * floor(particle.look.y / 4096.0);
   vertexOutputs.vAdditive = flags - 2.0 * floor(flags / 2.0);
   vertexOutputs.position = uniforms.worldViewProjection * vec4f(world, 1.0);
 }
