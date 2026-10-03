@@ -271,10 +271,10 @@ void main(void) {
       particle.collision.x, particle.collision.y, particle.collision.w, age);
   }
   if (particle.extra.x > -0.5) {
-    vec4 anchor = ShadoParticleContainer_anchors_get(int(particle.extra.x + 0.5));
-    float ac = cos(anchor.w);
-    float as_ = sin(anchor.w);
-    world = vec3(world.x * ac + world.z * as_, world.y, -world.x * as_ + world.z * ac) + anchor.xyz;
+    int slot = int(particle.extra.x + 0.5) * 2;
+    vec4 anchor = ShadoParticleContainer_anchors_get(slot);
+    vec4 q = ShadoParticleContainer_anchors_get(slot + 1);
+    world = world + 2.0 * cross(q.xyz, cross(q.xyz, world) + q.w * world) + anchor.xyz;
   }
   float angle = particle.look.z + particle.look.w * age;
   float c = cos(angle);
@@ -440,10 +440,10 @@ fn main(input: VertexInputs) -> FragmentInputs {
       particle.collision.x, particle.collision.y, particle.collision.w, age);
   }
   if (particle.extra.x > -0.5) {
-    let anchor = ShadoParticleContainer_anchors_get(i32(particle.extra.x + 0.5));
-    let ac = cos(anchor.w);
-    let asn = sin(anchor.w);
-    world = vec3f(world.x * ac + world.z * asn, world.y, -world.x * asn + world.z * ac) + anchor.xyz;
+    let slot = i32(particle.extra.x + 0.5) * 2;
+    let anchor = ShadoParticleContainer_anchors_get(slot);
+    let q = ShadoParticleContainer_anchors_get(slot + 1);
+    world = world + 2.0 * cross(q.xyz, cross(q.xyz, world) + q.w * world) + anchor.xyz;
   }
   let angle = particle.look.z + particle.look.w * age;
   let c = cos(angle);

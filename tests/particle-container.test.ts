@@ -63,18 +63,22 @@ describe('ShadoParticleContainer', () => {
     expect(container.drawCount).toBe(256);
   });
 
-  it('writes each anchor slot to the element the shader reads, and no further', () => {
+  it('writes each anchor slot to the elements the shader reads, and no further', () => {
     const container = new ShadoParticleContainer(engine, { capacity: 16, emitterCapacity: 2, anchorCapacity: 4 });
-    const slots = [container.acquireAnchor([1, 2, 3], 0.5), container.acquireAnchor([4, 5, 6], 1), container.acquireAnchor([7, 8, 9], 1.5)];
+    const slots = [container.acquireAnchor([1, 2, 3], 0), container.acquireAnchor([4, 5, 6], Math.PI), container.acquireAnchor([7, 8, 9], 0, [0, 0, 1, 0])];
     expect(slots).toEqual([0, 1, 2]);
-    expect(container.getVarArrayCount('anchors')).toBe(4);
+    expect(container.getVarArrayCount('anchors')).toBe(8);
     const c = container as any;
-    const anchors = new Float32Array(c._arena.f32.buffer, c._arena.f32.byteOffset + c._varSeg.anchors.offF * 4, 16);
-    // ShadoParticleContainer_anchors_get(i) reads element i: floats 4i..4i+3.
-    expect(Array.from(anchors)).toEqual([1, 2, 3, 0.5, 4, 5, 6, 1, 7, 8, 9, 1.5, 0, 0, 0, 0]);
+    const anchors = new Float32Array(c._arena.f32.buffer, c._arena.f32.byteOffset + c._varSeg.anchors.offF * 4, 32);
+    // Anchor i is elements 2i (position, yaw) and 2i+1 (the turn's quaternion).
+    const round = (list: Float32Array) => Array.from(list, (v) => Math.round(v * 1e5) / 1e5 + 0);
+    expect(round(anchors.subarray(0, 8))).toEqual([1, 2, 3, 0, 0, 0, 0, 1]);
+    expect(round(anchors.subarray(8, 16))).toEqual([4, 5, 6, 3.14159, 0, 1, 0, 0]);
+    expect(round(anchors.subarray(16, 24))).toEqual([7, 8, 9, 0, 0, 0, 1, 0]);
+    expect(round(anchors.subarray(24, 32))).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
     container.releaseAnchor(1);
-    expect(Array.from(anchors.subarray(4, 8))).toEqual([0, 0, 0, 0]);
-    expect(Array.from(anchors.subarray(8, 12))).toEqual([7, 8, 9, 1.5]);
+    expect(round(anchors.subarray(8, 16))).toEqual([0, 0, 0, 0, 0, 0, 0, 1]);
+    expect(round(anchors.subarray(16, 24))).toEqual([7, 8, 9, 0, 0, 0, 1, 0]);
   });
 
   it('accounts for emitter slots across whole trees and gives them back', () => {

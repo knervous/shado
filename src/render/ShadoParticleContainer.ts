@@ -84,6 +84,10 @@ export class ShadoParticleContainer extends Shado {
   @field('f32')
   padding1!: number;
 
+  /**
+   * Two vec4 per anchor: `[x, y, z, yaw]` then the turn as a quaternion `[x, y, z, w]`.
+   * The renderer turns by the quaternion; a yaw-only anchor writes the yaw's quaternion.
+   */
   @field({ arrayOf: 'vec4' })
   anchors!: Float32Array;
 
@@ -128,7 +132,7 @@ export class ShadoParticleContainer extends Shado {
       throw new Error(`ShadoParticle stride is ${stride} bytes; the reducer expects ${SHADO_PARTICLE_STRIDE_BYTES}`);
     }
     // Allocate everything once, before the reducer is pointed at it.
-    this.setVarArray('anchors', new Float32Array(this.anchorSlots * 4));
+    this.setVarArray('anchors', new Float32Array(this.anchorSlots * 8));
     this.setStructArrayCount('particles', this.capacity);
     for (let i = this.emitterCapacity - 1; i >= 0; i--) this.freeEmitters.push(i);
     for (let i = this.anchorSlots - 1; i >= 0; i--) this.freeAnchors.push(i);
@@ -138,26 +142,29 @@ export class ShadoParticleContainer extends Shado {
   // ------------------------------------------------------------------ anchors
 
   /** A slot for a moving origin. Returns -1 when every anchor is taken. */
-  public acquireAnchor(position: ShadoVec3 = [0, 0, 0], yaw = 0): number {
+  public acquireAnchor(position: ShadoVec3 = [0, 0, 0], yaw = 0, rotation?: readonly [number, number, number, number]): number {
     const slot = this.freeAnchors.pop();
     if (slot === undefined) return -1;
-    this.setAnchor(slot, position, yaw);
+    this.setAnchor(slot, position, yaw, rotation);
     return slot;
   }
 
   /**
    * Moves an anchor. Particles following it are placed in its frame: their positions are
    * turned by `yaw` (radians about +Y, Babylon's `rotation.y` sense) and then offset.
+   * `rotation`, a unit quaternion `[x, y, z, w]`, replaces the yaw with a full turn (an
+   * effect riding a swung blade).
    */
-  public setAnchor(slot: number, position: ShadoVec3, yaw = 0): void {
+  public setAnchor(slot: number, position: ShadoVec3, yaw = 0, rotation?: readonly [number, number, number, number]): void {
     if (slot < 0 || slot >= this.anchorSlots) return;
-    // `writeVarArrayRange` takes an element index; each anchor is one vec4 element.
-    this.writeVarArrayRange('anchors', slot, [position[0], position[1], position[2], yaw]);
+    const q = rotation ?? [0, Math.sin(yaw / 2), 0, Math.cos(yaw / 2)];
+    // `writeVarArrayRange` takes an element index; each anchor is two vec4 elements.
+    this.writeVarArrayRange('anchors', slot * 2, [position[0], position[1], position[2], yaw, q[0], q[1], q[2], q[3]]);
   }
 
   public releaseAnchor(slot: number): void {
     if (slot < 0 || slot >= this.anchorSlots) return;
-    this.writeVarArrayRange('anchors', slot, [0, 0, 0, 0]);
+    this.writeVarArrayRange('anchors', slot * 2, [0, 0, 0, 0, 0, 0, 0, 1]);
     this.freeAnchors.push(slot);
   }
 
@@ -178,6 +185,19 @@ export class ShadoParticleContainer extends Shado {
     const reducer = this.ensureReducer();
     const table = reducer.emitterView();
     return this.startTree(table, spec, children, startTime, -1);
+  }
+
+  /**
+   * Moves where an emitter that follows no anchor spawns from. Particles already born
+   * stay where they are: a world-space effect carried by something moving (embers off a
+   * swung blade) emits at the carrier and leaves its particles behind.
+   */
+  public setEmitterOrigin(handle: ShadoParticleEmitterHandle, position: ShadoVec3): void {
+    const table = this.ensureReducer().emitterView();
+    const base = handle.index * SHADO_PARTICLE_EMITTER_FLOATS;
+    table[base + F.originX] = position[0];
+    table[base + F.originY] = position[1];
+    table[base + F.originZ] = position[2];
   }
 
   /** Stops emitting. Live particles, and any queued on-death or trail work, still finish. */
