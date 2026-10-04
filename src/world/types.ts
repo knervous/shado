@@ -527,7 +527,45 @@ export type ShadoWorldGeometryAuthoring = {
  *
  * Sizes and distances are world units, times are seconds.
  */
-export type ShadoWorldParticleEmitter = {
+export type ShadoWorldParticleEmitter = ShadoWorldParticleSystemEmitter | ShadoWorldLibraryEmitter;
+
+/**
+ * An effect from the game's effect library (`eqrequiem/fx/<library>/library.json`) played
+ * at a point: a brazier's fire, a telepod's glow, fireflies over a pond. The effect is
+ * authored whole -- its particles, textures and loop -- so the emitter only places, scales
+ * and gates it. A looping effect plays while the camera is in range and its hours hold;
+ * a one-shot effect replays every `interval` seconds.
+ */
+export type ShadoWorldLibraryEmitter = {
+  kind: 'library';
+  id: string;
+  label?: string;
+  enabled?: boolean;
+  /** Where it plays, in final Babylon world space: the effect's origin (its ground). */
+  position: WorldVec3;
+  /** The effect's name in the library. */
+  effect: string;
+  /** World units per source metre on top of the zone's own scale (1 is the effect as authored at body size). */
+  scale?: number;
+  /** Heading, radians about +Y. */
+  yaw?: number;
+  /** rgba multiplied into the effect's colours. */
+  tint?: WorldVec4;
+  /** The effect's power, 0..1 (Ryzom's intensity): brightens and grows many effects. */
+  power?: number;
+  /** Seconds between plays of an effect that does not loop. Omitted plays it once each time it wakes. */
+  interval?: number;
+  /** How far away the emitter still runs. */
+  range: number;
+  /** Active hours, `[from, to]`, wrapping through midnight. Omitted is always. */
+  hours?: [number, number];
+  metadata?: Record<string, unknown>;
+};
+
+/** A Babylon particle system authored field by field: motes, ash, falling leaves. */
+export type ShadoWorldParticleSystemEmitter = {
+  /** Omitted for documents written before library emitters. */
+  kind?: 'particles';
   id: string;
   label?: string;
   enabled?: boolean;

@@ -294,6 +294,32 @@ function validateParticleEmitters(environment: ShadoWorldEnvironmentAuthoring): 
     if (!emitter?.id?.trim() || seen.has(emitter.id)) throw new Error('World particle emitters require unique IDs');
     seen.add(emitter.id);
     const label = `Particle emitter '${emitter.id}'`;
+    const bounded = (name: string, value: unknown, low: number, high: number): void => {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < low || value > high) {
+        throw new Error(`${label} ${name} must be a number within ${low}..${high}`);
+      }
+    };
+    const kind = (emitter as { kind?: unknown }).kind;
+    if (kind !== undefined && kind !== 'particles' && kind !== 'library') throw new Error(`${label} kind must be particles or library`);
+    if (emitter.kind === 'library') {
+      validateVec3(emitter.position, `${label} position`, false);
+      if (typeof emitter.effect !== 'string' || !/^[A-Za-z0-9_.-]+$/.test(emitter.effect)) throw new Error(`${label} effect must name a library effect`);
+      if (emitter.scale !== undefined) bounded('scale', emitter.scale, 0.01, 100);
+      if (emitter.yaw !== undefined) bounded('yaw', emitter.yaw, -100, 100);
+      if (emitter.power !== undefined) bounded('power', emitter.power, 0, 1);
+      if (emitter.interval !== undefined) bounded('interval', emitter.interval, 0.1, 3_600);
+      if (emitter.tint !== undefined && (!Array.isArray(emitter.tint) || emitter.tint.length !== 4 || emitter.tint.some(c => !Number.isFinite(c) || c < 0 || c > 4))) {
+        throw new Error(`${label} tint must be four channels within 0..4`);
+      }
+      bounded('range', emitter.range, 1, 20_000);
+      if (emitter.hours !== undefined) {
+        if (!Array.isArray(emitter.hours) || emitter.hours.length !== 2 || emitter.hours.some(hour => !Number.isFinite(hour) || hour < 0 || hour > 24)) {
+          throw new Error(`${label} hours must be two hours within 0..24`);
+        }
+      }
+      if (emitter.metadata !== undefined) validateMetadata(emitter.metadata, label);
+      continue;
+    }
     validateVec3(emitter.position, `${label} position`, false);
     validateVec3(emitter.size, `${label} size`, false);
     validateVec3(emitter.direction1, `${label} direction1`, false);
@@ -305,11 +331,6 @@ function validateParticleEmitters(environment: ShadoWorldEnvironmentAuthoring): 
         throw new Error(`${label} ${channel} must be four channels within 0..1`);
       }
     }
-    const bounded = (name: string, value: unknown, low: number, high: number): void => {
-      if (typeof value !== 'number' || !Number.isFinite(value) || value < low || value > high) {
-        throw new Error(`${label} ${name} must be a number within ${low}..${high}`);
-      }
-    };
     bounded('capacity', emitter.capacity, 1, 20_000);
     bounded('emitRate', emitter.emitRate, 0, 10_000);
     bounded('minSize', emitter.minSize, 0, 1_000);

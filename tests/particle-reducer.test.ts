@@ -224,6 +224,37 @@ describe('particle reducer', () => {
     expect(reducer.exports.getTrailCount()).toBe(0);
   });
 
+  it('keeps its arena off the module\'s own data, so drag stays exact for every spawn', async () => {
+    // The arena used to start at a fixed 1024 bytes, over AssemblyScript's maths tables:
+    // the first particles written overwrote Mathf.exp's, and trail children of a parent
+    // under drag were then born far from it, then NaN.
+    const reducer = await arena(256);
+    const table = reducer.emitterView();
+    encodeShadoParticleEmitter(table, 1, baseSpec({ emission: { mode: 'rate', rate: 20 }, attach: 'whileAlive', power: [0, 0], life: [0.2, 1] }), 0, {
+      parent: 0,
+      firstChild: -1,
+      nextSibling: -1,
+    });
+    encodeShadoParticleEmitter(table, 0, baseSpec({ emission: { mode: 'rate', rate: 2 }, shape: { kind: 'radial', dir: [0, 1, 0] }, power: [0.1, 0.1], gravity: [0, 1, 0], drag: 1.5, life: [1, 1], origin: [0, 2.6, 0] }), 0, {
+      parent: -1,
+      firstChild: 1,
+      nextSibling: -1,
+    });
+    for (let frame = 0; frame < 120; frame++) reducer.step(frame / 60);
+    const view = reducer.particleView();
+    let alive = 0;
+    for (let slot = 0; slot < 256; slot++) {
+      if (record(view, slot, P.velocity, 3) <= 0) continue;
+      alive++;
+      const y = record(view, slot, P.birth, 1);
+      expect(Number.isFinite(y)).toBe(true);
+      // Parents climb under drag toward a terminal speed of 2/3 per second: never above 4.
+      expect(y).toBeGreaterThan(2.5);
+      expect(y).toBeLessThan(4);
+    }
+    expect(alive).toBeGreaterThan(30);
+  });
+
   it('never grows memory in steady state', async () => {
     const reducer = await arena(256);
     encodeShadoParticleEmitter(reducer.emitterView(), 0, baseSpec({ emission: { mode: 'rate', rate: 500 } }), 0);

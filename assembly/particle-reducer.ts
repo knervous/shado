@@ -93,7 +93,11 @@ const PENDING_FLOATS: i32 = 8;
 const TRAIL_FLOATS: i32 = 16;
 
 // ---- state -------------------------------------------------------------------------
-let heapPtr: i32 = 1024;
+// The arena starts after the module's own static data: AssemblyScript keeps its maths
+// lookup tables there (Mathf.exp's among them), and an arena laid over them from a fixed
+// offset was overwritten by the first particles, after which every closed-form position
+// with drag came out wrong and then NaN.
+let heapPtr: i32 = (<i32>__heap_base + 15) & ~15;
 
 let particlePtr: i32 = 0;
 let particleCapacity: i32 = 0;
@@ -128,8 +132,8 @@ export function alloc(byteLength: i32): i32 {
   return ptr;
 }
 
-export function resetAllocator(byteOffset: i32 = 1024): void {
-  heapPtr = (byteOffset + 15) & ~15;
+export function resetAllocator(byteOffset: i32 = 0): void {
+  heapPtr = (<i32>Math.max(byteOffset, <i32>__heap_base) + 15) & ~15;
 }
 
 export function initArena(
