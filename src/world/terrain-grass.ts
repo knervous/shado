@@ -53,6 +53,31 @@ export function terrainGrassSuppression(
     }
   }
 
+  /*
+   * A ground whose BASE coat is not grass (a desert's sand, a quarry's stone)
+   * is the opposite case: no lawn anywhere but where a grass layer is painted.
+   * The base is the first enabled layer with no control channel, the coat every
+   * zone lays first. Every zone before Sunscar Landing had a grass base, so this
+   * changes none of them.
+   */
+  const base = terrain.layers.find((layer) => layer.enabled && !resolveTerrainLayer(layer).control);
+  if (base && resolveTerrainLayer(base).material.role !== 'terrain.grass') {
+    const greens: Array<{ map: number; component: number }> = [];
+    for (const layer of terrain.layers) {
+      if (!layer.enabled) continue;
+      const resolved = resolveTerrainLayer(layer);
+      if (!resolved.control || resolved.controlSign < 0 || resolved.material.role !== 'terrain.grass') continue;
+      if (maps[resolved.control.map]) greens.push({ map: resolved.control.map, component: resolved.control.component });
+    }
+    const values = new Uint8Array(width * height);
+    for (let index = 0; index < values.length; index += 1) {
+      let green = 0;
+      for (const source of greens) green = Math.max(green, maps[source.map]!.data[index * 4 + source.component]!);
+      values[index] = 255 - green;
+    }
+    return { width, height, values };
+  }
+
   const sources: Array<{ map: number; component: number }> = [];
   for (const layer of terrain.layers) {
     if (!layer.enabled) continue;

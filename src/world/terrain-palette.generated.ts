@@ -17,6 +17,120 @@ export const ELTANIA_TERRAIN_ROLE_LABELS: Readonly<Record<EltaniaTerrainRole, st
 
 export const ELTANIA_TERRAIN_PALETTE_MATERIALS: readonly EltaniaTerrainMaterial[] = [
   {
+    "id": "eltania-ground-v1/sandDune",
+    "family": "eltania-ground-v1",
+    "key": "sandDune",
+    "label": "Desert sand",
+    "role": "terrain.soil",
+    "note": "open wind-blown desert sand: dunes, beaches and the plain of Aros (Ryzom Core desert tiles 6-desert, client/scripts/material-ai/derive-ryzom-desert-ground.mjs; hand-registered)",
+    "source": "ryzomcore-desert_su/6-desert",
+    "textures": {
+      "albedo": "/eltania/terrain/palette/eltania-ground-v1/sandDune-albedo.webp",
+      "normal": "/eltania/terrain/palette/eltania-ground-v1/sandDune-normal.webp",
+      "hrm": "/eltania/terrain/palette/eltania-ground-v1/sandDune-hrm.webp"
+    },
+    "preview": "/eltania/terrain/palette/eltania-ground-v1/previews/sandDune-preview.webp",
+    "tileMetres": 8,
+    "normalScale": 0.9,
+    "roughness": 1,
+    "heightContrast": 0.4
+  },
+  {
+    "id": "eltania-ground-v1/sandPale",
+    "family": "eltania-ground-v1",
+    "key": "sandPale",
+    "label": "Pale sand",
+    "role": "terrain.soil",
+    "note": "pale, wind-cut sand for crests and the beach above the tide (Ryzom Core desert tiles 6.5-desertalternatif, client/scripts/material-ai/derive-ryzom-desert-ground.mjs; hand-registered)",
+    "source": "ryzomcore-desert_su/6.5-desertalternatif",
+    "textures": {
+      "albedo": "/eltania/terrain/palette/eltania-ground-v1/sandPale-albedo.webp",
+      "normal": "/eltania/terrain/palette/eltania-ground-v1/sandPale-normal.webp",
+      "hrm": "/eltania/terrain/palette/eltania-ground-v1/sandPale-hrm.webp"
+    },
+    "preview": "/eltania/terrain/palette/eltania-ground-v1/previews/sandPale-preview.webp",
+    "tileMetres": 8,
+    "normalScale": 0.85,
+    "roughness": 1,
+    "heightContrast": 0.38
+  },
+  {
+    "id": "eltania-ground-v1/canyonFloor",
+    "family": "eltania-ground-v1",
+    "key": "canyonFloor",
+    "label": "Canyon floor",
+    "role": "terrain.soil",
+    "note": "hard desert crust and scrub soil between the dunes (Ryzom Core desert tiles 3-fond_canyon, client/scripts/material-ai/derive-ryzom-desert-ground.mjs; hand-registered)",
+    "source": "ryzomcore-desert_su/3-fond_canyon",
+    "textures": {
+      "albedo": "/eltania/terrain/palette/eltania-ground-v1/canyonFloor-albedo.webp",
+      "normal": "/eltania/terrain/palette/eltania-ground-v1/canyonFloor-normal.webp",
+      "hrm": "/eltania/terrain/palette/eltania-ground-v1/canyonFloor-hrm.webp"
+    },
+    "preview": "/eltania/terrain/palette/eltania-ground-v1/previews/canyonFloor-preview.webp",
+    "tileMetres": 7,
+    "normalScale": 1.1,
+    "roughness": 1,
+    "heightContrast": 0.6
+  },
+  {
+    "id": "eltania-ground-v1/sandstoneCliff",
+    "family": "eltania-ground-v1",
+    "key": "sandstoneCliff",
+    "label": "Banded sandstone",
+    "role": "terrain.rock",
+    "note": "banded desert sandstone; the triplanar steep-slope layer for scarps and mesas (Ryzom Core desert tiles 5-falaise_normales, client/scripts/material-ai/derive-ryzom-desert-ground.mjs; hand-registered)",
+    "source": "ryzomcore-desert_su/5-falaise_normales",
+    "textures": {
+      "albedo": "/eltania/terrain/palette/eltania-ground-v1/sandstoneCliff-albedo.webp",
+      "normal": "/eltania/terrain/palette/eltania-ground-v1/sandstoneCliff-normal.webp",
+      "hrm": "/eltania/terrain/palette/eltania-ground-v1/sandstoneCliff-hrm.webp"
+    },
+    "preview": "/eltania/terrain/palette/eltania-ground-v1/previews/sandstoneCliff-preview.webp",
+    "tileMetres": 9,
+    "normalScale": 1.3,
+    "roughness": 0.96,
+    "heightContrast": 0.8
+  },
+  {
+    "id": "eltania-ground-v1/desertRoad",
+    "family": "eltania-ground-v1",
+    "key": "desertRoad",
+    "label": "Desert track",
+    "role": "terrain.path",
+    "note": "trodden desert track: dune sand compacted by feet and carts (Ryzom Core desert tiles 6-desert, client/scripts/material-ai/derive-ryzom-desert-ground.mjs; hand-registered)",
+    "source": "ryzomcore-desert_su/6-desert",
+    "textures": {
+      "albedo": "/eltania/terrain/palette/eltania-ground-v1/desertRoad-albedo.webp",
+      "normal": "/eltania/terrain/palette/eltania-ground-v1/desertRoad-normal.webp",
+      "hrm": "/eltania/terrain/palette/eltania-ground-v1/desertRoad-hrm.webp"
+    },
+    "preview": "/eltania/terrain/palette/eltania-ground-v1/previews/desertRoad-preview.webp",
+    "tileMetres": 5,
+    "normalScale": 0.8,
+    "roughness": 1,
+    "heightContrast": 0.35
+  },
+  {
+    "id": "eltania-ground-v1/fyrosBoards",
+    "family": "eltania-ground-v1",
+    "key": "fyrosBoards",
+    "label": "Fyros boards",
+    "role": "terrain.paving",
+    "note": "carved plank ground of Fyros towns: yards, landings and meeting grounds (Ryzom Core desert tiles 7-routes, client/scripts/material-ai/derive-ryzom-desert-ground.mjs; hand-registered)",
+    "source": "ryzomcore-desert_su/7-routes",
+    "textures": {
+      "albedo": "/eltania/terrain/palette/eltania-ground-v1/fyrosBoards-albedo.webp",
+      "normal": "/eltania/terrain/palette/eltania-ground-v1/fyrosBoards-normal.webp",
+      "hrm": "/eltania/terrain/palette/eltania-ground-v1/fyrosBoards-hrm.webp"
+    },
+    "preview": "/eltania/terrain/palette/eltania-ground-v1/previews/fyrosBoards-preview.webp",
+    "tileMetres": 6,
+    "normalScale": 1.1,
+    "roughness": 0.95,
+    "heightContrast": 0.5
+  },
+  {
     "id": "eltania-ground-v1/cliffRock",
     "family": "eltania-ground-v1",
     "key": "cliffRock",
