@@ -59,3 +59,22 @@ export {
   type SvatDecodeWorkerLike,
   type SvatWorkerDecodeOptions,
 } from './SvatWorker';
+
+export {
+  assembleDQBody,
+  buildDQLibrary,
+  compareDQAtlases,
+  planBodyFromLibrary,
+  createPackedDQAtlas,
+  dqDifference,
+  rebuildBodyFromLibrary,
+  svatLayoutOf,
+  type DQBodyPlanClip,
+  type DQLibrary,
+  type DQLibraryBody,
+  type DQLibraryClipRef,
+  type DQLibraryManifest,
+  type DQLibraryOptions,
+  type DQLibraryRebuild,
+  type DQLibraryRebuildOptions,
+} from './SvatLibrary';
