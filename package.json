@@ -292,7 +292,7 @@
     "typescript": "5.7.3"
   },
   "engines": {
-    "node": ">=18"
+    "node": "26.x"
   },
   "scripts": {
     "clean": "rimraf dist",
