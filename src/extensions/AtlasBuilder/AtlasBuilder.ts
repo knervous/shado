@@ -108,13 +108,18 @@ async function readTextureToImageData(scene: Scene, tex: Texture): Promise<Image
       // length no longer maps to pixels. They are still sampleable, so blit
       // through a shader into an RGBA8 target and read that instead.
       const blit = BABYLON.TextureTools.CreateResizedCopy(tex as Texture, w, h, true);
-      await new Promise<void>(resolve => {
-        if (blit.isReady()) resolve();
-        else blit.onLoadObservable.addOnce(() => resolve());
+      // A render target never fires onLoadObservable: CreateResizedCopy flips
+      // its internal texture ready once the pass effect compiles and the copy
+      // has been drawn, so poll for that instead of waiting on an event.
+      await new Promise<void>((resolve, reject) => {
+        const deadline = performance.now() + 10_000;
+        const check = () => {
+          if (blit.isReady()) resolve();
+          else if (performance.now() > deadline) reject(new Error('readTextureToImageData: blit copy never became ready'));
+          else setTimeout(check, 16);
+        };
+        check();
       });
-      // The pass renders on the next frame; poke one render so the target is
-      // populated before readback when no render loop is running.
-      scene.render();
       source = (await blit.readPixels()) as ArrayBufferView | null;
       blit.dispose();
       if (!source) throw new Error('readTextureToImageData: blit readback returned no pixels');
