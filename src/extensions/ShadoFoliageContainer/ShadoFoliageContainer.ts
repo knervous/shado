@@ -1,6 +1,6 @@
 import type { Mesh, Scene } from '../../babylon';
 import { BABYLON } from '../../babylon';
-import { field, gpuStruct } from '../../decorators';
+import { type ShadoConfig, type PendingField } from '../../decorators';
 import type { ShadoMaterial } from '../../materials/ShadoMaterial';
 import { ShadoActor } from '../ShadoActor';
 import {
@@ -28,9 +28,12 @@ import {
  * - `z` — colour variation, 0..1. Drives the `tint` plugin.
  * - `w` — free, reserved for prototype-specific plugins.
  */
-@gpuStruct({ name: 'ShadoFoliageActor' })
 export class ShadoFoliageActor extends ShadoActor {
-  @field('vec4') foliageParams!: Float32Array;
+  static readonly shadoConfig: ShadoConfig = { name: 'ShadoFoliageActor' };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'foliageParams', type: 'vec4' },
+  ];
+  foliageParams!: Float32Array;
 
   public override initialize() {
     super.initialize();

@@ -1,24 +1,28 @@
 import { NullEngine } from '@babylonjs/core';
-import { field, gpuStruct } from '../src/decorators';
+import { type ShadoConfig, type PendingField } from '../src/decorators';
 import { ShadoActor } from '../src/extensions/ShadoActor';
 import { getShadoPublishedProperties, shadoPublish } from '../src/publish';
 
-@gpuStruct({ name: 'PublishedActor', useWasm: false })
 class PublishedActor extends ShadoActor {
+  static readonly shadoConfig: ShadoConfig = { name: 'PublishedActor', useWasm: false };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'armorClass', type: 'f32' },
+    { name: 'weaponClass', type: 'f32' },
+  ];
   @shadoPublish({
     name: 'armor',
     label: 'Armor set',
     description: 'Complete material family.',
     values: ['armorless', 'leather', 'chain', 'plate'],
   })
-  @field('f32') armorClass!: number;
+  armorClass!: number;
 
   @shadoPublish({
     name: 'mainHand',
     socket: 'r_point',
     values: ['none', 'sword'],
   })
-  @field('f32') weaponClass!: number;
+  weaponClass!: number;
 }
 
 describe('@shadoPublish', () => {

@@ -1,7 +1,7 @@
 import { BABYLON } from '../../babylon';
 import { ASCExtension, Shado } from '../../core/Shado';
 import { ShadoInstanceSoA } from '../../core/ShadoInstanceSoA';
-import { gpuStruct, field } from '../../decorators';
+import { type ShadoConfig, type PendingField } from '../../decorators';
 import { ShadoMaterial, type ShadoVatQualityTier } from '../../materials/ShadoMaterial';
 import type { ShadoInstanceAsyncPickingOptions } from '../../render/ShadoAsyncPicking';
 import { ShadoActor } from '../ShadoActor';
@@ -261,16 +261,22 @@ function installSolidColorTextures(scene: Scene, meshes: Mesh[]): Texture[] {
   return generated;
 }
 
-@gpuStruct({ name: 'ShadoInstanceContainer', useWasm: true })
 export class ShadoInstanceContainer<T extends ShadoActor> extends Shado {
+  static readonly shadoConfig: ShadoConfig = { name: 'ShadoInstanceContainer', useWasm: true };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'visibleCount', type: 'u32' },
+    { name: 'instancesPtr', type: 'u32' },
+    { name: 'instancesCount', type: 'u32' },
+    { name: 'cameraFrustum', type: { arrayOf: 'vec4' } },
+  ];
   // `declare` is significant here: emitting native class fields after super()
   // replaces Shado's packed-arena accessors with undefined data properties in
   // production bundles. Thin actor objects skip constructors, but this owning
   // container does not.
-  @field('u32') declare visibleCount: number;
-  @field('u32') declare instancesPtr: number;
-  @field('u32') declare instancesCount: number;
-  @field({ arrayOf: 'vec4' }) declare cameraFrustum: Float32Array;
+  declare visibleCount: number;
+  declare instancesPtr: number;
+  declare instancesCount: number;
+  declare cameraFrustum: Float32Array;
   // We fill in the instances array struct dynamically
 
   private static _instanceName: string = ShadoActor.getSchema().name;

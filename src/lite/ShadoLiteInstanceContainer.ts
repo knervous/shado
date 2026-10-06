@@ -1,6 +1,6 @@
 import { Shado } from '../core/Shado';
 import { ShadoInstanceSoA } from '../core/ShadoInstanceSoA';
-import { field, gpuStruct, type PendingField } from '../decorators';
+import { type PendingField, type ShadoConfig } from '../decorators';
 import type { ShadoActor } from '../extensions/ShadoActor';
 import type { InitializeConfig } from '../types';
 
@@ -11,11 +11,16 @@ import type { InitializeConfig } from '../types';
  * this class: downstream applications can gate those features independently.
  * The hot runtime stays storage-only and has no Babylon.js class dependency.
  */
-@gpuStruct({ name: 'ShadoLiteInstanceContainer' })
 export class ShadoLiteInstanceContainer<T extends ShadoActor = ShadoActor> extends Shado {
-  @field('u32') declare visibleCount: number;
-  @field('u32') declare instancesCount: number;
-  @field({ arrayOf: 'vec4' }) declare cameraFrustum: Float32Array;
+  static readonly shadoConfig: ShadoConfig = { name: 'ShadoLiteInstanceContainer' };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'visibleCount', type: 'u32' },
+    { name: 'instancesCount', type: 'u32' },
+    { name: 'cameraFrustum', type: { arrayOf: 'vec4' } },
+  ];
+  declare visibleCount: number;
+  declare instancesCount: number;
+  declare cameraFrustum: Float32Array;
 
   private readonly actors: T[] = [];
   private readonly instanceSoA = new ShadoInstanceSoA();

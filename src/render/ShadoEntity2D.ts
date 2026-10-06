@@ -1,5 +1,5 @@
 import { Shado } from '../core/Shado';
-import { field, gpuStruct } from '../decorators';
+import { type ShadoConfig, type PendingField } from '../decorators';
 
 export const SHADO_ENTITY_VISIBLE = 1 << 0;
 export const SHADO_ENTITY_SELECTED = 1 << 1;
@@ -61,27 +61,29 @@ export function entityFlags(input: ShadoEntity2DInput): number {
   return flags;
 }
 
-@gpuStruct({ name: 'ShadoEntity2D', useWasm: false })
 export class ShadoEntity2D extends Shado {
-  @field('vec4')
+  static readonly shadoConfig: ShadoConfig = { name: 'ShadoEntity2D', useWasm: false };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'positionSize', type: 'vec4' },
+    { name: 'render', type: 'vec4' },
+    { name: 'destinationSize', type: 'vec4' },
+    { name: 'motion', type: 'vec4' },
+    { name: 'uvRect', type: 'vec4' },
+    { name: 'color', type: 'vec4' },
+    { name: 'renderState', type: 'vec4' },
+  ];
   positionSize!: Float32Array;
 
-  @field('vec4')
   render!: Float32Array;
 
-  @field('vec4')
   destinationSize!: Float32Array;
 
-  @field('vec4')
   motion!: Float32Array;
 
-  @field('vec4')
   uvRect!: Float32Array;
 
-  @field('vec4')
   color!: Float32Array;
 
-  @field('vec4')
   renderState!: Float32Array;
 
   public setFrom(input: ShadoEntity2DInput): this {

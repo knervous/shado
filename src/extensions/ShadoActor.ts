@@ -1,5 +1,5 @@
 import { Shado } from '../core/Shado';
-import { field, gpuStruct } from '../decorators';
+import { type ShadoConfig, type PendingField } from '../decorators';
 import type { DQClipInfo } from './VATBuilder/VATBuilder';
 
 /** Base material lighting available to each actor without a custom shader hook. */
@@ -8,24 +8,39 @@ export enum ShadoLightingMode {
   Lambert = 1,
 }
 
-@gpuStruct({ name: 'ShadoActor' })
 export class ShadoActor extends Shado {
-  @field('vec4') translation!: Float32Array;
+  static readonly shadoConfig: ShadoConfig = { name: 'ShadoActor' };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'translation', type: 'vec4' },
+    { name: 'rotation', type: 'vec4' },
+    { name: 'color', type: 'vec4' },
+    { name: 'visibleIndex', type: 'i32' },
+    { name: 'nameIndex', type: 'u32' },
+    { name: 'nameWorldPerEM', type: 'f32' },
+    { name: 'nameLiftWorld', type: 'f32' },
+    { name: 'nameplateColor', type: 'vec4' },
+    { name: 'animationBuffer', type: 'vec4' },
+    { name: 'visibleFlag', type: 'i32' },
+    { name: 'padding1', type: 'f32' },
+    { name: 'padding2', type: 'f32' },
+    { name: 'padding3', type: 'f32' },
+  ];
+  translation!: Float32Array;
   /** World-space orientation quaternion (x, y, z, w). */
-  @field('vec4') rotation!: Float32Array;
-  @field('vec4') color!: Float32Array;
+  rotation!: Float32Array;
+  color!: Float32Array;
   /** Compatibility field retained at its stable 1.0.x packed offset. */
-  @field('i32') visibleIndex!: number;
-  @field('u32') nameIndex!: number;
-  @field('f32') nameWorldPerEM!: number;
-  @field('f32') nameLiftWorld!: number;
-  @field('vec4') nameplateColor!: Float32Array;
-  @field('vec4') animationBuffer!: Float32Array;
+  visibleIndex!: number;
+  nameIndex!: number;
+  nameWorldPerEM!: number;
+  nameLiftWorld!: number;
+  nameplateColor!: Float32Array;
+  animationBuffer!: Float32Array;
   /** Compatibility field retained at its stable 1.0.x packed offset. */
-  @field('i32') visibleFlag!: number;
-  @field('f32') padding1!: number;
-  @field('f32') padding2!: number;
-  @field('f32') padding3!: number;
+  visibleFlag!: number;
+  padding1!: number;
+  padding2!: number;
+  padding3!: number;
 
   /**
    * Per-instance lighting selection. This intentionally occupies the first
@@ -99,9 +114,12 @@ export class ShadoActor extends Shado {
   }
 }
 
-@gpuStruct({ name: 'TestClass' })
 export class TestClass extends ShadoActor {
-  @field('vec4') testValue!: Float32Array;
+  static readonly shadoConfig: ShadoConfig = { name: 'TestClass' };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'testValue', type: 'vec4' },
+  ];
+  testValue!: Float32Array;
   public testMethod() {
     console.log('Look at my testValue', this.testValue);
   }

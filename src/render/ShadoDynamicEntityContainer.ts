@@ -1,6 +1,6 @@
 import { BABYLON } from '../babylon';
 import { Shado } from '../core/Shado';
-import { field, gpuStruct, type PendingField } from '../decorators';
+import { type PendingField, type ShadoConfig } from '../decorators';
 import type { InitializeConfig } from '../types';
 import {
   defaultShadoDynamicEntityReducerWasmBytes,
@@ -100,21 +100,23 @@ type EntityRecord = {
   textureKey?: string;
 };
 
-@gpuStruct({ name: 'ShadoDynamicEntityContainer', useWasm: true })
 export class ShadoDynamicEntityContainer extends Shado {
-  @field('f32')
+  static readonly shadoConfig: ShadoConfig = { name: 'ShadoDynamicEntityContainer', useWasm: true };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'drawCount', type: 'f32' },
+    { name: 'entityCount', type: 'f32' },
+    { name: 'flags', type: 'f32' },
+    { name: 'padding0', type: 'f32' },
+    { name: 'drawIds', type: { arrayOf: 'f32' } },
+  ];
   drawCount!: number;
 
-  @field('f32')
   entityCount!: number;
 
-  @field('f32')
   flags!: number;
 
-  @field('f32')
   padding0!: number;
 
-  @field({ arrayOf: 'f32' })
   drawIds!: Float32Array;
 
   private readonly records: EntityRecord[] = [];

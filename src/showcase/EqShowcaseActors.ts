@@ -1,16 +1,24 @@
-import { field, gpuStruct } from '../decorators';
+import { type ShadoConfig, type PendingField } from '../decorators';
 import { ShadoActor } from '../extensions/ShadoActor';
 import { ShadoInstanceContainer } from '../extensions/ShadoInstanceContainer/ShadoInstanceContainer';
 import { shadoPublish } from '../publish';
 import { SHOWCASE_WEAPONS } from './EqShowcaseCatalog';
 import { EQ_SHOWCASE_GLSL, EQ_SHOWCASE_WGSL } from './EqShowcaseShader';
 
-@gpuStruct({ name: 'EqShowcaseActor' })
 export class EqShowcaseActor extends ShadoActor {
-  @field('vec4') skinTint!: Float32Array;
-  @field('vec4') chestTint!: Float32Array;
-  @field('vec4') legTint!: Float32Array;
-  @field('vec4') trimTint!: Float32Array;
+  static readonly shadoConfig: ShadoConfig = { name: 'EqShowcaseActor' };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'skinTint', type: 'vec4' },
+    { name: 'chestTint', type: 'vec4' },
+    { name: 'legTint', type: 'vec4' },
+    { name: 'trimTint', type: 'vec4' },
+    { name: 'armorClass', type: 'f32' },
+    { name: 'weaponClass', type: 'f32' },
+  ];
+  skinTint!: Float32Array;
+  chestTint!: Float32Array;
+  legTint!: Float32Array;
+  trimTint!: Float32Array;
 
   @shadoPublish({
     name: 'armor',
@@ -19,7 +27,7 @@ export class EqShowcaseActor extends ShadoActor {
     description: 'One complete Requiem material family across the whole character.',
     values: ['armorless', 'leather', 'chain', 'plate'],
   })
-  @field('f32') armorClass!: number;
+  armorClass!: number;
 
   @shadoPublish({
     name: 'mainHand',
@@ -36,7 +44,7 @@ export class EqShowcaseActor extends ShadoActor {
       })),
     ],
   })
-  @field('f32') weaponClass!: number;
+  weaponClass!: number;
 
   public override initialize() {
     super.initialize();

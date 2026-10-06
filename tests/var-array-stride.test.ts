@@ -1,7 +1,7 @@
 import { describe, expect, it } from '@jest/globals';
 import { NullEngine } from '@babylonjs/core';
 import { Shado } from '../src/core/Shado';
-import { field, gpuStruct } from '../src/decorators';
+import { type ShadoConfig, type PendingField } from '../src/decorators';
 
 /**
  * `getVarArrayCount` divided by `floatStride | 1`, which reads as a default but
@@ -13,11 +13,16 @@ import { field, gpuStruct } from '../src/decorators';
  * which shrinks `lenF` and zero-fills everything above it. Writing past 80% of
  * a vec4 array therefore wiped its tail, and the write itself did not land.
  */
-@gpuStruct({ name: 'VarStrideProbe' })
 class VarStrideProbe extends Shado {
-  @field({ arrayOf: 'vec4' }) quads!: Float32Array;
-  @field({ arrayOf: 'vec2' }) pairs!: Float32Array;
-  @field({ arrayOf: 'f32' }) scalars!: Float32Array;
+  static readonly shadoConfig: ShadoConfig = { name: 'VarStrideProbe' };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'quads', type: { arrayOf: 'vec4' } },
+    { name: 'pairs', type: { arrayOf: 'vec2' } },
+    { name: 'scalars', type: { arrayOf: 'f32' } },
+  ];
+  quads!: Float32Array;
+  pairs!: Float32Array;
+  scalars!: Float32Array;
 }
 
 describe('variable array element counts', () => {

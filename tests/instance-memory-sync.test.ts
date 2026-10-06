@@ -1,14 +1,19 @@
 import { describe, it, expect } from '@jest/globals';
-import { gpuStruct, field } from '../src/decorators';
+import { type ShadoConfig, type PendingField } from '../src/decorators';
 import { ShaderObject } from '../src/core/ShaderObject';
 import { NullEngine } from '@babylonjs/core';
 
 // Simple test class without WASM
-@gpuStruct({ name: 'TestStruct', useWasm: false })
 class TestStruct extends ShaderObject {
-  @field(0, 'u32') fieldA!: number;
-  @field(1, 'u32') fieldB!: number;
-  @field(2, 'u32') fieldC!: number;
+  static readonly shadoConfig: ShadoConfig = { name: 'TestStruct', useWasm: false };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'fieldA', type: 'u32' },
+    { name: 'fieldB', type: 'u32' },
+    { name: 'fieldC', type: 'u32' },
+  ];
+  fieldA!: number;
+  fieldB!: number;
+  fieldC!: number;
 
   constructor(engine: any) {
     super(engine);

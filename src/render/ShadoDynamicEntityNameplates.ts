@@ -1,6 +1,6 @@
 import { BABYLON, type AbstractEngine, type Mesh, type Scene } from '../babylon';
 import { Shado } from '../core/Shado';
-import { field, gpuStruct, type PendingField } from '../decorators';
+import { type PendingField, type ShadoConfig } from '../decorators';
 import { NameplateData, createMSDFNameplateLayer, type MSDFNameplateFontAsset } from '../msdf';
 import type { InitializeConfig } from '../types';
 
@@ -51,17 +51,28 @@ const DEFAULT_WORLD_SCALE = 1 / 36;
 const DEFAULT_Z_OFFSET = 0.35;
 const DEFAULT_NAME_LIFT_WORLD = -0.65;
 
-@gpuStruct({ name: 'ShadoDynamicNameplateActor', useWasm: false })
 class ShadoDynamicNameplateActor extends Shado {
-  @field('vec4') translation!: Float32Array;
-  @field('u32') nameIndex!: number;
-  @field('f32') nameWorldPerEM!: number;
-  @field('f32') nameLiftWorld!: number;
-  @field('vec4') nameplateColor!: Float32Array;
-  @field('i32') visibleFlag!: number;
-  @field('f32') billboardFlag!: number;
-  @field('f32') padding1!: number;
-  @field('f32') padding2!: number;
+  static readonly shadoConfig: ShadoConfig = { name: 'ShadoDynamicNameplateActor', useWasm: false };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'translation', type: 'vec4' },
+    { name: 'nameIndex', type: 'u32' },
+    { name: 'nameWorldPerEM', type: 'f32' },
+    { name: 'nameLiftWorld', type: 'f32' },
+    { name: 'nameplateColor', type: 'vec4' },
+    { name: 'visibleFlag', type: 'i32' },
+    { name: 'billboardFlag', type: 'f32' },
+    { name: 'padding1', type: 'f32' },
+    { name: 'padding2', type: 'f32' },
+  ];
+  translation!: Float32Array;
+  nameIndex!: number;
+  nameWorldPerEM!: number;
+  nameLiftWorld!: number;
+  nameplateColor!: Float32Array;
+  visibleFlag!: number;
+  billboardFlag!: number;
+  padding1!: number;
+  padding2!: number;
 
   public constructor(engine: AbstractEngine) {
     super(engine, true);
@@ -80,10 +91,14 @@ class ShadoDynamicNameplateActor extends Shado {
   }
 }
 
-@gpuStruct({ name: 'ShadoDynamicNameplateContainer', useWasm: false })
 class ShadoDynamicNameplateContainer extends Shado {
-  @field('u32') visibleCount!: number;
-  @field('u32') instancesCount!: number;
+  static readonly shadoConfig: ShadoConfig = { name: 'ShadoDynamicNameplateContainer', useWasm: false };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'visibleCount', type: 'u32' },
+    { name: 'instancesCount', type: 'u32' },
+  ];
+  visibleCount!: number;
+  instancesCount!: number;
 
   private readonly records: DynamicNameplateRecord[] = [];
 

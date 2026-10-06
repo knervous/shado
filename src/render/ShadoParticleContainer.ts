@@ -1,5 +1,5 @@
 import { Shado } from '../core/Shado';
-import { field, gpuStruct } from '../decorators';
+import { type ShadoConfig, type PendingField } from '../decorators';
 import type { InitializeConfig } from '../types';
 import {
   SHADO_PARTICLE_EMITTER_FLOATS,
@@ -20,24 +20,26 @@ import { encodeShadoParticleEmitter, type ShadoParticleEmitterSpec, type ShadoVe
  * `ShadoParticleLayout.ts`, and the container refuses to run if Shado lays it out any
  * other way.
  */
-@gpuStruct({ name: 'ShadoParticle', useWasm: false })
 export class ShadoParticle extends Shado {
-  @field('vec4')
+  static readonly shadoConfig: ShadoConfig = { name: 'ShadoParticle', useWasm: false };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'birth', type: 'vec4' },
+    { name: 'velocity', type: 'vec4' },
+    { name: 'accel', type: 'vec4' },
+    { name: 'look', type: 'vec4' },
+    { name: 'collision', type: 'vec4' },
+    { name: 'extra', type: 'vec4' },
+  ];
   birth!: Float32Array;
 
-  @field('vec4')
   velocity!: Float32Array;
 
-  @field('vec4')
   accel!: Float32Array;
 
-  @field('vec4')
   look!: Float32Array;
 
-  @field('vec4')
   collision!: Float32Array;
 
-  @field('vec4')
   extra!: Float32Array;
 }
 
@@ -70,25 +72,27 @@ export interface ShadoParticleEmitterHandle {
  * Capacity is fixed at construction. Growing would repack the arena and move the records
  * under the reducer, which is not worth supporting for a pool sized by a budget.
  */
-@gpuStruct({ name: 'ShadoParticleContainer', useWasm: true })
 export class ShadoParticleContainer extends Shado {
-  @field('f32')
+  static readonly shadoConfig: ShadoConfig = { name: 'ShadoParticleContainer', useWasm: true };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'particleCapacity', type: 'f32' },
+    { name: 'anchorCapacity', type: 'f32' },
+    { name: 'padding0', type: 'f32' },
+    { name: 'padding1', type: 'f32' },
+    { name: 'anchors', type: { arrayOf: 'vec4' } },
+  ];
   particleCapacity!: number;
 
-  @field('f32')
   anchorCapacity!: number;
 
-  @field('f32')
   padding0!: number;
 
-  @field('f32')
   padding1!: number;
 
   /**
    * Two vec4 per anchor: `[x, y, z, yaw]` then the turn as a quaternion `[x, y, z, w]`.
    * The renderer turns by the quaternion; a yaw-only anchor writes the yaw's quaternion.
    */
-  @field({ arrayOf: 'vec4' })
   anchors!: Float32Array;
 
   public readonly capacity: number;

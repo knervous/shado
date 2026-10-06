@@ -489,7 +489,7 @@ export abstract class Shado {
     if (!dec.length) {
       throw new Error(
         `No schema for ${name} (constructor: ${this.constructor.name}). ` +
-          `Decorate with @field(). Fields found: ${dec.length}. ` +
+          `Declare static shadoFields on the class. Fields found: ${dec.length}. ` +
           `Meta: ${JSON.stringify(meta)}`
       );
     }
@@ -996,7 +996,7 @@ export abstract class Shado {
     const name = meta.name ?? (this as any).name ?? 'AnonymousStruct';
     const dec = readFields(this);
     for (const f of extraFields) dec.push(f);
-    if (!dec.length) throw new Error(`No schema for ${name}. Decorate with @field().`);
+    if (!dec.length) throw new Error(`No schema for ${name}. Declare static shadoFields on the class.`);
     const b = new ShadoSchemaBuilder(name, meta);
     for (const f of dec) b.registerField(f.name, f.type);
     const schema = b.build();

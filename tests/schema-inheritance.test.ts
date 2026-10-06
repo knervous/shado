@@ -1,10 +1,13 @@
 import { NullEngine } from '@babylonjs/core';
-import { field, gpuStruct } from '../src/decorators';
+import { type ShadoConfig, type PendingField } from '../src/decorators';
 import { ShadoActor } from '../src/extensions/ShadoActor';
 
-@gpuStruct({ name: 'SpecializedActor', useWasm: false })
 class SpecializedActor extends ShadoActor {
-  @field('u32') entityId!: number;
+  static readonly shadoConfig: ShadoConfig = { name: 'SpecializedActor', useWasm: false };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'entityId', type: 'u32' },
+  ];
+  entityId!: number;
 }
 
 describe('Shado schema inheritance', () => {

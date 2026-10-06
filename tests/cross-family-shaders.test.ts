@@ -1,5 +1,5 @@
 import { NullEngine } from '@babylonjs/core';
-import { field, gpuStruct } from '../src/decorators';
+import { type ShadoConfig, type PendingField } from '../src/decorators';
 import { ShadoActor } from '../src/extensions/ShadoActor';
 import { ShadoInstanceContainer } from '../src/extensions/ShadoInstanceContainer/ShadoInstanceContainer';
 import {
@@ -7,13 +7,17 @@ import {
   ShadoFoliageContainer,
 } from '../src/extensions/ShadoFoliageContainer/ShadoFoliageContainer';
 
-@gpuStruct({ name: 'CrossFamilyEntityActor' })
 class CrossFamilyEntityActor extends ShadoActor {
-  @field('u32') entityId!: number;
+  static readonly shadoConfig: ShadoConfig = { name: 'CrossFamilyEntityActor' };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'entityId', type: 'u32' },
+  ];
+  entityId!: number;
 }
 
-@gpuStruct({ name: 'CrossFamilyEntityContainer' })
-class CrossFamilyEntityContainer extends ShadoInstanceContainer<CrossFamilyEntityActor> {}
+class CrossFamilyEntityContainer extends ShadoInstanceContainer<CrossFamilyEntityActor> {
+  static readonly shadoConfig: ShadoConfig = { name: 'CrossFamilyEntityContainer' };
+}
 
 describe('shader generation with coexisting container families', () => {
   it('keeps each family on its own actor header after another family initializes', async () => {

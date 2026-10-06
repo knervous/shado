@@ -1,5 +1,5 @@
 import { NullEngine } from '@babylonjs/core';
-import { field, gpuStruct } from '../src/decorators';
+import { type ShadoConfig, type PendingField } from '../src/decorators';
 import { ShadoActor } from '../src/extensions/ShadoActor';
 import {
   ShadoInstanceContainer,
@@ -8,11 +8,16 @@ import {
 import { EqShowcaseActor, EqShowcaseContainer } from '../src/showcase/EqShowcaseActors';
 import { EQ_SHOWCASE_GLSL } from '../src/showcase/EqShowcaseShader';
 
-@gpuStruct({ name: 'TestPlaygroundActor' })
 class TestPlaygroundActor extends ShadoActor {
-  @field('f32') armorClass!: number;
-  @field('f32') weaponClass!: number;
-  @field('f32') lightingTone!: number;
+  static readonly shadoConfig: ShadoConfig = { name: 'TestPlaygroundActor' };
+  static readonly shadoFields: readonly PendingField[] = [
+    { name: 'armorClass', type: 'f32' },
+    { name: 'weaponClass', type: 'f32' },
+    { name: 'lightingTone', type: 'f32' },
+  ];
+  armorClass!: number;
+  weaponClass!: number;
+  lightingTone!: number;
 }
 
 const TEST_PLAYGROUND_SHADER: ShadoInstanceGLSLHooks = {
