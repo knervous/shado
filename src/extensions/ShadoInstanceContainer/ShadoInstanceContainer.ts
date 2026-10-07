@@ -317,6 +317,12 @@ export class ShadoInstanceContainer<T extends ShadoActor> extends Shado {
     }
   >();
 
+  /**
+   * Meshes this container created (`attachMeshes` with `merge`), and so must
+   * dispose. A caller's own mesh (the single-mesh path) is only detached.
+   */
+  private _ownedMeshes = new Set<Mesh>();
+
   private _children: T[] = [];
   private readonly _instanceSoA: ShadoInstanceSoA;
   private readonly _visibleIndexTexture: VisibleIndexTexture;
@@ -478,9 +484,14 @@ export class ShadoInstanceContainer<T extends ShadoActor> extends Shado {
   }
 
   public override dispose() {
-    for (const binding of this._bindings.values()) {
-      for (const texture of binding.generatedTextures ?? []) texture.dispose();
-    }
+    // Every bound mesh gives back its material, textures and VAT observer, and
+    // the meshes this container merged go with it. Disposing only the textures
+    // left each merged mesh in the scene, enabled and always-active, drawing
+    // with a material whose buffers were gone: across a zone change that is a
+    // stale bind group (a validation error on D3D12) and a leak per zone.
+    for (const mesh of [...this._bindings.keys()]) this.detachMesh(mesh);
+    for (const mesh of this._ownedMeshes) if (!mesh.isDisposed()) mesh.dispose();
+    this._ownedMeshes.clear();
     this._visibleIndexTexture.dispose();
     if (this._posePaletteObserver) {
       this._posePaletteScene?.onBeforeRenderObservable.remove(this._posePaletteObserver);
@@ -628,6 +639,7 @@ export class ShadoInstanceContainer<T extends ShadoActor> extends Shado {
 
       mergeWithPreservedAtlasAttributes(meshes, mesh);
       meshes.forEach(m => m.dispose());
+      this._ownedMeshes.add(mesh);
     } else {
       mesh = meshes[0];
       // MergeMeshes would have world-baked this; the single-owner path has to.
