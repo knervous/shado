@@ -75,6 +75,59 @@ export function extrude(
     }
   }
 }
+/**
+ * GL enums of every block-compressed format Babylon uploads (S3TC/BC1-3 and
+ * their sRGB forms, BPTC/BC6H-7, ETC1, ETC2/EAC, ASTC and ASTC sRGB). Babylon
+ * keeps the equivalent list private to `TextureTools`.
+ */
+function isCompressedGLFormat(format: number): boolean {
+  return (
+    (format >= 33776 && format <= 33779) ||
+    (format >= 35916 && format <= 35919) ||
+    format === 36196 ||
+    (format >= 36492 && format <= 36495) ||
+    (format >= 37488 && format <= 37497) ||
+    (format >= 37808 && format <= 37821) ||
+    (format >= 37840 && format <= 37853)
+  );
+}
+
+function hardwareFormatOf(it: any): string {
+  const format = it?._hardwareTexture?.format;
+  return typeof format === 'string' ? format : '';
+}
+
+function isCompressedInternalTexture(it: any): boolean {
+  if (isCompressedGLFormat(Number(it?.format))) return true;
+  return /^(?:bc\d|etc2|eac|astc)/.test(hardwareFormatOf(it));
+}
+
+function isSrgbInternalTexture(it: any): boolean {
+  return it?._useSRGBBuffer === true || hardwareFormatOf(it).endsWith('-srgb');
+}
+
+let linearToSrgbTable: Uint8Array | undefined;
+
+/** Re-encodes linear 8-bit RGB (alpha untouched) to sRGB bytes in place. */
+function encodeLinearToSrgbInPlace(pixels: Uint8Array | Uint8ClampedArray, channels: number): void {
+  if (channels < 3) return;
+  if (!linearToSrgbTable) {
+    linearToSrgbTable = new Uint8Array(256);
+    for (let i = 0; i < 256; i++) {
+      const linear = i / 255;
+      const encoded = linear <= 0.0031308 ? linear * 12.92 : 1.055 * Math.pow(linear, 1 / 2.4) - 0.055;
+      linearToSrgbTable[i] = Math.round(Math.max(0, Math.min(1, encoded)) * 255);
+    }
+  }
+  const table = linearToSrgbTable;
+  const stride = Math.round(channels);
+  for (let offset = 0; offset + 2 < pixels.length; offset += stride) {
+    pixels[offset] = table[pixels[offset]];
+    pixels[offset + 1] = table[pixels[offset + 1]];
+    pixels[offset + 2] = table[pixels[offset + 2]];
+  }
+}
+
 async function readTextureToImageData(scene: Scene, tex: Texture): Promise<ImageData> {
   const it = (tex as any).getInternalTexture?.() ?? (tex as any)._texture;
   if (!it) throw new Error('Texture has no InternalTexture');
@@ -95,18 +148,28 @@ async function readTextureToImageData(scene: Scene, tex: Texture): Promise<Image
   // normalize to the atlas' RGBA8 contract.
   if (!it.is3D && !it.isCube) {
     let source: ArrayBufferView | null = null;
-    try {
-      source = (await tex.readPixels()) as ArrayBufferView | null;
-    } catch {
-      source = null;
+    // A block-compressed texture must never be read back directly. WebGPU
+    // copies the raw blocks, and for every 16-byte-block format (BC7, BC3,
+    // ETC2 RGBA8/EAC, ASTC 4x4) Babylon sizes the readback at exactly four
+    // bytes a texel — so a length check takes compressed blocks for RGBA and
+    // the atlas fills with coloured noise (top quarter) over transparent black.
+    // That was the "blue digital noise" shrubs: shared KTX2 leaf textures
+    // transcode to ETC2 RGBA on Apple GPUs and BC7 on BC-only ones.
+    const compressed = isCompressedInternalTexture(it);
+    if (!compressed) {
+      try {
+        source = (await tex.readPixels()) as ArrayBufferView | null;
+      } catch {
+        source = null;
+      }
     }
     let values = source as unknown as ArrayLike<number> | null;
     let channels = values ? values.length / Math.max(1, w * h) : 0;
-    if (channels !== 4 && channels !== 3 && channels !== 1) {
-      // Block-compressed textures (KTX2 decoded to BC7/ASTC) cannot be read
-      // back directly — the copy either throws or returns block data whose
-      // length no longer maps to pixels. They are still sampleable, so blit
-      // through a shader into an RGBA8 target and read that instead.
+    if (compressed || (channels !== 4 && channels !== 3 && channels !== 1)) {
+      // Block-compressed textures (KTX2 decoded to BC7/ASTC/ETC2) cannot be
+      // read back directly — the copy either throws or returns block data
+      // whose length no longer maps to pixels. They are still sampleable, so
+      // blit through a shader into an RGBA8 target and read that instead.
       const blit = BABYLON.TextureTools.CreateResizedCopy(tex as Texture, w, h, true);
       // A render target never fires onLoadObservable: CreateResizedCopy flips
       // its internal texture ready once the pass effect compiles and the copy
@@ -125,6 +188,13 @@ async function readTextureToImageData(scene: Scene, tex: Texture): Promise<Image
       if (!source) throw new Error('readTextureToImageData: blit readback returned no pixels');
       values = source as unknown as ArrayLike<number>;
       channels = values.length / Math.max(1, w * h);
+      // The direct path hands back the stored (sRGB-encoded) bytes. A blit
+      // samples an `*-srgb` texture through the hardware decode and stores
+      // LINEAR values in the unorm target, which darkened every blitted
+      // albedo; encode them back so both paths honour the same contract.
+      if (isSrgbInternalTexture(it) && (source instanceof Uint8Array || source instanceof Uint8ClampedArray)) {
+        encodeLinearToSrgbInPlace(source, channels);
+      }
     }
     if (values && (channels === 4 || channels === 3 || channels === 1)) {
       const pixels = values;
