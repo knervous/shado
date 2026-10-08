@@ -17,7 +17,9 @@ export type ShadoWorldRegionKind =
   | 'audio'
   | 'trigger'
   | 'fx'
-  | 'semantic';
+  | 'semantic'
+  /** Gatherable resource area: publish derives `resource_node_regions` (Eltania crafting). */
+  | 'resource';
 
 export type ShadoWorldTerrainProjection = 'world-xz' | 'triplanar' | 'hybrid';
 

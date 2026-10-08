@@ -11,7 +11,7 @@ import {
 
 const REGION_KINDS = new Set([
   'visibility-cell', 'streaming', 'water', 'lava', 'safe',
-  'pvp', 'zone-line', 'audio', 'trigger', 'fx', 'semantic',
+  'pvp', 'zone-line', 'audio', 'trigger', 'fx', 'semantic', 'resource',
 ]);
 
 const TERRAIN_PROJECTIONS = new Set(['world-xz', 'triplanar', 'hybrid']);
